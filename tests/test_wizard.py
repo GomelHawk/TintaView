@@ -211,7 +211,10 @@ def test_install_hook_script_uses_curl_exe_inside_wsl(_isolated):
 
     assert hook_bin == tv_home / "bin" / "tv-hook.sh"
     assert hook_bin.exists()
-    assert hook_bin.stat().st_mode & 0o111
+    if sys.platform != "win32":
+        # chmod is a no-op on NTFS regardless of the simulated target — install_hook_script
+        # rightly skips it when the real host (not env.platform) is Windows.
+        assert hook_bin.stat().st_mode & 0o111
     env_text = (tv_home / "hook.env").read_text()
     assert "TINTAVIEW_CURL=curl.exe" in env_text
     assert "TINTAVIEW_URL=http://127.0.0.1:8777" in env_text
