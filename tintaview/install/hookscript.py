@@ -24,12 +24,13 @@ def install_hook_script(cfg: config_mod.Config, env: Environment) -> Path:
     the Windows side with no firewall rule needed — or on native Windows, where `curl.exe`
     is simply the platform's own curl. Everywhere else it's plain `curl`.
     """
-    # `env.platform`, not `sys.platform`: in wsl-split mode this process runs on
-    # Windows but is writing the script that a WSL-side bash will invoke, so the
-    # target shell — not the host running this installer — decides the extension.
+    # `env.platform`, not `sys.platform`, decides the extension — and dest must be
+    # built from the same decision rather than delegating to hook_bin_path() (which
+    # picks by the *host's* sys.platform), or the two could disagree and this would
+    # write a `.sh` script's contents into a path named `tv-hook.cmd` or vice versa.
     hook_name = "tv-hook.cmd" if env.platform == PLATFORM_WINDOWS else "tv-hook.sh"
     src = Path(__file__).resolve().parent.parent / "hooks" / hook_name
-    dest = config_mod.hook_bin_path()
+    dest = config_mod.config_dir() / "bin" / hook_name
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
     if sys.platform != "win32":

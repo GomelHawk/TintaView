@@ -156,11 +156,11 @@ def test_full_session_lifecycle(server_engine):
     _event(server, "confirm", agent="claude", sid="s1")
     assert _wait_until(lambda: _get_state(server)["effective"] == "confirm")
     assert _wait_until(lambda: _get_state(server)["blinking"] is True)
-    # Let the (fast, 20ms-period) blink thread tick a couple of times.
-    time.sleep(0.05)
-    assert len(engine.colors) >= 2
-    assert cfg.colors.rgb("confirm") in engine.colors[-3:]
-    assert (0, 0, 0) in engine.colors[-3:]
+    # Poll for both blink halves rather than sleeping a fixed window and snapshotting:
+    # the (fast, 20ms-period) blink thread's actual wake-up latency is at the mercy of
+    # the OS scheduler, which can be surprisingly slow on loaded CI hosts.
+    assert _wait_until(lambda: cfg.colors.rgb("confirm") in engine.colors[-5:])
+    assert _wait_until(lambda: (0, 0, 0) in engine.colors[-5:])
 
     _event(server, "idle", agent="claude", sid="s1")
     assert _wait_until(lambda: _get_state(server)["effective"] == "idle")

@@ -17,6 +17,7 @@ touch a real `~/.claude`, `~/.codex` or `~/.cursor`.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,6 +87,12 @@ def _claude_settings(home: Path) -> Path:
     return home / ".claude" / "settings.json"
 
 
+def _hook_bin_name() -> str:
+    """These full-wizard runs never override platform detection, so the installed
+    hook script's extension follows the real host, same as production code."""
+    return "tv-hook.cmd" if sys.platform == "win32" else "tv-hook.sh"
+
+
 # --------------------------------------------------------------------------- full runs
 
 
@@ -110,7 +117,7 @@ def test_writes_config_matching_answers(monkeypatch, _isolated):
     settings = _claude_settings(home)
     assert HOOK_SENTINEL in settings.read_text()
 
-    hook_bin = tv_home / "bin" / "tv-hook.sh"
+    hook_bin = tv_home / "bin" / _hook_bin_name()
     assert hook_bin.exists()
     assert hook_bin.stat().st_mode & 0o111  # executable
 
@@ -186,7 +193,7 @@ def test_assume_yes_needs_no_input(monkeypatch, _isolated):
     assert cfg.enabled_agents  # at least one agent, per the same rule as interactive mode
     assert _claude_settings(home).exists()
 
-    hook_bin = tv_home / "bin" / "tv-hook.sh"
+    hook_bin = tv_home / "bin" / _hook_bin_name()
     assert hook_bin.exists()
     assert hook_bin.stat().st_mode & 0o111
     assert (tv_home / "hook.env").exists()
