@@ -1,0 +1,277 @@
+"""Codex CLI usage provider — local only, no network.
+
+Codex keeps no server-side "my usage" endpoint we can call; everything comes from
+``<home>/sessions/**/rollout-*.jsonl``, where each line is one JSON record. The ones we
+care about look like::
+
+    {"timestamp": "2026-07-24T16:08:28.664Z", "type": "event_msg",
+     "payload": {"type": "token_count",
+                 "info": {"total_token_usage": {...}, "last_token_usage": {...},
+                          "model_context_window": 258400},
+                 "rate_limits": {"limit_id": "codex", "primary": null,
+                                  "secondary": null, "credits": null, "plan_type": null}}}
+
+``rate_limits.primary``/``secondary`` carry OFFICIAL percentages on ChatGPT-plan
+sessions (fields seen in the wild: ``used_percent``, ``resets_at`` /
+``resets_in_seconds``, ``window_minutes`` — none of this is documented, so every access
+below is a defensive ``.get()``). They are ``null`` on API-key sessions (verified on
+this machine); we fall back to token totals over the shared 5h/7d windows there,
+labelled as informational (``show_pct=False``) rather than a real percentage.
+
+Performance: this may run over a slow Windows UNC path (the WSL split). Two rules to
+keep a poll fast:
+  1. Only look at files whose mtime is within the last 7 days.
+  2. Read each candidate file from the END, not front-to-back — the newest
+     ``token_count`` record is always near the tail because these files are
+     append-only. ``_latest_record_in_file`` grows the tail read geometrically only
+     as far as it needs to find one.
+
+The schema is undocumented and has changed across Codex versions; this module must
+never raise — an unrecognised shape degrades to an ``UsageResult`` with a clear
+``error`` instead.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import logging
+import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from tintaview.core.config import AgentConfig, expand
+
+from ..model import UsageProvider, UsageResult, UsageRow
+
+log = logging.getLogger(__name__)
+
+_MAX_AGE_DAYS = 7
+# Give up on a single file past this many tail bytes rather than read the whole thing —
+# this is the fallback informational path, not worth an unbounded scan of a huge log.
+_MAX_TAIL_BYTES = 16 * 1024 * 1024
+_TAIL_CHUNK = 64 * 1024
+
+
+# --------------------------------------------------------------------------- paths
+
+
+def _default_home() -> Path:
+    return Path.home() / ".codex"
+
+
+def _resolve_home(agent_config: AgentConfig) -> Path:
+    return expand(agent_config.home) if agent_config.home else _default_home()
+
+
+def _iter_recent_session_files(home: Path, max_age_days: int = _MAX_AGE_DAYS) -> list[Path]:
+    pattern = str(home / "sessions" / "**" / "rollout-*.jsonl")
+    cutoff = time.time() - max_age_days * 86400
+    out: list[Path] = []
+    for raw in glob.glob(pattern, recursive=True):
+        p = Path(raw)
+        try:
+            if p.stat().st_mtime >= cutoff:
+                out.append(p)
+        except OSError:
+            continue  # vanished between glob and stat — not fatal, just skip it
+    return out
+
+
+# --------------------------------------------------------------------------- tail scan
+
+
+def _is_token_count_record(rec: Any) -> bool:
+    return (
+        isinstance(rec, dict)
+        and rec.get("type") == "event_msg"
+        and isinstance(rec.get("payload"), dict)
+        and rec["payload"].get("type") == "token_count"
+    )
+
+
+def _latest_record_in_file(path: Path) -> dict[str, Any] | None:
+    """Return the most recent `token_count` event_msg record in one rollout file,
+    reading from the end in growing chunks instead of parsing the whole file.
+
+    A session can run long enough to produce a large file, so a single small tail read
+    is not always enough (the last few lines might be unrelated housekeeping events) —
+    this doubles the read size until it finds a match, hits the whole file, or hits
+    `_MAX_TAIL_BYTES`.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+
+    chunk = _TAIL_CHUNK
+    with open(path, "rb") as f:
+        while True:
+            read = min(chunk, size)
+            f.seek(size - read)
+            data = f.read(read)
+            text = data.decode("utf-8", errors="ignore")
+            lines = text.split("\n")
+            if read < size:
+                # The first line of a partial tail is very likely cut mid-record —
+                # drop it rather than risk json.loads on a truncated line.
+                lines = lines[1:]
+            for line in reversed(lines):
+                line = line.strip()
+                if not line or '"token_count"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if _is_token_count_record(rec):
+                    return rec
+            if read >= size or read >= _MAX_TAIL_BYTES:
+                return None
+            chunk *= 2
+
+
+def _parse_ts(ts: Any) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------- rows
+
+
+def _fmt_reset(resets_at: Any = None, resets_in_seconds: Any = None) -> str:
+    """Same wording as the Claude provider's reset formatting, but Codex's rate-limit
+    windows have been observed to carry either an absolute `resets_at` or a relative
+    `resets_in_seconds` — accept either."""
+    now = datetime.now(UTC)
+    if resets_at:
+        try:
+            dt = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+        except ValueError:
+            return str(resets_at)
+    elif resets_in_seconds is not None:
+        try:
+            dt = now + timedelta(seconds=float(resets_in_seconds))
+        except (TypeError, ValueError):
+            return ""
+    else:
+        return ""
+    secs = int((dt - now).total_seconds())
+    if secs <= 0:
+        return "Resets now"
+    if secs < 86400:
+        h, rem = divmod(secs, 3600)
+        m, _ = divmod(rem, 60)
+        return f"Resets in {h} hr {m} min" if h else f"Resets in {m} min"
+    local = dt.astimezone()
+    weekday = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][local.weekday()]
+    hour12 = local.hour % 12 or 12
+    ampm = "AM" if local.hour < 12 else "PM"
+    return f"Resets {weekday} {hour12}:{local.minute:02d} {ampm}"
+
+
+def _pct_row(label: str, window: dict[str, Any]) -> UsageRow:
+    # GUESSED field names (undocumented API): `used_percent`, `resets_at`,
+    # `resets_in_seconds`. `window_minutes` is also seen but unused here. Severity
+    # thresholds (75% / 90%) are our own choice — Codex's payload doesn't provide one.
+    pct = window.get("used_percent")
+    right = _fmt_reset(window.get("resets_at"), window.get("resets_in_seconds"))
+    if pct is None:
+        return UsageRow(label=label, pct=0.0, right=right, show_pct=False, severity="normal", kind="info")
+    severity = "critical" if pct >= 90 else "warning" if pct >= 75 else "normal"
+    return UsageRow(label=label, pct=float(pct), right=right, show_pct=True, severity=severity, kind="limit")
+
+
+def _empty_totals() -> dict[str, int]:
+    return {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0, "reasoning_output": 0, "total": 0}
+
+
+def _accumulate(acc: dict[str, int], totals: dict[str, Any]) -> None:
+    acc["input"] += int(totals.get("input_tokens") or 0)
+    acc["cached_input"] += int(totals.get("cached_input_tokens") or 0)
+    acc["cache_write"] += int(totals.get("cache_write_input_tokens") or 0)
+    acc["output"] += int(totals.get("output_tokens") or 0)
+    acc["reasoning_output"] += int(totals.get("reasoning_output_tokens") or 0)
+    acc["total"] += int(totals.get("total_tokens") or 0)
+
+
+def _total_row(label: str, acc: dict[str, int]) -> UsageRow:
+    total = acc["total"] or (acc["input"] + acc["output"])
+    right = f"{total / 1e6:.2f}M tokens" if total >= 1_000_000 else f"{total / 1e3:.0f}k tokens"
+    return UsageRow(label=label, pct=0.0, right=right, show_pct=False, severity="normal", kind="info")
+
+
+# --------------------------------------------------------------------------- provider
+
+
+class CodexUsageProvider(UsageProvider):
+    key = "codex"
+
+    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0) -> UsageResult:
+        try:
+            return self._fetch(agent_config)
+        except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
+            log.exception("codex usage provider failed unexpectedly")
+            return UsageResult(agent=self.key, error=f"Codex usage unavailable: {e!r}")
+
+    def _fetch(self, agent_config: AgentConfig) -> UsageResult:
+        home = _resolve_home(agent_config)
+        files = _iter_recent_session_files(home)
+        if not files:
+            return UsageResult(agent=self.key, error="No recent Codex session files found.")
+
+        now = datetime.now(UTC)
+        cutoffs = {"5h": now - timedelta(hours=5), "7d": now - timedelta(days=7)}
+        window_totals = {"5h": _empty_totals(), "7d": _empty_totals()}
+
+        latest_record: dict[str, Any] | None = None
+        latest_ts: datetime | None = None
+
+        for path in files:
+            record = _latest_record_in_file(path)
+            if record is None:
+                continue
+            ts = _parse_ts(record.get("timestamp"))
+            if ts is None:
+                continue
+            if latest_ts is None or ts > latest_ts:
+                latest_ts = ts
+                latest_record = record
+            # Codex's total_token_usage is cumulative for the whole session, so the
+            # latest record per file already IS that session's running total — bucket
+            # it into a window if the session was active within it.
+            payload = record.get("payload") or {}
+            info = payload.get("info") or {}
+            totals = info.get("total_token_usage") or {}
+            for label, cutoff in cutoffs.items():
+                if ts >= cutoff:
+                    _accumulate(window_totals[label], totals)
+
+        if latest_record is None:
+            return UsageResult(agent=self.key, error="No Codex token-usage records found in recent sessions.")
+
+        payload = latest_record.get("payload") or {}
+        rate_limits = payload.get("rate_limits") or {}
+        primary = rate_limits.get("primary")
+        secondary = rate_limits.get("secondary")
+
+        if primary or secondary:
+            rows = []
+            if primary:
+                rows.append(_pct_row("5-hour limit", primary))
+            if secondary:
+                rows.append(_pct_row("Weekly", secondary))
+            if rows:
+                return UsageResult(agent=self.key, rows=rows, header="Codex usage limits", source="official")
+
+        # No official percentages available on this session (typically API-key auth,
+        # verified null on this machine) — informational token totals instead.
+        rows = [_total_row("Last 5 hours", window_totals["5h"]), _total_row("Last 7 days", window_totals["7d"])]
+        return UsageResult(agent=self.key, rows=rows, header="Codex usage — token totals", source="activity")

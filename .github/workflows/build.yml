@@ -1,0 +1,83 @@
+name: Build Windows installer
+
+# Builds TintaView-Setup-<version>.exe (PyInstaller onedir -> Inno Setup) and attaches it,
+# packaging/install.sh, and a SHA256SUMS.txt to the GitHub Release for a `vX.Y.Z` tag.
+# `workflow_dispatch` runs the same build without a tag, for a downloadable sanity-check
+# artifact — see docs/PLAN.md §8.3/§8.5. Linux and macOS have no compiled artifact; they
+# install/update via packaging/install.sh directly, so there is nothing to build for them.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # needed to attach files to the Release on a tag push
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          set -eu
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install TintaView and build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[ui]" pyinstaller
+
+      - name: Build the app (PyInstaller, onedir)
+        run: pyinstaller packaging/windows/tintaview.spec
+
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          # windows-latest ships Inno Setup 6 preinstalled at this path (see
+          # actions/runner-images); choco is only a fallback in case that ever changes.
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Inno Setup not found at the default path; installing via choco"
+            choco install innosetup -y --no-progress | Out-Null
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "ISCC.exe not found even after installing Inno Setup"
+          }
+          & $iscc "packaging\windows\tintaview.iss" "/DMyAppVersion=${{ steps.version.outputs.version }}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "ISCC failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Stage release files and compute checksums
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p dist/release
+          cp "dist/installer/TintaView-Setup-${{ steps.version.outputs.version }}.exe" dist/release/
+          cp packaging/install.sh dist/release/
+          ( cd dist/release && sha256sum * > SHA256SUMS.txt )
+          cat dist/release/SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tintaview-windows-${{ steps.version.outputs.version }}
+          path: dist/release/*
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/release/*

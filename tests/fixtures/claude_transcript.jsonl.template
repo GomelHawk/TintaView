@@ -1,0 +1,4 @@
+{"timestamp": "__TS_RECENT__", "message": {"model": "claude-sonnet-5-20250219", "usage": {"input_tokens": 400000, "output_tokens": 200000, "cache_read_input_tokens": 100000, "cache_creation_input_tokens": 20000}}}
+{"timestamp": "__TS_MID_WEEK__", "message": {"model": "claude-sonnet-5-20250219", "usage": {"input_tokens": 400000, "output_tokens": 200000, "cache_read_input_tokens": 100000, "cache_creation_input_tokens": 20000}}}
+{"timestamp": "__TS_OLD__", "message": {"model": "claude-sonnet-5-20250219", "usage": {"input_tokens": 400000, "output_tokens": 200000, "cache_read_input_tokens": 100000, "cache_creation_input_tokens": 20000}}}
+{"timestamp": "__TS_RECENT__", "message": {"role": "assistant"}}
