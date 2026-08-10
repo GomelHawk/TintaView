@@ -109,14 +109,14 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "setup"; \
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  { Inno only ever deletes the files/shortcuts it tracked from [Files]/[Icons] above, and
-    only removes {app} itself if it ends up empty — config.toml, hook.env, bin\tv-hook.cmd
-    and logs\ all live under {app} too (see tintaview.core.config.config_dir(), which
-    resolves to this same %LOCALAPPDATA%\TintaView folder) but were written by the app at
-    runtime, not by this installer, so none of that is ever a target of the uninstall.
-    This message just makes that explicit, and reminds the user their agents still have
-    hooks pointed at a TintaView that's no longer running — which is harmless (tv-hook.cmd
-    fire-and-forgets a 1-second HTTP call and always exits 0) but worth cleaning up. }
+  (* Inno only ever deletes the files/shortcuts it tracked from [Files]/[Icons] above, and
+     only removes {app} itself if it ends up empty — config.toml, hook.env, bin\tv-hook.cmd
+     and logs\ all live under {app} too (see tintaview.core.config.config_dir(), which
+     resolves to this same %LOCALAPPDATA%\TintaView folder) but were written by the app at
+     runtime, not by this installer, so none of that is ever a target of the uninstall.
+     This message just makes that explicit, and reminds the user their agents still have
+     hooks pointed at a TintaView that's no longer running — which is harmless (tv-hook.cmd
+     fire-and-forgets a 1-second HTTP call and always exits 0) but worth cleaning up. *)
   if CurUninstallStep = usPostUninstall then
   begin
     MsgBox(
