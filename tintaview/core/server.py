@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -142,6 +143,14 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+class _StatusHTTPServer(ThreadingHTTPServer):
+    # HTTPServer defaults this on, but on Windows SO_REUSEADDR lets bind() succeed
+    # against a port another process is still actively listening on — unlike POSIX,
+    # where it only affects sockets stuck in TIME_WAIT. That would silently defeat
+    # start()'s "is another instance already running" check below.
+    allow_reuse_address = sys.platform != "win32"
+
+
 class StatusServer:
     """Owns the HTTP server, the state store, the controller, the stall detector and
     the watchdog thread. Embeddable in-process by the tray/CLI, or run headless.
@@ -158,7 +167,7 @@ class StatusServer:
         self.controller = controller if controller is not None else LightController(cfg)
         self._stall = StallDetector(self._on_stall)
 
-        self._httpd: ThreadingHTTPServer | None = None
+        self._httpd: _StatusHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
@@ -172,7 +181,7 @@ class StatusServer:
         not a failure to report loudly.
         """
         try:
-            httpd = ThreadingHTTPServer((self._cfg.server.host, self._cfg.server.port), _Handler)
+            httpd = _StatusHTTPServer((self._cfg.server.host, self._cfg.server.port), _Handler)
         except OSError as exc:
             log.info(
                 "port %s:%s already in use — assuming another instance owns it (%r)",

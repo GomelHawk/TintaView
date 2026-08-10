@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import socket
 import stat
+import sys
 
 import pytest
 
@@ -35,6 +36,10 @@ def _free_port() -> int:
 def _isolated_env(tmp_path, monkeypatch):
     """No test may touch the real user's ~/.tintaview, ~/.claude, ~/.codex, ~/.cursor."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # pathlib.Path.home() on Windows reads USERPROFILE, not HOME — without this, the
+    # agent adapters' default_home() (~/.claude etc.) escapes this sandbox into the
+    # real CI runner's profile whenever this suite actually runs on a Windows host.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path / "home" / ".tintaview"))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
@@ -134,6 +139,10 @@ def test_missing_hook_script_is_fail_naming_the_fix(capsys):
     assert "tintaview hooks install --agent all" in out
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="NTFS has no POSIX exec bit; doctor deliberately skips this check on Windows",
+)
 def test_hook_script_not_executable_is_fail(capsys):
     _write_config(enabled_agents=[])
     path = config_mod.hook_bin_path()

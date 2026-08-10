@@ -229,9 +229,11 @@ def test_state_does_not_reset_watchdog_timer(server_engine):
     _event(server, "session-start", agent="claude", sid="s1")
     assert _wait_until(lambda: not server.state.empty())
 
-    time.sleep(0.05)
+    time.sleep(0.1)
     before = server.state.idle_seconds()
-    assert before >= 0.05
+    # Loose lower bound, not ~0.1: Windows CI runners' sleep()/clock granularity can
+    # undershoot a tight one by a few ms even though nothing is actually wrong.
+    assert before >= 0.08
 
     # Polling /state repeatedly must NOT touch the watchdog's last-event timestamp —
     # otherwise the tray polling it would keep a dead agent's lights on forever.

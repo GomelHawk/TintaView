@@ -267,7 +267,11 @@ def status(
                         if isinstance(entries, list) and any(_is_ours(e) for e in entries)}
     if not set(expected) <= installed_events:
         return STATUS_PARTIAL
-    if not any(str(hook_bin) in json.dumps(e) for e in ours):
+    # Compare escaped-to-escaped: a bare str(hook_bin) substring check breaks whenever
+    # the path contains a backslash (any Windows path), since json.dumps() below doubles
+    # each one — a raw path never appears verbatim inside its own escaped JSON rendering.
+    needle = json.dumps(str(hook_bin))[1:-1]
+    if not any(needle in json.dumps(e) for e in ours):
         return STATUS_STALE_PATH
     return STATUS_INSTALLED
 

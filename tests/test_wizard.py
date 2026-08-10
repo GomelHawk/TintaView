@@ -38,6 +38,10 @@ def _isolated(tmp_path, monkeypatch):
     home.mkdir()
     tv_home = tmp_path / "tvhome"
     monkeypatch.setenv("HOME", str(home))
+    # pathlib.Path.home() on Windows reads USERPROFILE, not HOME — without this the
+    # Claude/Codex/Cursor adapters' default_home() escapes this sandbox into the real
+    # CI runner's profile whenever this suite actually runs on a Windows host.
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("TINTAVIEW_HOME", str(tv_home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)

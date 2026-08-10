@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from ..core import config as config_mod
-from .detect import PLATFORM_WSL, Environment
+from .detect import PLATFORM_WINDOWS, PLATFORM_WSL, Environment
 
 
 def install_hook_script(cfg: config_mod.Config, env: Environment) -> Path:
@@ -24,7 +24,10 @@ def install_hook_script(cfg: config_mod.Config, env: Environment) -> Path:
     the Windows side with no firewall rule needed — or on native Windows, where `curl.exe`
     is simply the platform's own curl. Everywhere else it's plain `curl`.
     """
-    hook_name = "tv-hook.cmd" if sys.platform == "win32" else "tv-hook.sh"
+    # `env.platform`, not `sys.platform`: in wsl-split mode this process runs on
+    # Windows but is writing the script that a WSL-side bash will invoke, so the
+    # target shell — not the host running this installer — decides the extension.
+    hook_name = "tv-hook.cmd" if env.platform == PLATFORM_WINDOWS else "tv-hook.sh"
     src = Path(__file__).resolve().parent.parent / "hooks" / hook_name
     dest = config_mod.hook_bin_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -32,7 +35,7 @@ def install_hook_script(cfg: config_mod.Config, env: Environment) -> Path:
     if sys.platform != "win32":
         dest.chmod(dest.stat().st_mode | 0o111)
 
-    curl = "curl.exe" if (sys.platform == "win32" or env.platform == PLATFORM_WSL) else "curl"
+    curl = "curl.exe" if env.platform in (PLATFORM_WINDOWS, PLATFORM_WSL) else "curl"
     url = f"http://{cfg.server.host}:{cfg.server.port}"
     env_path = config_mod.hook_env_path()
     env_path.parent.mkdir(parents=True, exist_ok=True)

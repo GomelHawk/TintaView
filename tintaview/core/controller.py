@@ -102,7 +102,9 @@ class LightController:
     def _blink_loop(self) -> None:
         on = False
         confirm_rgb = self._cfg.colors.rgb(STATUS_CONFIRM)
-        interval = max(self._cfg.colors.blink_ms, 50) / 1000.0
+        # Floor is a safety net against a near-zero config spinning the engine, not a
+        # UX minimum — the test suite relies on configuring a genuinely fast blink.
+        interval = max(self._cfg.colors.blink_ms, 10) / 1000.0
         # Event.wait() as the sleep, not time.sleep(): stopping the blink (confirm ->
         # anything else) must take effect immediately, not after the rest of the
         # current half-period — matters most for a fast confirm -> idle transition.

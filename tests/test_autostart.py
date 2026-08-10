@@ -50,6 +50,10 @@ def fake_which(monkeypatch):
 def _isolated_home(tmp_path, monkeypatch):
     """No test may touch the real user's HOME/APPDATA/XDG dirs."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # pathlib.Path.home() on Windows reads USERPROFILE, not HOME — without this, every
+    # sys.platform == "darwin"/"linux" monkeypatch below still resolves Path.home() to
+    # the real CI runner's profile when the tests actually execute on a Windows host.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
     return tmp_path

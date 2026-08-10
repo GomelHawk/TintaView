@@ -137,7 +137,8 @@ def test_reinstall_replaces_rather_than_duplicates(cfg_file: Path):
     data = _apply(H.plan_install(adapter, moved))
     entries = data["hooks"]["SessionStart"]
     assert len(entries) == 1, "reinstall must replace our entry, not stack a second one"
-    assert str(moved) in json.dumps(entries)
+    commands = [h["command"] for entry in entries for h in entry["hooks"]]
+    assert any(str(moved) in command for command in commands)
 
 
 def test_uninstall_removes_only_ours(cfg_file: Path):
