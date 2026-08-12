@@ -1,8 +1,8 @@
 """The HTTP status broker — the hook ingress, `/state` for the tray, and the watchdog.
 
-Ports `razer_light_server.py`'s handler, watchdog and blink-loop pattern onto the new
-`(agent, sid)` state model. The non-obvious constraints below are carried over from
-that server on purpose; see its comments for the incidents that put them there.
+The handler, watchdog and blink loop all hang off one `(agent, sid)` state model. The
+non-obvious constraints commented below are deliberate — each one is there because of a
+real failure mode, not as defensive habit; don't "simplify" them away.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,8 +39,8 @@ from .state import StateStore
 
 log = logging.getLogger(__name__)
 
-#: The old `hook.sh` and every legacy alias never sent an `agent=` query param —
-#: they predate multi-agent support entirely — so they're all folded onto "claude".
+#: The agent-less aliases carry no `agent=` query param, so they all fold onto the
+#: agent most people are running: a bare `curl .../working?sid=x` means Claude Code.
 DEFAULT_AGENT = "claude"
 
 #: Fallback session id when a request omits `sid` outright (shouldn't happen from a
@@ -126,10 +127,9 @@ class _Handler(BaseHTTPRequestHandler):
 
         legacy_event = path.lstrip("/")
         if legacy_event in LEGACY_EVENTS:
-            # Back-compat: the old claude_code_razer_lights hook.sh only ever knew
-            # about `/idle`, `/working`, ... with a bare `sid` — no `agent=`. Defaulting
-            # it to "claude" lets that install keep working, unmodified, against this
-            # server (docs/PLAN.md §11: migration can be incremental).
+            # A caller that hits `/idle`, `/working`, ... with a bare `sid` and no
+            # `agent=` gets defaulted to "claude", so a hand-written hook script stays
+            # a one-line curl without having to know about the multi-agent query API.
             sid = _first(query, "sid", DEFAULT_SID)
             self._write_ack()
             status_server.handle_event(legacy_event, DEFAULT_AGENT, sid, "")
@@ -149,6 +149,30 @@ class _StatusHTTPServer(ThreadingHTTPServer):
     # where it only affects sockets stuck in TIME_WAIT. That would silently defeat
     # start()'s "is another instance already running" check below.
     allow_reuse_address = sys.platform != "win32"
+
+
+def _is_tintaview_listening(host: str, port: int, timeout: float = 1.5) -> bool:
+    """Is the program holding `host:port` a TintaView daemon?
+
+    Same test `doctor` applies to the DAEMON check, kept deliberately narrow: only a
+    parseable JSON body carrying an ``ok`` key counts. Anything else — a plain-text
+    reply, an HTML error page, a connection that opens and says nothing — is some other
+    program, and start() must say so rather than exit quietly. Never raises; an
+    unreachable or unparseable port simply means "not TintaView".
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=timeout) as resp:
+            raw = resp.read()
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(payload, dict) and "ok" in payload
 
 
 class StatusServer:
@@ -175,20 +199,31 @@ class StatusServer:
     # --- lifecycle ------------------------------------------------------------
 
     def start(self) -> bool:
-        """Bind and start serving. Returns False (never raises) if the port is taken —
-        that means another TintaView instance already owns it, which is a normal
-        outcome (e.g. the tray and a stray headless daemon both starting at login),
-        not a failure to report loudly.
+        """Bind and start serving. Returns False (never raises) if the port is taken.
+
+        A taken port has two very different causes and they must not be reported the
+        same way. Another TintaView owning it is routine — the tray and a stray headless
+        daemon both starting at login — and deserves nothing louder than an INFO. A
+        *different* program squatting on the port is a dead end: TintaView exits, no tray
+        icon ever appears, and the user is left with no explanation at all. So the port
+        is probed before assuming anything, and a stranger is logged as an ERROR that
+        names the fix.
         """
         try:
             httpd = _StatusHTTPServer((self._cfg.server.host, self._cfg.server.port), _Handler)
         except OSError as exc:
-            log.info(
-                "port %s:%s already in use — assuming another instance owns it (%r)",
-                self._cfg.server.host,
-                self._cfg.server.port,
-                exc,
-            )
+            host, port = self._cfg.server.host, self._cfg.server.port
+            if _is_tintaview_listening(host, port):
+                log.info("port %s:%s already in use by another TintaView instance — "
+                         "leaving it to serve (%r)", host, port, exc)
+            else:
+                log.error(
+                    "port %s:%s is held by something that is not TintaView, so it cannot "
+                    "start and no tray icon will appear. Free that port, or set "
+                    "`server.port` in config.toml to an unused one and start TintaView "
+                    "again. Run `tintaview doctor` to confirm. (%r)",
+                    host, port, exc,
+                )
             return False
 
         httpd.daemon_threads = True
@@ -245,6 +280,18 @@ class StatusServer:
         hammer the lighting SDK with redundant, identical colours.
         """
         del tool  # not needed for status tracking; kept for future per-tool logging
+
+        # `agents.enabled` has to be enforced *here*, not only where hooks are installed.
+        # Unticking an agent in the wizard stops TintaView managing its hooks, but any
+        # entry already sitting in that agent's config file keeps firing — installed by an
+        # earlier run, by hand, or in a project-scoped file the user forgot about. Without
+        # this guard a "disabled" agent still drives the lighting, which is precisely the
+        # thing the user turned off. Dropping the event here also keeps it out of /state,
+        # so the tray and the flyout agree with the config too.
+        if not self._cfg.is_enabled(agent):
+            log.debug("ignoring %s event for disabled agent %r (session %s)", event, agent, sid)
+            return
+
         try:
             # Any event for a session is a sign of life — see StallDetector's
             # docstring for why this must disarm regardless of which event it is.
@@ -306,13 +353,18 @@ class StatusServer:
         payload["blinking"] = self.controller.blinking
         payload["engine"] = self.controller.engine_status()
         payload["version"] = __version__
+        # So the wizard can restart *this* instance after writing a new config, without
+        # guessing which of the machine's python processes is the tray. Only ever served
+        # on the loopback interface, and a local process could drive the lights through
+        # the hook endpoints anyway, so this exposes nothing new.
+        payload["pid"] = os.getpid()
         return payload
 
     # --- watchdog ------------------------------------------------------------------
 
     def _watchdog_loop(self) -> None:
         """Force-release the lights if no hook has fired in `watchdog_timeout`
-        seconds — the case the old server called out explicitly: an agent that
+        seconds — the case this exists for: an agent that
         crashed or was killed without ever sending its SessionEnd hook.
         """
         poll = _watchdog_poll_seconds(self._cfg.server.watchdog_timeout)

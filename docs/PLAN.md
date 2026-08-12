@@ -3,7 +3,7 @@
 > Universal agent-status lighting + usage tray for **Claude Code**, **Codex CLI** and **Cursor**,
 > driving **Razer Chroma** or **OpenRGB** devices on **Windows / WSL / Linux / macOS**.
 >
-> Successor to `claude_code_razer_lights`. Status: plan approved, not yet implemented.
+> Status: plan approved, not yet implemented.
 
 ---
 
@@ -11,20 +11,21 @@
 
 | Decision | Choice |
 | --- | --- |
-| Audience | Me + colleagues / small team. **No code signing for now** — SmartScreen warning is acceptable and documented. |
-| Packaging | **Windows: real `Setup.exe`** (PyInstaller + Inno Setup). **Linux/macOS: `install.sh`.** |
+| Audience | Me + colleagues / small team. **No code signing** — the packaging is chosen so that no signature is needed at all (see Packaging). |
+| Packaging | **A wheel installed into a private venv, on every platform.** Windows: `install.ps1`, run as `irm … \| iex`; Linux/macOS: `install.sh`. **No compiled bundle and no `.exe` installer** — see §8.3, this is not a preference but a hard requirement of Smart App Control. |
+| Autostart | **One per-user entry per platform, never a Scheduled Task**: HKCU `Run` value (Windows — *not* a Startup-folder shortcut, which Windows 11 blocks), systemd `--user` unit + XDG autostart (Linux), launchd agent (macOS). |
 | Hook install | **Auto-merge, with a per-agent before/after diff and explicit confirmation.** Manual copy-paste snippet stays as a fallback. |
 | Engines | **Both Chroma and OpenRGB. Chroma is the default** when reachable; auto-detect order `chroma → openrgb → status-only`. |
 | Tray icon | **Single whole-icon state.** No per-agent ray splitting / zone splitting — a user watches one agent at a time. |
 | Cursor stats | **Local session token** from `state.vscdb` → Cursor Connect RPC (see §6.3). |
-| Language / stack | Python 3.11+, PySide6 (Qt) tray, stdlib HTTP server. Same as the old project. |
+| Language / stack | Python 3.11+, PySide6 (Qt) tray, stdlib HTTP server. |
 | Work split | Mechanical implementation (scaffolding, boilerplate, packaging config, straightforward parsers/tests) goes to **Sonnet subagents**; design-sensitive logic stays in the main thread — see §10. |
 
 ## 1. Scope
 
-**In scope (v1):** three agents; two lighting engines + status-only; one-process daemon+tray; usage/stats panel per agent; guided installer with agent/engine/path selection; automated hook installation with diff; WSL split install; self-update; Windows installer + POSIX install script.
+**In scope (v1):** three agents; two lighting engines + status-only; one-process daemon+tray; usage/stats panel per agent; guided installer with agent/engine/path selection; automated hook installation with diff; WSL split install; self-update; an install script per platform.
 
-**Non-goals (v1):** lighting effects beyond solid/blink; per-agent colors or device zoning; multi-machine / remote status; mobile; team dashboards; code signing / notarization; Windows Store / winget / Homebrew distribution.
+**Non-goals (v1):** lighting effects beyond solid/blink; per-agent colors or device zoning; multi-machine / remote status; mobile; team dashboards; code signing / notarization; PyPI, Windows Store, winget or Homebrew distribution.
 
 ---
 
@@ -32,7 +33,7 @@
 
 ### 2.1 Process model — one process, not two
 
-The old design (server exe + tray exe + Scheduled Task + Startup shortcut) is the biggest source of install pain. TintaView is **one executable**:
+A split design (a background service plus a separate tray process, with an autostart entry each) is the biggest source of install pain. TintaView is **one process**:
 
 ```
 tintaview            → tray UI + status broker in-process (default)
@@ -65,7 +66,7 @@ Colour priority is unchanged and global: `confirm > working > idle > none`.
 | `GET` | `/state` | Read-only status for the tray (**never** touches `last_ping` — that would defeat the watchdog) |
 | `GET` | `/healthz` | Liveness for `doctor` |
 
-Back-compat aliases `/{session-start,session-end,working,idle,confirm}` default to `agent=claude`, so the **old `hook.sh` keeps working** during migration.
+Agent-less aliases `/{session-start,session-end,working,idle,confirm}` default to `agent=claude`, so a hand-written hook script stays a one-line `curl` without needing the multi-agent query API.
 
 `/state` response:
 
@@ -80,7 +81,7 @@ Back-compat aliases `/{session-start,session-end,working,idle,confirm}` default 
 }
 ```
 
-Hook ingress must **acknowledge before doing any lighting I/O** (as the old server already does) so a slow Chroma/OpenRGB call can never stall an agent.
+Hook ingress must **acknowledge before doing any lighting I/O** so a slow Chroma/OpenRGB call can never stall an agent.
 
 ### 2.4 Config
 
@@ -149,8 +150,8 @@ tintaview/
   install/   detect.py  hooks.py  diff.py  autostart_{win,linux,mac}.py  wsl.py  doctor.py  update.py
   hooks/     tv-hook.sh  tv-hook.cmd
 assets/      icon.png  full_logo.png  transparent.png  generated/{ico,icns,png sizes}
-packaging/   windows/tintaview.iss  install.sh  tintaview.desktop
-docs/        PLAN.md  README.md  TROUBLESHOOTING.md  MIGRATION.md
+packaging/   install.ps1  install.sh  tintaview.desktop
+docs/        PLAN.md  README.md  TROUBLESHOOTING.md
 tests/
 ```
 
@@ -158,7 +159,7 @@ tests/
 
 ## 3. Lighting engines
 
-Interface (per the old `OPENRGB_BACKEND_PLAN.md`, extended):
+Interface:
 
 ```python
 class LightingEngine(Protocol):
@@ -172,7 +173,7 @@ class LightingEngine(Protocol):
     def active(self) -> bool: ...
 ```
 
-**`ChromaBackend` (default).** Port the existing code verbatim: POST to open, PUT `/heartbeat` every 4 s, PUT per device with **BGR** packing, DELETE to close. Keep the `init_cooldown` back-off. Release is automatic — Synapse takes back over on DELETE.
+**`ChromaBackend` (default).** POST to open, PUT `/heartbeat` every 4 s, PUT per device with **BGR** packing, DELETE to close. Keep the `init_cooldown` back-off. Release is automatic — Synapse takes back over on DELETE.
 
 **`OpenRGBBackend`.** `openrgb-python` against the SDK server on `127.0.0.1:6742`. **RGB, not BGR.** Three things Chroma does for free that must be implemented here:
 
@@ -328,13 +329,13 @@ Reuse the existing Qt flyout painting. Changes:
 
 ### 8.1 One wizard, three entry points
 
-The wizard is Python and is invoked identically by `Setup.exe`, `install.sh`, and `tintaview setup --reconfigure` — one code path to keep correct.
+The wizard is Python and is invoked identically by `install.ps1`, `install.sh`, and `tintaview setup --reconfigure` — one code path to keep correct.
 
 1. **Platform** — auto-detect `windows` / `windows+wsl` / `linux` / `macos`, with `--platform` override when detection is wrong.
 2. **Agents** — probe `~/.claude`, `~/.codex`, `~/.cursor` and `PATH`; checkbox list pre-ticked by what's found; **at least one required**.
 3. **Engine** — probe Chroma and OpenRGB, show each as detected / not running / unsupported; status-only always offered. Default = Chroma when reachable.
 4. **Install path** — defaults `%LOCALAPPDATA%\TintaView`, `~/.local/share/tintaview`, `/Applications`.
-5. **Autostart** — Startup shortcut / systemd `--user` unit / launchd agent. No admin, no Scheduled Task.
+5. **Autostart** — HKCU `Run` value / systemd `--user` unit / launchd agent. No admin, no Scheduled Task.
 6. **Hooks** — per agent, per scope, with the diff + confirm from §5.4.
 7. **Verify** — run `doctor`, then a live check: *"start a session in your agent now"* and show events arriving in real time. This is what turns a technically-correct install into one a non-technical user trusts.
 
@@ -345,27 +346,67 @@ Daemon + tray on **Windows**; hooks in **WSL**. The installer:
 - enumerates distros via `wsl.exe -l -q` and lets the user pick;
 - installs `tv-hook` + `hook.env` **inside** the distro and patches the in-WSL agent configs over `wsl.exe -d <distro> -- …`;
 - writes UNC paths into the Windows-side config (`\\wsl.localhost\<distro>\home\<user>\.claude`, `…/.codex`);
-- keeps the **`curl.exe` trick** from the old `hook.sh`: called from WSL it runs in the *Windows* network namespace, so `127.0.0.1:8777` reaches the daemon with **no firewall rule and no mirrored-networking requirement**.
+- uses the **`curl.exe` trick**: called from WSL, `curl.exe` runs in the *Windows* network namespace, so `127.0.0.1:8777` reaches the daemon with **no firewall rule and no mirrored-networking requirement**.
 
 The user never opens a WSL terminal.
 
 ### 8.3 Packaging
 
-- **Windows:** PyInstaller `onedir` → Inno Setup `TintaView-Setup-x.y.z.exe`, silent-install capable (`/SILENT`) so updates are one click. Unsigned → document the SmartScreen "More info → Run anyway" step.
+One artifact for every platform: a pure-Python **wheel**, installed into a private virtual
+environment under the install prefix. No compiled bundle exists.
+
+- **Windows:** `packaging/install.ps1` (`irm … | iex`) — finds a Python ≥3.11, creates
+  `<prefix>\venv`, pip-installs the wheel with the `[ui]` extra, writes a Start Menu
+  shortcut and the autostart entry, then launches the wizard.
 - **Linux:** `install.sh` — private venv under the install path, `.desktop` entry, systemd `--user` unit, hooks.
 - **macOS:** `install.sh` — same, launchd agent. Status-only in practice (no lighting on macOS).
+
+**Why no `.exe`, and why not even a frozen bundle.** Windows runs two independent
+defences against unsigned software, and they need different answers:
+
+1. **Mark-of-the-Web.** Browsers tag downloads with a `Zone.Identifier` stream; that tag
+   is what makes Edge/Chrome block an unsigned installer on reputation, and what makes
+   SmartScreen show "Windows protected your PC" on launch. Nothing PowerShell downloads
+   goes through the Attachment Execution Service, so no tag is written and neither check
+   fires. The trap to avoid: telling users to download a `.zip` and extract it by hand
+   does *not* help — Explorer's extractor propagates the zone into every file it writes.
+2. **Smart App Control.** On by default on clean Windows 11 installs, and MOTW is
+   irrelevant to it — it refuses to run any executable that is neither signed nor
+   cloud-reputable, however it arrived. A PyInstaller bundle loses here permanently:
+   every build is byte-unique, so it has no reputation, and every release rebuilds it, so
+   it can never accumulate any. **Measured on an enforcing machine:** the PyInstaller
+   `TintaView.exe` was blocked (CodeIntegrity event 3118), while `python.exe`/`pythonw.exe`
+   (PSF-signed, signature preserved through venv creation), the pip console shim, and all
+   of PySide6's DLLs ran without complaint — as did the tray itself, serving `/state`.
+
+Installing a wheel into a venv satisfies both with no certificate: the only executables
+involved are the signed interpreter and widely-mirrored PyPI wheels. **Don't reintroduce a
+frozen bundle or an `.exe` installer without a code-signing certificate to go with it** —
+`tests/test_packaging.py` guards this.
+
+`install.ps1` verifies the wheel's SHA-256 against the release's `SHA256SUMS.txt` before
+installing and is idempotent (it *is* the update mechanism). Two Windows-specific traps it
+encodes:
+
+- On Windows `config_dir()` **is** the install prefix (`%LOCALAPPDATA%\TintaView`) —
+  config.toml, hook.env, `bin\tv-hook.cmd` and `logs\` are siblings of the venv. So the
+  prefix is never deleted recursively; only `<prefix>\venv`, which the installer owns
+  outright, ever is.
+- `pip install --upgrade` compares version numbers and does nothing when they match, so
+  the wheel is additionally force-reinstalled with `--no-deps`. Without that, re-running
+  the installer cannot repair a damaged install and a re-tagged release silently keeps the
+  old code while reporting success.
 
 ### 8.4 Updating
 
 Tray checks the GitHub Releases API weekly (`update.check`) → *"Update available"*:
-Windows downloads the new Setup.exe, verifies SHA-256 from the release asset, runs it `/SILENT`, restarts.
-Linux/macOS re-runs `install.sh`. `tintaview update` does the same from the CLI.
+Both platforms download the release's own install script, verify its SHA-256 against the release's checksums asset, and re-run it — `install.ps1 -Silent` on Windows (detached, since it stops the interpreter running out of the venv it is about to replace), `sh install.sh` on Linux/macOS. `tintaview update` does the same from the CLI, passing `-Prefix` derived from `sys.prefix` so a non-default install upgrades itself instead of spawning a second copy.
 **Config and hooks are never touched by an update** — hooks point at the stable `tv-hook` path.
 
 ### 8.5 CI
 
 `ci.yml`: ruff + pytest on ubuntu / windows / macos.
-`build.yml`: on tag `v*` → build Setup.exe on windows-latest, attach it plus `install.sh` and SHA-256 sums to the GitHub Release.
+`build.yml`: on tag `v*` → `python -m build` on ubuntu-latest (the wheel is pure Python, so no Windows runner and no matrix), smoke-test that the wheel installs and that `python -m tintaview` works, then attach the wheel, the sdist, `install.ps1`, `install.sh` and `SHA256SUMS.txt` to the GitHub Release. Building on Linux also keeps `install.sh` from being CRLF-mangled on the way into the release (see `.gitattributes`).
 
 ---
 
@@ -386,32 +427,19 @@ Linux/macOS re-runs `install.sh`. `tintaview update` does the same from the CLI.
 | M2 | Engines | Chroma port (default), OpenRGB + snapshot/restore + Direct-mode filter, auto-detect factory |
 | M3 | Agents & hooks | `tv-hook`, per-agent manifests, `hooks install/status/uninstall` with diff+confirm, backups, drift check |
 | M4 | Tray & stats | Qt tray + flyout, three stats providers, cache, settings menu |
-| M5 | Install & update | Wizard, Inno Setup installer + WSL page, `install.sh`, autostart, self-update, `build.yml` |
-| M6 | Docs & polish | README, MIGRATION from the old repo, TROUBLESHOOTING, manual test matrix pass |
+| M5 | Install & update | Wizard + WSL page, `install.ps1`, `install.sh`, autostart, self-update, `build.yml` |
+| M6 | Docs & polish | README, TROUBLESHOOTING, manual test matrix pass |
 
 M1–M3 carry the real logic; M5 carries the calendar time.
 
 **Delegation.** Mechanical work is handed to Sonnet subagents: M0 in full, the asset pipeline,
-Inno Setup / `install.sh` / systemd / launchd boilerplate, the Claude and Codex stats parsers
+`install.ps1` / `install.sh` / systemd / launchd boilerplate, the Claude and Codex stats parsers
 (fixture-driven), and test scaffolding. Kept in the main thread because a subtle mistake is
 expensive: OpenRGB **snapshot/restore**, the **hook merge/diff** (it rewrites the user's real
 `~/.claude` / `~/.codex` / `~/.cursor` files), the **stall detector**, the Cursor **token handling**,
 and the WSL split installer.
 
-## 11. Migration from `claude_code_razer_lights`
-
-**Reuse:** `usage.py` (`parse_usage`/`fetch_usage`/JSONL fallback), the flyout painting and usage cache from `tray_app.py`, the server's state machine / watchdog / ack-before-IO handling, `tests/test_server.py`, the `curl.exe` WSL insight, the crash-logging setup (`sys.excepthook`, `threading.excepthook`, `faulthandler`).
-
-**Drop:** two-process model, Scheduled Task + Startup shortcut, `RAZER_*` env var names, hardcoded `DEVICES`.
-
-> **As built:** there is no back-compat shim for the old `RAZER_*` / `CLAUDE_HOME` env vars —
-> everything moved into `config.toml` instead, and `TINTAVIEW_HOME` is a new concept (a
-> config-dir override), not a rename of anything the old project read. `docs/MIGRATION.md`
-> documents the real mapping.
-
-**Compatibility:** the old `hook.sh` keeps working against the new server via the back-compat aliases, so migration can be incremental.
-
-## 12. Risks & open items
+## 11. Risks & open items
 
 | Risk | Mitigation |
 | --- | --- |
@@ -420,6 +448,6 @@ and the WSL split installer.
 | Cursor "confirm" is a heuristic | Tune `stall_seconds` against real sessions; ship conservative; allow disabling |
 | OpenRGB vs Synapse/G HUB device conflict | Chroma is the default; wizard warns explicitly; `doctor` detects both running |
 | OpenRGB SDK version drift (v5 released / v6 pipeline) | Pin to SDK v5 behaviour, feature-detect, fail soft to status-only |
-| Unsigned installer (accepted) | Document SmartScreen step; revisit if the project ever goes public |
+| Unsigned build (accepted) | Ship via `install.ps1`, which never lets a Mark-of-the-Web tag reach the binary, so SmartScreen never fires (§8.3). Remaining exposure is a Defender *heuristic* hit on the PyInstaller bootloader — mitigated by `onedir` + no UPX; if it ever bites, submit to Microsoft's false-positive portal and consider free OSS code signing (SignPath) or Azure Trusted Signing |
 | PySide6 bundle size (~60 MB) | Accepted for the usage card quality; revisit `pystray` only if it becomes a problem |
 | macOS has no realistic lighting | Positioned as status + stats only, stated up front |

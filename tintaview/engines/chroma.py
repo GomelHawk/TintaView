@@ -1,7 +1,7 @@
 """Razer Chroma REST SDK engine — the default when Synapse is running.
 
-Ported from the old ``claude_code_razer_lights`` server: POST to open a session (the
-response body's ``uri`` is the *real* session URI/port — the SDK never actually listens
+The SDK dance: POST to open a session (the response body's ``uri`` is the *real*
+session URI/port — the SDK never actually listens
 on 54235 itself, that's just the discovery endpoint), PUT ``<uri>/heartbeat`` to keep the
 session alive, PUT ``<uri>/<device>`` per targeted device to set a colour, DELETE
 ``<uri>`` to hand control back to Synapse. Synapse resumes its own lighting the instant
@@ -128,7 +128,7 @@ class ChromaEngine(BaseEngine):
             # failure on shutdown must not stop the rest of teardown from running.
             log.info("Chroma session release failed (may already be gone): %r", e)
 
-    # --- HTTP plumbing (stdlib only — the core stays dependency-free for PyInstaller) --
+    # --- HTTP plumbing (stdlib only — the core stays dependency-free) ------------------
 
     def _open_request(self, timeout: float) -> str | None:
         body = json.dumps({

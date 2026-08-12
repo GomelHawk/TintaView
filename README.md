@@ -12,10 +12,6 @@ weekly limits, credits, or token totals, depending on the agent). Works with
 **Claude Code**, **Codex CLI** and **Cursor**; drives **Razer Chroma** or **OpenRGB**
 devices; runs on **Windows, WSL, Linux and macOS**.
 
-TintaView is the successor to
-[`claude_code_razer_lights`](https://github.com/GomelHawk/claude-code-razer-lights) —
-one process instead of two, three agents instead of one, and a real installer.
-
 ## What works where
 
 **Agents** — every agent reports session start/end and "working" the same way; only the
@@ -42,15 +38,70 @@ Chroma is Windows-only, and OpenRGB's macOS device support is too thin to rely o
 
 ### Windows
 
-1. Download `TintaView-Setup-x.y.z.exe` from the
-   [Releases page](https://github.com/GomelHawk/TintaView/releases).
-2. Run it. **TintaView is not code-signed**, so Windows SmartScreen will say
-   "Windows protected your PC". Click **More info**, then **Run anyway**. This is
-   expected — signing costs money we haven't spent yet, not a sign anything's wrong.
-3. The installer needs no admin rights (it installs per-user, under
-   `%LOCALAPPDATA%\TintaView`) and finishes by launching the setup wizard.
+Open PowerShell and run:
 
-If you're on Windows with WSL, the installer detects it and offers a **WSL split**
+```powershell
+irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1 | iex
+```
+
+That's it — no admin rights (it installs per-user under `%LOCALAPPDATA%\TintaView`), no
+security warnings, and it finishes by launching the setup wizard.
+
+**Requires Python 3.11 or newer.** If you don't have one, the script tells you and stops;
+`winget install --id Python.Python.3.12 --exact --source winget` is the one-liner it
+suggests.
+
+To pass options, run it as a script block instead (piping into `iex` can't forward
+arguments):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1))) -NoAutostart
+```
+
+- `-Prefix DIR` — install location (default `%LOCALAPPDATA%\TintaView`).
+- `-Version X.Y.Z` — install a specific release instead of the latest.
+- `-Python EXE` — use a particular interpreter instead of the newest one found.
+- `-NoAutostart` — skip the "start when I sign in" entry.
+- `-NoWizard` — don't launch the setup wizard afterwards.
+- `-Uninstall` — remove the app and its autostart entry. Your config, hooks and logs are
+  left alone on purpose (on Windows they live in that same folder).
+
+Every option also reads a `TINTAVIEW_*` environment variable (`TINTAVIEW_PREFIX`,
+`TINTAVIEW_NO_AUTOSTART`, …), so the plain piped one-liner above stays configurable.
+
+Re-running the script is also how you **update** — it upgrades in place and never touches
+your config, hooks or autostart choice. `tintaview update` just does this for you.
+
+<details>
+<summary>Why a command, and why no .exe download?</summary>
+
+TintaView isn't code-signed, and Windows has two independent defences against unsigned
+software. A downloadable installer loses to both:
+
+1. **Mark-of-the-Web.** Browsers tag every download with it. That tag is what makes
+   Edge/Chrome block an unsigned installer on reputation, and what makes SmartScreen show
+   "Windows protected your PC" when you run it. PowerShell doesn't attach the tag, so
+   neither check has anything to fire on. Downloading a `.zip` and extracting it by hand
+   doesn't help either — Explorer's extractor copies the tag into every file it writes.
+
+2. **Smart App Control**, on by default on clean Windows 11 installs. Mark-of-the-Web is
+   irrelevant to it: it refuses to run *any* executable that is neither signed nor already
+   known-good to Microsoft's cloud. A compiled bundle can never satisfy it without a
+   certificate, because every release produces a brand-new unique binary that has no
+   reputation and never gets the chance to build one.
+
+So TintaView is installed the way Python tools normally are: a private virtual environment
+under the install folder, with the app installed into it from a wheel. The only programs
+involved are Python's own interpreter — signed by the Python Software Foundation — and
+packages from PyPI that millions of machines already run. Both defences are satisfied with
+no certificate and no warnings to click through.
+
+The install script downloads the wheel from the GitHub release, **verifies its SHA-256**
+against the release's `SHA256SUMS.txt`, and refuses to install on any mismatch.
+
+</details>
+
+If you're on Windows with WSL, the setup wizard detects it and offers a **WSL split**
 install: the tray and lighting stay on Windows, and the wizard installs the hooks
 inside the Linux distro where your agents actually run, over `wsl.exe`. You never need
 to open a WSL terminal yourself.
@@ -89,7 +140,7 @@ disk. Nothing lights up and no hooks are installed until you've run it.
 
 ## What the wizard asks
 
-`tintaview setup` runs the same seven-step flow whether it's launched by `Setup.exe`,
+`tintaview setup` runs the same seven-step flow whether it's launched by `install.ps1`,
 by `install.sh`, or by hand:
 
 1. **Platform** — auto-detected (Windows / WSL / Linux / macOS), with a prompt to
@@ -102,8 +153,8 @@ by `install.sh`, or by hand:
    the `i2c-dev` kernel module.
 4. **Install location** — where the program files go (separate from your settings,
    which always live under `~/.tintaview` or `%LOCALAPPDATA%\TintaView`).
-5. **Autostart** — a Startup-folder shortcut (Windows), a systemd `--user` unit plus an
-   XDG autostart entry (Linux), or a launchd agent (macOS). No admin, no Scheduled Task.
+5. **Autostart** — a per-user `Run` registry entry (Windows), a systemd `--user` unit plus
+   an XDG autostart entry (Linux), or a launchd agent (macOS). No admin, no Scheduled Task.
 6. **Hooks** — for each agent, shows the exact before/after diff of the config file
    it's about to write and asks for confirmation before touching anything.
 7. **Verify** — saves the config, installs the hook script, then optionally waits
@@ -204,9 +255,13 @@ and tooltip, and polls the same GET /state endpoint a doctor or a remote tool wo
 
 - **Windows** — the tray's **Check for updates** menu item checks GitHub Releases (the
   result goes to the log, not a popup, today); to actually install a newer version, run
-  `tintaview update` from a terminal, or download and run the new `Setup.exe` yourself.
+  `tintaview update` from a terminal, or re-run the `install.ps1` one-liner yourself.
 - **Linux / macOS** — re-run `packaging/install.sh` (or `tintaview update`, which does
-  the same thing after verifying the script's SHA-256 against the release's checksums).
+  the same thing).
+
+Either way `tintaview update` downloads that platform's install script, **verifies its
+SHA-256** against the release's checksums file, and refuses to run anything that doesn't
+match.
 
 Updating never touches `config.toml` or any agent's hook configuration — hooks always
 point at the same stable `tv-hook` path, so an update can never leave an agent's hooks
@@ -214,9 +269,14 @@ broken.
 
 ## Uninstall
 
-- **Windows** — use "Uninstall TintaView" from the Start menu / Add or Remove Programs.
-  It removes the program files and the Startup shortcut; your config, usage cache and
-  logs under `%LOCALAPPDATA%\TintaView` are left in place.
+- **Windows** — re-run the install one-liner with `-Uninstall`:
+
+  ```powershell
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1))) -Uninstall
+  ```
+
+  It removes the virtual environment, the Start Menu shortcut and the autostart entry;
+  your config, usage cache and logs under `%LOCALAPPDATA%\TintaView` are left in place.
 - **Linux / macOS** — `sh packaging/install.sh --uninstall`. Same behaviour: the
   autostart entry and install prefix are removed, `~/.tintaview` is left alone.
 - **Either way**, to also remove the hook entries TintaView installed into your agents'

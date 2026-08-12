@@ -1,7 +1,6 @@
 """Claude Code usage provider.
 
-Ported from ``claude_code_razer_lights/usage.py`` (the working CLI tool) — see that
-file's header comment for the full rationale. Summary:
+Where the numbers come from:
 
   - Primary source: the same internal endpoint Claude Code's own ``/usage`` slash
     command uses, ``GET https://api.anthropic.com/api/oauth/usage``, authenticated with
@@ -18,7 +17,7 @@ file's header comment for the full rationale. Summary:
     this also skips the fallback and just reports the rate limit. ``StatsService``
     is what actually keeps the old cached rows in that case (see ``stats/service.py``).
 
-Stdlib only (``urllib``), so this runs on a bare WSL distro or inside a PyInstaller
+Stdlib only (``urllib``), so this runs on a bare WSL distro or any other
 bundle with nothing extra installed.
 """
 

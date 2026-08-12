@@ -146,16 +146,56 @@ def _parse_ts(ts: Any) -> datetime | None:
 # --------------------------------------------------------------------------- rows
 
 
+def _parse_reset_moment(value: Any) -> datetime | None:
+    """Interpret an undocumented `resets_at` as an absolute moment, or None.
+
+    Codex has been observed sending this as a **Unix epoch integer** (`1789125077`) as
+    well as an ISO-8601 string, and `datetime.fromisoformat` rejects the former outright.
+    Epoch values are also seen in milliseconds by some producers, so anything far beyond
+    the plausible seconds range is rescaled rather than landing the reset time ~50,000
+    years in the future.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; a flag is not a timestamp
+        return None
+
+    number: float | None = None
+    if isinstance(value, int | float):
+        number = float(value)
+    elif isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+        number = float(value.strip())
+
+    if number is not None:
+        # 1e11 seconds is year 5138; anything above it is milliseconds, not seconds.
+        if abs(number) > 1e11:
+            number /= 1000.0
+        try:
+            return datetime.fromtimestamp(number, UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # A naive ISO string would blow up the `dt - now` subtraction below against an
+    # aware `now`; the API reports UTC, so assume it when no offset is given.
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
 def _fmt_reset(resets_at: Any = None, resets_in_seconds: Any = None) -> str:
     """Same wording as the Claude provider's reset formatting, but Codex's rate-limit
     windows have been observed to carry either an absolute `resets_at` or a relative
     `resets_in_seconds` — accept either."""
     now = datetime.now(UTC)
     if resets_at:
-        try:
-            dt = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
-        except ValueError:
-            return str(resets_at)
+        dt = _parse_reset_moment(resets_at)
+        if dt is None:
+            # Deliberately blank rather than echoing the raw value. This lands in the
+            # flyout row's right-hand slot, where a value we could not interpret reads as
+            # a usage figure — an unparsed epoch once showed up next to the 5-hour limit
+            # as a bare "1789125077", which looks like a token count, not a clock.
+            log.debug("codex: unparseable resets_at %r", resets_at)
+            return ""
     elif resets_in_seconds is not None:
         try:
             dt = now + timedelta(seconds=float(resets_in_seconds))
@@ -171,10 +211,45 @@ def _fmt_reset(resets_at: Any = None, resets_in_seconds: Any = None) -> str:
         m, _ = divmod(rem, 60)
         return f"Resets in {h} hr {m} min" if h else f"Resets in {m} min"
     local = dt.astimezone()
+    if secs >= 6 * 86400:
+        # Beyond a week a weekday name is ambiguous at best — "Resets Fri" for a monthly
+        # budget four weeks out reads as *this* Friday. Codex's own UI shows a date here,
+        # so match it.
+        month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][local.month - 1]
+        return f"Resets {local.day} {month}"
     weekday = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][local.weekday()]
     hour12 = local.hour % 12 or 12
     ampm = "AM" if local.hour < 12 else "PM"
     return f"Resets {weekday} {hour12}:{local.minute:02d} {ampm}"
+
+
+def _window_label(window: dict[str, Any], fallback: str) -> str:
+    """Name the limit from its own `window_minutes` rather than assuming what it is.
+
+    `primary`/`secondary` are positions in the payload, not fixed durations: they were
+    a 5-hour and a weekly window on the plans this was first written against, but a free
+    plan reports a single `primary` with ``window_minutes: 43200`` — 30 days. Labelling
+    that "5-hour limit" contradicts Codex's own UI, which calls it Monthly, and makes a
+    92%-consumed monthly budget look like a 5-hour one that will clear over lunch.
+    """
+    minutes = window.get("window_minutes")
+    if not isinstance(minutes, int | float) or isinstance(minutes, bool) or minutes <= 0:
+        return fallback
+    minutes = int(minutes)
+    if minutes % 43200 == 0:  # 30-day months, as Codex counts them
+        months = minutes // 43200
+        return "Monthly limit" if months == 1 else f"{months}-month limit"
+    if minutes % 10080 == 0:
+        weeks = minutes // 10080
+        return "Weekly limit" if weeks == 1 else f"{weeks}-week limit"
+    if minutes % 1440 == 0:
+        days = minutes // 1440
+        return "Daily limit" if days == 1 else f"{days}-day limit"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return "Hourly limit" if hours == 1 else f"{hours}-hour limit"
+    return f"{minutes}-minute limit"
 
 
 def _pct_row(label: str, window: dict[str, Any]) -> UsageRow:
@@ -265,9 +340,9 @@ class CodexUsageProvider(UsageProvider):
         if primary or secondary:
             rows = []
             if primary:
-                rows.append(_pct_row("5-hour limit", primary))
+                rows.append(_pct_row(_window_label(primary, "5-hour limit"), primary))
             if secondary:
-                rows.append(_pct_row("Weekly", secondary))
+                rows.append(_pct_row(_window_label(secondary, "Weekly"), secondary))
             if rows:
                 return UsageResult(agent=self.key, rows=rows, header="Codex usage limits", source="official")
 

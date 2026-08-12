@@ -28,7 +28,7 @@ class LightController:
     construction time, so a headless `doctor` run or a config with ``engine.mode =
     "none"`` never pays a connect attempt it doesn't need. ``apply()`` re-checks
     ``engine.active`` on every call (rather than trusting a cached flag), which is what
-    lets it transparently re-open a session the old server had to special-case: a
+    lets it transparently re-open a session that would otherwise need special-casing: a
     spurious SessionEnd can release control while an agent is still very much alive, and
     the next status event for that session must take the lights back over.
     """
@@ -77,7 +77,7 @@ class LightController:
 
     def _set_solid_locked(self, status: str) -> None:
         engine = self._get_engine()
-        r, g, b = self._cfg.colors.rgb(status)
+        r, g, b = self._cfg.colors.device_rgb(status)
         try:
             engine.set_color(r, g, b)
         except Exception:
@@ -101,7 +101,7 @@ class LightController:
 
     def _blink_loop(self) -> None:
         on = False
-        confirm_rgb = self._cfg.colors.rgb(STATUS_CONFIRM)
+        confirm_rgb = self._cfg.colors.device_rgb(STATUS_CONFIRM)
         # Floor is a safety net against a near-zero config spinning the engine, not a
         # UX minimum — the test suite relies on configuring a genuinely fast blink.
         interval = max(self._cfg.colors.blink_ms, 10) / 1000.0

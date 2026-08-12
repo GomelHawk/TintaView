@@ -85,9 +85,8 @@ Other things worth checking by hand:
 - **You hand-edited the file and it's no longer valid JSON.** `hooks install` refuses to
   guess at a broken file rather than risk destroying it — fix the JSON syntax first.
 - Every `hooks install`/`uninstall` only ever touches entries whose command contains the
-  `tv-hook` sentinel — anything else you've hand-written in the same file (including the
-  *old* `claude_code_razer_lights` `hook.sh` entries) is left completely alone. See
-  [MIGRATION.md](MIGRATION.md) if you're moving from that project.
+  `tv-hook` sentinel — anything else you've hand-written in the same file is left
+  completely alone, including hook entries you added by hand for some other tool.
 
 ## Codex hooks not firing
 

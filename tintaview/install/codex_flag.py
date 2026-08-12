@@ -63,12 +63,15 @@ def plan(config_path: Path, version: str | None) -> FlagPlan:
         before = ""
 
     if parsed is None:
-        # Unknown version: write the legacy flag, which newer Codex ignores as an unknown
-        # feature key. Being wrong this way costs a stray line; being wrong the other way
-        # means hooks silently never fire.
-        return _write_flag(config_path, before, FLAG_LEGACY,
-                           "Codex version unknown — enabling the legacy hooks flag, which "
-                           "newer versions simply ignore.")
+        # Unknown version — the common case on a WSL-split install, where TintaView runs
+        # on Windows and `codex` only exists inside the distro. Writing the *legacy* flag
+        # here used to be the safe guess, on the theory that newer Codex ignores unknown
+        # feature keys. It does not: it prints a deprecation warning on every single
+        # invocation. Since modern Codex has hooks on by default, the only version that
+        # gains anything from a flag is a narrow old range — not worth nagging everyone
+        # else forever, so prefer the modern spelling and clear any legacy key.
+        return _write_flag(config_path, before, FLAG_MODERN,
+                           "Codex version unknown — writing the current hooks flag.")
 
     if parsed < MIN_HOOKS_VERSION:
         return FlagPlan(config_path, "unsupported", before, before,
@@ -77,11 +80,40 @@ def plan(config_path: Path, version: str | None) -> FlagPlan:
                         "the notify fallback, which only reports idle.")
 
     if parsed >= FLAG_NOT_NEEDED_FROM:
-        return FlagPlan(config_path, "noop", before, before,
-                        f"Codex {version} has hooks enabled by default — no flag needed.")
+        # Hooks are on by default here, so there is nothing to enable — but a stale
+        # `codex_hooks` from an older install (or an older TintaView) still makes Codex
+        # print a deprecation warning on every run, so clear it out if it's there.
+        return _clear_legacy_flag(
+            config_path, before,
+            f"Codex {version} has hooks enabled by default — no flag needed.",
+        )
 
     return _write_flag(config_path, before, FLAG_LEGACY,
                        f"Codex {version} needs the hooks feature flag enabled.")
+
+
+def _clear_legacy_flag(path: Path, before: str, noop_reason: str) -> FlagPlan:
+    """Remove a deprecated ``[features] codex_hooks`` entry, if present."""
+    import tomlkit
+
+    if not before.strip():
+        return FlagPlan(path, "noop", before, before, noop_reason)
+
+    doc = tomlkit.parse(before)
+    features = doc.get("features")
+    if features is None or FLAG_LEGACY not in features:
+        return FlagPlan(path, "noop", before, before, noop_reason)
+
+    del features[FLAG_LEGACY]
+    # Drop the table too if removing that key emptied it, rather than leaving a bare
+    # `[features]` header behind in the user's hand-maintained file.
+    if not len(features):
+        del doc["features"]
+    return FlagPlan(
+        path, "update", before, tomlkit.dumps(doc),
+        f"`[features] {FLAG_LEGACY}` is deprecated and Codex warns about it on every run; "
+        f"hooks are enabled by default on this version, so the flag is simply removed.",
+    )
 
 
 def _write_flag(path: Path, before: str, flag: str, reason: str) -> FlagPlan:
@@ -93,8 +125,13 @@ def _write_flag(path: Path, before: str, flag: str, reason: str) -> FlagPlan:
         features = tomlkit.table()
         doc["features"] = features
 
-    if features.get(flag) is True:
+    # Writing the modern key must also retire the legacy one, or Codex keeps warning
+    # about the deprecated entry even though the correct flag is now present.
+    legacy_present = flag == FLAG_MODERN and FLAG_LEGACY in features
+    if features.get(flag) is True and not legacy_present:
         return FlagPlan(path, "noop", before, before, "Already enabled.")
+    if legacy_present:
+        del features[FLAG_LEGACY]
 
     features[flag] = True
     after = tomlkit.dumps(doc)

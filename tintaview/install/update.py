@@ -2,8 +2,9 @@
 
 Per docs/PLAN.md §8.4: config and every agent's hook configuration are never touched by
 an update (hooks point at the stable ``tv-hook`` path, not at anything version-specific),
-so this module only ever downloads and runs an installer/script — it never opens
-``config.toml`` or any agent's settings file.
+so this module only ever downloads and runs the release's own install script —
+``install.ps1`` on Windows, ``install.sh`` on Linux/macOS, both of which are idempotent
+and upgrade in place. It never opens ``config.toml`` or any agent's settings file.
 
 Safety rules that are non-negotiable, not just best-effort:
 
@@ -208,56 +209,85 @@ def _download_and_verify(url: str, checksums_url: str, dest_dir: Path, filename:
 # --------------------------------------------------------------------------- platform actions
 
 
-def _update_windows(version: str, assets: list[dict[str, Any]]) -> int:
-    setup_name = f"TintaView-Setup-{version}.exe"
-    setup_url = _asset_url(assets, setup_name)
-    if not setup_url:
-        print(f"Could not find {setup_name} in the release assets — it may still be building; try again shortly.")
-        return 1
+def _fetch_install_script(assets: list[dict[str, Any]], script_name: str) -> Path | None:
+    """Download and SHA-256-verify one of the release's install scripts.
 
-    checksums_name = _find_checksums_asset(assets)
-    if not checksums_name:
-        print("No checksums file found in the release assets — refusing to run an unverified installer.")
-        return 1
-    checksums_url = _asset_url(assets, checksums_name)
-    if not checksums_url:
-        print(f"{checksums_name} was listed but has no download URL — refusing to run an unverified installer.")
-        return 1
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix="tintaview-update-"))
-    setup_path = _download_and_verify(setup_url, checksums_url, tmp_dir, setup_name)
-    if setup_path is None:
-        return 1
-
-    print(f"Launching {setup_name} /SILENT — TintaView will exit so the installer can replace it.")
-    print("Config and every agent's hook configuration are untouched by this — the hook path is stable.")
-    try:
-        subprocess.Popen([str(setup_path), "/SILENT"])
-    except OSError as exc:
-        print(f"Could not launch the installer: {exc}")
-        return 1
-    return 0
-
-
-def _update_posix(version: str, assets: list[dict[str, Any]]) -> int:
-    del version  # install.sh is not versioned by filename, unlike the Windows installer
-    script_name = "install.sh"
+    Returns None (having printed why) if the asset, its checksums file, or the checksum
+    itself is missing or wrong — never a path to something unverified.
+    """
     script_url = _asset_url(assets, script_name)
     if not script_url:
         print(f"Could not find {script_name} in the release assets — it may still be building; try again shortly.")
-        return 1
+        return None
 
     checksums_name = _find_checksums_asset(assets)
     if not checksums_name:
         print("No checksums file found in the release assets — refusing to run an unverified script.")
-        return 1
+        return None
     checksums_url = _asset_url(assets, checksums_name)
     if not checksums_url:
         print(f"{checksums_name} was listed but has no download URL — refusing to run an unverified script.")
-        return 1
+        return None
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="tintaview-update-"))
-    script_path = _download_and_verify(script_url, checksums_url, tmp_dir, script_name)
+    return _download_and_verify(script_url, checksums_url, tmp_dir, script_name)
+
+
+def _install_prefix() -> Path | None:
+    """The install prefix this copy of TintaView lives under, or None if it isn't one.
+
+    install.ps1 lays out ``<prefix>/venv``, so the prefix is the parent of the virtual
+    environment `sys.prefix` points at. Returning it lets an update reinstall into a
+    non-default location instead of silently creating a second copy under
+    ``%LOCALAPPDATA%`` (install.ps1's default). A run straight from a checkout, or from a
+    venv the installer did not create, has no prefix to speak of — None leaves install.ps1
+    on its own default, which is the right answer there.
+    """
+    venv = Path(sys.prefix).resolve()
+    if venv.name.lower() != "venv":
+        return None
+    return venv.parent
+
+
+def _update_windows(version: str, assets: list[dict[str, Any]]) -> int:
+    del version  # install.ps1 is not versioned by filename; it resolves the release itself
+
+    script_path = _fetch_install_script(assets, "install.ps1")
+    if script_path is None:
+        return 1
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
+    # -ExecutionPolicy Bypass is required here, not belt-and-braces: the default policy on
+    # Windows client SKUs is Restricted, which refuses to run any .ps1 from disk at all.
+    # (The file carries no Mark-of-the-Web — urllib wrote it, not a browser — so the
+    # execution policy is the only gate actually in the way.)
+    argv = [
+        powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(script_path), "-Silent",
+    ]
+    prefix = _install_prefix()
+    if prefix is not None:
+        argv += ["-Prefix", str(prefix)]
+
+    print(f"Running {script_path.name} — it is idempotent and upgrades TintaView in place.")
+    print("Config and every agent's hook configuration are untouched by this — the hook path is stable.")
+    # Detached, unlike the POSIX path below: install.ps1 stops any interpreter running out
+    # of the venv it is about to replace, and on `tintaview update` from the tray or the
+    # installed CLI that process is *this* one. Waiting on the script would mean waiting
+    # for something that is about to kill the waiter.
+    try:
+        subprocess.Popen(argv)
+    except OSError as exc:
+        print(f"Could not launch the installer: {exc}")
+        return 1
+    print("TintaView will exit so the installer can replace it.")
+    return 0
+
+
+def _update_posix(version: str, assets: list[dict[str, Any]]) -> int:
+    del version  # install.sh is not versioned by filename either
+
+    script_path = _fetch_install_script(assets, "install.sh")
     if script_path is None:
         return 1
 
@@ -274,13 +304,44 @@ def _update_posix(version: str, assets: list[dict[str, Any]]) -> int:
 # --------------------------------------------------------------------------- entry point
 
 
+def _check_failure_reason() -> str:
+    """A specific explanation for a failed update check, not a list of maybes.
+
+    "Network error, rate limit, or no releases found" covers three problems with three
+    different answers — and the most common one by far, a project that simply has not cut
+    a release yet, is not something the user can act on at all. One extra request on the
+    failure path buys a message that says which it was.
+    """
+    req = urllib.request.Request(
+        GITHUB_API_URL,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10.0)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return (
+                f"No releases have been published for {GITHUB_REPO} yet, so there is "
+                "nothing to update to. This isn't an error with your install."
+            )
+        if exc.code in (403, 429):
+            return (
+                "GitHub is rate-limiting update checks from this machine right now. "
+                "Try again in a few minutes."
+            )
+        return f"Update check failed: GitHub returned HTTP {exc.code} ({exc.reason})."
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        return f"Could not reach GitHub to check for updates: {exc}."
+    return (
+        "Could not read the latest release from GitHub — the response wasn't in the "
+        f"expected form. Check https://github.com/{GITHUB_REPO}/releases yourself."
+    )
+
+
 def run_update(check_only: bool = False) -> int:
     release = latest_release()
     if release is None:
-        print(
-            "Could not check for updates (network error, rate limit, or no releases found). "
-            f"Try again later, or check https://github.com/{GITHUB_REPO}/releases yourself."
-        )
+        print(_check_failure_reason())
         return 1
 
     latest_version = str(release.get("tag_name") or "").strip()

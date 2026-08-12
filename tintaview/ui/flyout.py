@@ -1,18 +1,16 @@
-"""The tray's usage flyout — a frameless dark card painted directly (no QSS),
-ported from claude_code_razer_lights/tray_app.py's `Flyout`.
+"""The tray's usage flyout — a frameless dark card painted directly (no QSS).
 
-Two things changed for TintaView's multi-agent world:
+Two things it does for TintaView's multi-agent world:
 
   - it renders one SECTION per agent (a small header line, then that agent's rows,
     or a one-line reason when the agent errored) instead of a single global usage
     block;
-  - `set_results(dict[str, UsageResult])` replaces the predecessor's
-    `set_usage`/`set_error`, since there is no longer one "the" usage payload.
+  - `set_results(dict[str, UsageResult])` is keyed by agent rather than taking one
+    global usage payload, since there is no longer one "the" payload.
 
-Everything else is carried over on purpose: dismiss-on-focus-out, remembering
-`hidden_at` so the click that just closed the flyout doesn't immediately reopen it,
-and the rounded track/fill bars with severity colours. See the predecessor's
-comments for the incidents that shaped those details.
+The remaining details are deliberate, not incidental: dismiss-on-focus-out,
+remembering `hidden_at` so the click that just closed the flyout doesn't immediately
+reopen it, and the rounded track/fill bars with severity colours.
 """
 
 from __future__ import annotations

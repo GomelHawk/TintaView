@@ -181,13 +181,32 @@ def test_up_to_date_reports_and_exits_zero(monkeypatch, capsys):
     assert "up to date" in capsys.readouterr().out.lower()
 
 
-def test_network_error_exits_nonzero_with_readable_message(monkeypatch, capsys):
+def test_failed_check_says_which_problem_it_was(monkeypatch, capsys):
+    """"Network error, rate limit, or no releases" covers three problems with three
+    different answers — and the most common one isn't the user's fault at all."""
     monkeypatch.setattr(U, "latest_release", lambda timeout=10.0: None)
-    rc = U.run_update(check_only=False)
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert out.strip() != ""
-    assert "could not check" in out.lower()
+
+    def fail_with(code: int):
+        def _raise(req, timeout=None):
+            raise urllib.error.HTTPError(U.GITHUB_API_URL, code, "boom", {}, None)
+        return _raise
+
+    monkeypatch.setattr(U.urllib.request, "urlopen", fail_with(404))
+    assert U.run_update(check_only=False) == 1
+    out = capsys.readouterr().out.lower()
+    assert "no releases have been published" in out
+    assert "isn't an error with your install" in out
+
+    monkeypatch.setattr(U.urllib.request, "urlopen", fail_with(403))
+    assert U.run_update(check_only=False) == 1
+    assert "rate-limiting" in capsys.readouterr().out.lower()
+
+    def unreachable(req, timeout=None):
+        raise urllib.error.URLError("no route to host")
+
+    monkeypatch.setattr(U.urllib.request, "urlopen", unreachable)
+    assert U.run_update(check_only=False) == 1
+    assert "could not reach github" in capsys.readouterr().out.lower()
 
 
 def test_run_update_never_raises_on_missing_assets(monkeypatch):
@@ -196,3 +215,118 @@ def test_run_update_never_raises_on_missing_assets(monkeypatch):
     monkeypatch.setattr(U.sys, "platform", "linux")
     rc = U.run_update(check_only=False)
     assert rc == 1  # no install.sh asset found -> a clear failure, not a traceback
+
+
+# --------------------------------------------------------------------------- Windows path
+
+
+def _windows_release_assets() -> list[dict[str, Any]]:
+    base = "https://example.invalid/download"
+    return [
+        {"name": "install.ps1", "browser_download_url": f"{base}/install.ps1"},
+        {"name": "TintaView-9.9.9-win64.zip", "browser_download_url": f"{base}/zip"},
+        {"name": "SHA256SUMS.txt", "browser_download_url": f"{base}/SHA256SUMS.txt"},
+    ]
+
+
+@pytest.fixture
+def verified_script(monkeypatch, tmp_path):
+    """Stub `_download_and_verify` out to a path that "passed" verification.
+
+    The verification itself is covered above; these tests are about what gets *run*
+    afterwards, which is where a Windows-specific regression would hide.
+    """
+    script = tmp_path / "install.ps1"
+    script.write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(U, "_download_and_verify", lambda *a, **k: script)
+    return script
+
+
+def test_windows_update_runs_install_ps1(monkeypatch, verified_script, capsys):
+    launched: list[list[str]] = []
+    monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+    monkeypatch.setattr(U.shutil, "which", lambda name: r"C:\pwsh\powershell.exe")
+    monkeypatch.setattr(U.sys, "prefix", "/not/an/installed/venv")
+
+    rc = U._update_windows("9.9.9", _windows_release_assets())
+
+    assert rc == 0
+    assert len(launched) == 1
+    argv = launched[0]
+    assert argv[0] == r"C:\pwsh\powershell.exe"
+    assert str(verified_script) in argv
+    assert "-Silent" in argv, "the self-updater must never open an interactive wizard"
+    # Windows client SKUs default to a Restricted execution policy, which refuses to run
+    # any .ps1 from disk at all -- without this the update silently does nothing.
+    assert argv[argv.index("-ExecutionPolicy") + 1] == "Bypass"
+    assert "-NoProfile" in argv
+    assert not any(str(a).lower().endswith(".exe") for a in argv[1:]), (
+        "there is no .exe installer any more; the update path must go through install.ps1"
+    )
+
+
+def test_windows_update_passes_its_own_install_prefix(monkeypatch, verified_script, tmp_path):
+    launched: list[list[str]] = []
+    monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+    monkeypatch.setattr(U.shutil, "which", lambda name: "powershell.exe")
+
+    # install.ps1's layout: <prefix>/venv, so sys.prefix is the venv and the install
+    # prefix is its parent.
+    prefix = tmp_path / "PortableInstall"
+    (prefix / "venv").mkdir(parents=True)
+    monkeypatch.setattr(U.sys, "prefix", str(prefix / "venv"))
+
+    rc = U._update_windows("9.9.9", _windows_release_assets())
+
+    assert rc == 0
+    argv = launched[0]
+    # A non-default install location must upgrade itself, not spawn a second copy under
+    # %LOCALAPPDATA% (which is install.ps1's default prefix).
+    assert argv[argv.index("-Prefix") + 1] == str(prefix.resolve())
+
+
+def test_windows_update_from_a_checkout_passes_no_prefix(monkeypatch, verified_script, tmp_path):
+    """A dev run outside an installed venv must not claim its cwd is an install prefix."""
+    launched: list[list[str]] = []
+    monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+    monkeypatch.setattr(U.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(U.sys, "prefix", str(tmp_path / "some-checkout" / ".venv"))
+
+    assert U._update_windows("9.9.9", _windows_release_assets()) == 0
+    assert "-Prefix" not in launched[0]
+
+
+def test_windows_update_without_install_ps1_asset_fails_cleanly(monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise AssertionError("nothing may be launched when the asset is missing")
+
+    monkeypatch.setattr(U.subprocess, "Popen", boom)
+    assets = [{"name": "SHA256SUMS.txt", "browser_download_url": "https://example.invalid/s"}]
+
+    rc = U._update_windows("9.9.9", assets)
+
+    assert rc == 1
+    assert "install.ps1" in capsys.readouterr().out
+
+
+def test_windows_update_never_launches_an_unverified_script(monkeypatch, capsys):
+    """A failed checksum must stop the update dead -- this is the supply-chain gate."""
+    def boom(*args, **kwargs):
+        raise AssertionError("an unverified script must never be executed")
+
+    monkeypatch.setattr(U.subprocess, "Popen", boom)
+    monkeypatch.setattr(U, "_download_and_verify", lambda *a, **k: None)
+
+    assert U._update_windows("9.9.9", _windows_release_assets()) == 1
+
+
+def test_run_update_dispatches_to_the_windows_path(monkeypatch):
+    newer = f"{U._parse_version(__version__)[0]}.{U._parse_version(__version__)[1] + 1}.0"
+    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0: {"tag_name": newer, "assets": []})
+    monkeypatch.setattr(U.sys, "platform", "win32")
+
+    seen: list[str] = []
+    monkeypatch.setattr(U, "_update_windows", lambda v, a: seen.append(v) or 0)
+
+    assert U.run_update(check_only=False) == 0
+    assert seen == [newer]

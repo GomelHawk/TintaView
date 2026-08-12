@@ -1,0 +1,24 @@
+# Line endings are load-bearing here, not cosmetic.
+#
+# Without this file, a checkout on a machine with `core.autocrlf=true` (the Git for
+# Windows default, and what WSL clones often inherit) rewrites every LF to CRLF --
+# including the shell scripts. `sh` then chokes on the trailing \r with errors as
+# unhelpful as `"elif" unexpected`, so `tv-hook.sh` silently stops reporting agent events
+# and `install.sh` refuses to run at all.
+#
+# It also reaches production: .github/workflows/build.yml runs on windows-latest and
+# publishes `packaging/install.sh` to the GitHub Release straight from that checkout, so
+# a CRLF conversion there ships a broken installer to every Linux and macOS user, and
+# breaks `tintaview update` on those platforms with it.
+*.sh text eol=lf
+
+# The other direction, for the one interpreter that genuinely wants CRLF: cmd.exe can
+# mis-parse LF-only batch files. PowerShell is happy either way, but keeping .ps1
+# alongside .cmd means the whole Windows-facing set is consistent.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never "fix" line endings inside binary assets.
+*.png binary
+*.ico binary
+*.icns binary

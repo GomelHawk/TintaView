@@ -318,12 +318,14 @@ class TestCodex:
         assert result.ok
         assert result.source == "official"
         by_label = {row.label: row for row in result.rows}
-        assert set(by_label) == {"5-hour limit", "Weekly"}
+        # Labels come from each window's own `window_minutes` (300 / 10080 here), not
+        # from its position in the payload — see `_window_label`.
+        assert set(by_label) == {"5-hour limit", "Weekly limit"}
         # Must reflect the *newer* file's percentages (61.5 / 12.0), not the older
         # file's 20.0 — "most recent token_count record across all session files".
         assert by_label["5-hour limit"].pct == 61.5
         assert by_label["5-hour limit"].show_pct is True
-        assert by_label["Weekly"].pct == 12.0
+        assert by_label["Weekly limit"].pct == 12.0
 
     def test_null_rate_limits_yield_token_total_rows(self, tmp_path):
         home = tmp_path / "codex_home"
@@ -388,7 +390,21 @@ class TestCursor:
         db_path = tmp_path / "state.vscdb"
         _make_state_db(db_path, self.TOKEN)
 
-        payload = {"usage": {"currentPeriod": {"usedCents": 1234, "limitCents": 5000, "percentUsed": 24.68}}}
+        # Shape captured from a live GetCurrentPeriodUsage response, not invented: the
+        # provider used to guess field names and collapsed both quotas into one row.
+        payload = {
+            "billingCycleStart": "1786533077000",
+            "billingCycleEnd": "1789125077000",
+            "planUsage": {
+                "totalSpend": 2447,
+                "includedSpend": 2000,
+                "bonusSpend": 447,
+                "limit": 2000,
+                "autoPercentUsed": 5.437777777777778,
+                "apiPercentUsed": 0,
+                "totalPercentUsed": 4.943434343434343,
+            },
+        }
         seen_auth = {}
 
         def fake_urlopen(req, timeout=None):
@@ -402,10 +418,19 @@ class TestCursor:
 
         assert result.ok
         assert seen_auth["header"] == f"Bearer {self.TOKEN}"
-        row = result.rows[0]
-        assert row.pct == 24.68
-        assert row.right == "$12.34 of $50.00"
-        assert row.show_pct is True
+
+        # Two quotas, exactly as Cursor's own usage screen shows them.
+        assert [r.label for r in result.rows] == ["Cursor Models", "Other Models"]
+        cursor_models, other_models = result.rows
+        assert cursor_models.pct == pytest.approx(5.4377, abs=1e-3)
+        assert other_models.pct == 0.0
+        assert all(r.show_pct for r in result.rows)
+        # The two must not be conflated: totalPercentUsed (4.94) is a third figure and
+        # must never stand in for either bar.
+        assert cursor_models.pct != other_models.pct
+
+        assert "Resets" in cursor_models.right
+        assert other_models.right == "$20.00 included"
 
         assert self.TOKEN not in caplog.text
 
@@ -441,7 +466,7 @@ class TestCursor:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise _http_error(401)
-            return _FakeResponse(json.dumps({"usage": {"percentUsed": 5.0}}).encode())
+            return _FakeResponse(json.dumps({"planUsage": {"autoPercentUsed": 5.0}}).encode())
 
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
         result = CursorUsageProvider().fetch(AgentConfig(state_db=str(db_path)))
@@ -458,7 +483,7 @@ class TestCursor:
         monkeypatch.setattr(
             urllib.request, "urlopen",
             lambda req, timeout=None: (seen.setdefault("auth", req.get_header("Authorization")),
-                                        _FakeResponse(json.dumps({"usage": {"percentUsed": 1.0}}).encode()))[1],
+                                        _FakeResponse(json.dumps({"planUsage": {"autoPercentUsed": 1.0}}).encode()))[1],
         )
         result = CursorUsageProvider().fetch(AgentConfig(state_db=str(db_path)))
         assert result.ok
@@ -602,3 +627,36 @@ class TestStatsService:
         )
         results = service.fetch_all()
         assert set(results) == {"claude"}
+
+
+def test_codex_window_label_follows_window_minutes():
+    """`primary` is a position in the payload, not a fixed duration.
+
+    A free plan reports a single `primary` window of 43200 minutes (30 days). Labelling
+    that "5-hour limit" — as this did until a real payload showed otherwise — makes a
+    nearly-exhausted monthly budget look like one that clears over lunch.
+    """
+    from tintaview.stats.providers.codex import _fmt_reset, _pct_row, _window_label
+
+    monthly = {"used_percent": 92.0, "window_minutes": 43200, "resets_at": 1789125090}
+    row = _pct_row(_window_label(monthly, "5-hour limit"), monthly)
+    assert row.label == "Monthly limit"
+    assert row.pct == 92.0
+    assert row.severity == "critical"
+
+    # resets_at arrives as a Unix epoch int, which `datetime.fromisoformat` rejects;
+    # it used to fall through and print the raw number where a usage figure belongs.
+    assert "1789125090" not in row.right
+    assert row.right.startswith("Resets ")
+
+    assert _window_label({"window_minutes": 300}, "x") == "5-hour limit"
+    assert _window_label({"window_minutes": 10080}, "x") == "Weekly limit"
+    assert _window_label({"window_minutes": 1440}, "x") == "Daily limit"
+    # Unusable/absent values keep the caller's fallback rather than inventing a label.
+    assert _window_label({}, "5-hour limit") == "5-hour limit"
+    assert _window_label({"window_minutes": 0}, "5-hour limit") == "5-hour limit"
+    assert _window_label({"window_minutes": True}, "5-hour limit") == "5-hour limit"
+
+    # A reset weeks away must carry a date, not a bare weekday.
+    assert _fmt_reset(resets_in_seconds=30 * 86400).startswith("Resets ")
+    assert any(ch.isdigit() for ch in _fmt_reset(resets_in_seconds=30 * 86400))

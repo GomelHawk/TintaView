@@ -2,10 +2,8 @@
 usage flyout. `run_tray(cfg, server)` is `cli.py`'s entry point for the GUI path
 (see `_cmd_run`) — `server` is an already-started `StatusServer`.
 
-Ported from claude_code_razer_lights/tray_app.py's `RazerTray`. The one structural
-change from that predecessor: its light server ran in a *separate process*, so the
-tray had to poll `/state` over HTTP. TintaView runs the broker in the same process
-(docs/PLAN.md §2.1), so `TrayApp` reads `server.state_payload()` directly — a plain
+The broker runs in this same process (docs/PLAN.md §2.1) rather than behind an HTTP
+port of its own, so `TrayApp` reads `server.state_payload()` directly — a plain
 in-process dict build under a lock, not I/O — and only falls back to HTTP if that
 method isn't there at all (e.g. some other object standing in for a real server).
 """
@@ -13,14 +11,17 @@ method isn't there at all (e.g. some other object standing in for a real server)
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from tintaview.core.config import Config
+from tintaview.core.events import STATUS_NONE
 from tintaview.ui import icons
 from tintaview.ui.flyout import Flyout
 
@@ -31,7 +32,7 @@ log = logging.getLogger(__name__)
 
 STATE_POLL_MS = 1500
 USAGE_MIN_REFRESH_S = 30.0  # ignore flyout-open refreshes more frequent than this
-CLICK_REOPEN_GUARD_S = 0.25  # the predecessor's fix for "the click that just closed it"
+CLICK_REOPEN_GUARD_S = 0.25  # guards against "the click that just closed it" reopening it
 ICON_SIZE = 128
 
 _STATUS_LABELS = {
@@ -49,6 +50,38 @@ def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]
     colours must come from config, not be baked into this module.
     """
     return tuple(max(0, min(255, int(c * factor))) for c in rgb)  # type: ignore[return-value]
+
+
+
+def _stdin_is_interactive() -> bool:
+    """Can this process actually prompt the user where they are looking?
+
+    False under `pythonw.exe` (no console at all) and when stdin is a pipe or closed.
+    Only a real terminal makes the in-process, text-mode wizard a sane thing to run.
+    """
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _console_command() -> list[str] | None:
+    """Argv prefix that runs TintaView under a *console* interpreter, or None.
+
+    `sys.executable` is `pythonw.exe` for the tray, and pythonw can never host a text
+    prompt no matter what console it is given — so the sibling `python.exe` is what has
+    to be launched. Returns None when no console interpreter can be located, leaving the
+    caller to tell the user to run the command themselves.
+    """
+    exe = Path(sys.executable)
+    if sys.platform == "win32" and exe.name.lower() == "pythonw.exe":
+        console = exe.with_name("python.exe")
+        if not console.exists():
+            return None
+        exe = console
+    if not exe.exists():
+        return None
+    return [str(exe), "-m", "tintaview"]
 
 
 class StatsWorker(QtCore.QObject):
@@ -193,16 +226,48 @@ class TrayApp(QtCore.QObject):
             log.exception("could not persist chime_on_confirm")
 
     def _open_settings(self) -> None:
-        # `tintaview.ui.wizard` doesn't exist yet (another agent's milestone) — a
-        # message box beats a traceback in the meantime.
+        """Open the setup wizard — in a console of its own, not in this process.
+
+        The wizard is a deliberately text-mode `print`/`input` flow (see
+        `tintaview.ui.wizard`), and the tray runs windowed: at login it is launched by
+        `pythonw.exe`, which has no console at all. Calling `run_wizard()` in-process
+        therefore hits `input()` with no stdin, and the exception escapes the Qt slot and
+        takes the whole tray down — the menu item just made the app vanish. It would also
+        block the GUI thread for as long as the user took to answer.
+
+        So: run it from a terminal if this process has one (a dev run from a shell), and
+        otherwise spawn the *console* interpreter with a console of its own.
+        """
         try:
-            from tintaview.ui.wizard import run_wizard
-        except ImportError:
-            QtWidgets.QMessageBox.information(
-                None, "TintaView", "Settings aren't available yet — coming soon."
+            if _stdin_is_interactive():
+                from tintaview.ui.wizard import run_wizard
+
+                run_wizard()
+                return
+
+            command = _console_command()
+            if command is None:
+                QtWidgets.QMessageBox.information(
+                    None, "TintaView",
+                    "Run this in a terminal to change settings:\n\n    tintaview setup",
+                )
+                return
+
+            kwargs: dict[str, object] = {}
+            if sys.platform == "win32":
+                # Without this the child inherits "no console" from pythonw.exe and dies
+                # on its first prompt exactly as the in-process call did.
+                kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+            subprocess.Popen([*command, "setup"], **kwargs)  # type: ignore[arg-type]
+        except Exception:
+            # A failure to open settings must never kill the tray, which is the entire
+            # bug being fixed here.
+            log.exception("could not open the setup wizard")
+            QtWidgets.QMessageBox.warning(
+                None, "TintaView",
+                "Could not open the setup wizard. Run `tintaview setup` in a terminal "
+                "instead; see the log for details.",
             )
-            return
-        run_wizard()
 
     def _check_updates(self) -> None:
         """Check for a newer release and offer to install it.
@@ -289,10 +354,16 @@ class TrayApp(QtCore.QObject):
         self.tray.setToolTip(self._tooltip_for(payload))
 
     def _icon_for_status(self, status: str) -> QtGui.QIcon:
-        # Every state, "none" included, is the same silhouette in a different hue from
-        # the logo's own gradient (see ColorsConfig). Using the multicolour mark for
-        # "none" was the earlier design, but a gradient icon among solid ones reads as a
-        # different icon rather than a fourth state — and at 16px it just looks muddy.
+        # "No session" shows the mark in the logo's own colours; the three *active* states
+        # are the same mark flooded with one status colour. That contrast is the point:
+        # at rest the tray is just the TintaView logo, and any single-colour icon means
+        # something is happening. The earlier objection — that a multicolour icon among
+        # solid ones reads as a different icon, and looks muddy at 16px — was really an
+        # objection to *scaling the gradient PNG down*. Drawing it shares the status
+        # icons' exact geometry, so it reads as the same mark, and the hues are flat
+        # per capsule rather than smoothly interpolated, so nothing turns to mush.
+        if status == STATUS_NONE:
+            return icons.brand_icon(ICON_SIZE)
         return icons.state_icon(self._cfg.colors.rgb(status), ICON_SIZE)
 
     def _on_blink(self) -> None:
@@ -311,7 +382,11 @@ class TrayApp(QtCore.QObject):
             label = _STATUS_LABELS.get(status, status)
             suffix = f" ({count} session{'s' if count != 1 else ''})" if count else ""
             parts.append(f"{self._agent_display_name(key)}: {label}{suffix}")
-        return " · ".join(parts) if parts else "TintaView"
+        # One line per agent. Joined with " · " this wrapped mid-entry once three agents
+        # were enabled, so a status could end up split across two lines with the agent
+        # name stranded on the first — the exact thing a glanceable tooltip must not do.
+        # Windows' tray tooltip honours "\n" and sizes itself to the longest line.
+        return "\n".join(parts) if parts else "TintaView"
 
     def _agent_display_name(self, key: str) -> str:
         try:

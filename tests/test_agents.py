@@ -17,6 +17,7 @@ import http.server
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -247,15 +248,24 @@ def _run_hook(url: str, agent: str, event: str, stdin_bytes: bytes | None) -> su
     env = dict(os.environ)
     env["TINTAVIEW_URL"] = url
     env["TINTAVIEW_CURL"] = "curl"
-    # Make sure a real hook.env on this machine can't leak into the test.
+    # tv-hook.sh sources hook.env *after* the environment is read, so a real hook.env on
+    # this machine overrides both variables set above rather than deferring to them.
+    # Clearing TINTAVIEW_HOME alone is not enough — it makes the script fall through to
+    # `$HOME/.tintaview/hook.env` instead, which is exactly the file a developer who has
+    # actually installed TintaView will have. On a WSL-split install that file says
+    # `TINTAVIEW_CURL=curl.exe`, and Windows curl cannot reach a test server bound inside
+    # WSL, so every hook test fails for reasons that have nothing to do with the code.
+    # Point HOME at an empty directory so neither lookup finds a file at all.
     env.pop("TINTAVIEW_HOME", None)
-    return subprocess.run(
-        ["sh", str(TV_HOOK_SH), agent, event],
-        input=stdin_bytes,
-        env=env,
-        capture_output=True,
-        timeout=10,
-    )
+    with tempfile.TemporaryDirectory() as scratch_home:
+        env["HOME"] = scratch_home
+        return subprocess.run(
+            ["sh", str(TV_HOOK_SH), agent, event],
+            input=stdin_bytes,
+            env=env,
+            capture_output=True,
+            timeout=10,
+        )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="tv-hook.sh is POSIX sh, not for Windows")

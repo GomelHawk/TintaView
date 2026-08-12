@@ -7,7 +7,7 @@
     tintaview hooks …         install / status / uninstall the agents' hooks
     tintaview update          check for and install a new version
 
-One process, not two: the old project split the broker and the tray into separate
+One process, not two — rather than splitting the broker and the tray into separate
 executables, which meant two autostart entries, two logs and two things to update. The
 broker is cheap enough to live inside the tray process, so it does.
 """

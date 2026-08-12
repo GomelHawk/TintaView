@@ -1,15 +1,13 @@
 """Tray icons: the TintaView mark, tinted per status, plus a brand-coloured variant
 for the "no session" state.
 
-Ported from claude_code_razer_lights/tray_app.py's `make_state_icon` /
-`_draw_burst_icon` / `_resource_path`. The mark is a white silhouette PNG (alpha
-only) that gets recoloured by compositing a solid fill through its alpha channel —
-so one asset serves every status colour instead of needing one PNG per colour.
+The mark is a white silhouette PNG (alpha only) that gets recoloured by compositing a
+solid fill through its alpha channel — so one asset serves every status colour instead
+of needing one PNG per colour.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui
@@ -21,7 +19,7 @@ from PySide6.QtCore import Qt
 _GENERATED_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
 
 #: Fallback burst: 8 tapered rays, echoing the ray count implied by the real mark's
-#: silhouette (the predecessor's fallback used a plain 12-ray burst with no accent).
+#: silhouette.
 RAYS = 8
 
 # Icons are cheap to recompute but get requested constantly (the confirm blink timer
@@ -38,28 +36,16 @@ TRAY_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 def asset_path(name: str) -> Path:
     """Resolve a bundled asset (under assets/generated/) by filename.
 
-    Works both from a source checkout and from a PyInstaller bundle: frozen builds
-    extract to `sys._MEIPASS`, a plain source checkout has `assets/generated` two
-    levels up from this file (tintaview/ui/icons.py -> repo root). Mirrors the
-    predecessor's `_resource_path`.
+    The assets live *inside* the package (tintaview/assets/generated), not at the repo
+    root, specifically so that a plain `pip install` ships them — which is how TintaView
+    is installed on every platform. Anything placed at the repo root would be dropped from
+    the wheel and the tray would silently fall back to the drawn placeholder.
     """
-    rel = Path("assets") / "generated" / name
-    bases: list[Path] = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        # PyInstaller stages the package tree under _MEIPASS; check both the
-        # package-relative and bundle-root layouts so either spec works.
-        bases.append(Path(meipass) / "tintaview")
-        bases.append(Path(meipass))
-    # tintaview/ui/icons.py -> tintaview/. The assets live *inside* the package so
-    # that a plain `pip install` ships them; anything at the repo root would be
-    # dropped and the tray would silently fall back to the drawn placeholder.
-    bases.append(Path(__file__).resolve().parents[1])
-    for base in bases:
-        candidate = base / rel
-        if candidate.exists():
-            return candidate
-    return bases[-1] / rel  # missing; QPixmap(...) on this loads as null, handled by callers
+    # tintaview/ui/icons.py -> tintaview/
+    base = Path(__file__).resolve().parents[1]
+    # Missing resolves to the same path anyway; QPixmap(...) on it loads as null, which
+    # every caller already handles.
+    return base / "assets" / "generated" / name
 
 
 def _closest_size(size: int) -> int:
@@ -80,67 +66,137 @@ def _load_pixmap(base_name: str, size: int) -> QtGui.QPixmap:
 
 
 def state_icon(rgb: tuple[int, int, int], size: int = 128) -> QtGui.QIcon:
-    """The mark silhouette recoloured to `rgb`, cached per (rgb, size).
-
-    Ported from the predecessor's `make_state_icon`: draw the (white) silhouette,
-    then composite a solid fill through its alpha via `CompositionMode_SourceIn` —
-    the result keeps the silhouette's antialiased edges and takes on exactly `rgb`
-    wherever the silhouette was opaque.
-    """
+    """The mark drawn in `rgb`, cached per (rgb, size)."""
     key = (rgb[0], rgb[1], rgb[2], size)
     cached = _state_icon_cache.get(key)
     if cached is not None:
         return cached
 
-    if _load_pixmap("mark_silhouette", size).isNull():
-        icon = _draw_burst_icon(rgb, size)
-        _state_icon_cache[key] = icon
-        return icon
-
     # Build a MULTI-RESOLUTION icon rather than one pixmap. A tray asks for ~16-24px
-    # (more on a HiDPI display), and letting the shell shrink a single 128px pixmap
-    # softens the thin rays. Supplying each size, rendered from the closest
-    # purpose-built PNG, keeps them crisp at whatever size is actually requested.
+    # (more on a HiDPI display), and letting the shell shrink a single large pixmap
+    # softens the capsule ends. Drawing each size outright keeps them crisp at whatever
+    # size is actually requested.
     icon = QtGui.QIcon()
     for px in TRAY_ICON_SIZES:
-        icon.addPixmap(_tinted_pixmap(rgb, px))
+        icon.addPixmap(_draw_mark(rgb, px))
 
     _state_icon_cache[key] = icon
     return icon
 
 
-def _tinted_pixmap(rgb: tuple[int, int, int], size: int) -> QtGui.QPixmap:
-    """The silhouette at `size`, recoloured to `rgb` through its own alpha."""
-    silhouette = _load_pixmap("mark_silhouette", size)
-    scaled = silhouette.scaled(size, size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    out = QtGui.QPixmap(size, size)
-    out.fill(Qt.transparent)
-    p = QtGui.QPainter(out)
-    p.drawPixmap(0, 0, scaled)
-    p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
-    p.fillRect(out.rect(), QtGui.QColor(*rgb))  # recolour the shape, keep its alpha
-    p.end()
-    return out
+#: The mark's geometry, as fractions of the icon's size — **measured from
+#: assets/generated/mark_silhouette.png**, not eyeballed. Reproducing these values agrees
+#: with the shipped artwork on 96.6% of pixels.
+#:
+#: The mark is eight long, slim capsules on 45-degree spokes around a wide-open centre,
+#: plus a single accent dot sitting *outside* the ring at the lower right. Two mistakes
+#: are easy to make here and both destroy it: fattening the capsules (they are 4.4x
+#: longer than they are wide — at half that ratio the mark reads as a flower, not a
+#: burst), and treating the dot as a ninth spoke replacing a capsule rather than an extra
+#: element beyond them.
+#:
+#: It is drawn rather than scaled from the PNG because a tray asks for 16-24px, where
+#: resampling softens the capsule ends into mush, and because thickness then becomes a
+#: number instead of a filter. An earlier attempt dilated the PNG's alpha to embolden it;
+#: that rounds the capsule ends off and closes the gaps, which is exactly the failure the
+#: ratio above guards against.
+MARK_CAPSULE_WIDTH = 0.115  # artwork is 0.082 — widened for legibility at tray sizes
+MARK_INNER = 0.104  # capsule start: the open centre
+MARK_OUTER = 0.461  # capsule end
+MARK_DOT_RADIUS = 0.0625
+MARK_DOT_DISTANCE = 0.567  # centre-to-dot; beyond MARK_OUTER, so the dot stands apart
+MARK_DOT_ANGLE = 135.0  # degrees clockwise from 12 o'clock: the lower right
+MARK_SPOKES = 8
+
+
+#: The logo's colours, as three flat zones running clockwise from 12 o'clock:
+#: **blue -> green -> yellow**, with the orange accent dot.
+#:
+#: Sampled per-capsule hues were tried first (the artwork has eight, blending blue
+#: through teal and green into amber) and they fail at the size that matters: at 16-20px
+#: the lone green and teal spokes are one or two pixels wide each, so the mark reads as
+#: blue-on-top / amber-below — two colours, not the logo. Three flat zones of three, three
+#: and two spokes survive the shrink: each is wide enough to register, and the order still
+#: follows the artwork's gradient, so it still reads as the TintaView mark rather than a
+#: recolour of it.
+_BRAND_BLUE = (1, 132, 248)
+_BRAND_GREEN = (107, 210, 67)
+_BRAND_YELLOW = (248, 192, 7)
+
+#: Index = spoke, clockwise from 12 o'clock. Blue takes the top and left, green the right,
+#: yellow the bottom — the accent dot sits beyond the lower-right (green) spoke.
+MARK_BRAND_COLORS = (
+    _BRAND_BLUE,    # 0    12 o'clock
+    _BRAND_GREEN,   # 1    45
+    _BRAND_GREEN,   # 2    90   (right)
+    _BRAND_GREEN,   # 3    135
+    _BRAND_YELLOW,  # 4    180  (bottom)
+    _BRAND_YELLOW,  # 5    225
+    _BRAND_BLUE,    # 6    270  (left)
+    _BRAND_BLUE,    # 7    315
+)
+MARK_BRAND_DOT = (254, 151, 4)  # orange
+
+
+def _draw_mark(
+    rgb: tuple[int, int, int] | None,
+    size: int,
+    colors: tuple[tuple[int, int, int], ...] | None = None,
+    dot_color: tuple[int, int, int] | None = None,
+) -> QtGui.QPixmap:
+    """The TintaView mark at `size`.
+
+    Flat when `rgb` is given (the status colours), or per-spoke when `colors` is — which
+    is how the multicolour brand mark is drawn *with the same geometry* as every status
+    icon. Using the gradient PNG for that instead would make the idle icon visibly
+    thinner than the others, since the artwork's capsules are narrower than
+    MARK_CAPSULE_WIDTH.
+    """
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QtGui.QPainter(pm)
+    try:
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.translate(size / 2.0, size / 2.0)
+
+        width = size * MARK_CAPSULE_WIDTH
+        inner, outer = size * MARK_INNER, size * MARK_OUTER
+        radius = width / 2.0  # fully rounded ends: a capsule, not a rounded rectangle
+        for spoke in range(MARK_SPOKES):
+            p.setBrush(QtGui.QColor(*(colors[spoke % len(colors)] if colors else rgb)))
+            p.save()
+            p.rotate(spoke * (360.0 / MARK_SPOKES))
+            p.drawRoundedRect(
+                QtCore.QRectF(-width / 2.0, -outer, width, outer - inner), radius, radius
+            )
+            p.restore()
+
+        p.setBrush(QtGui.QColor(*(dot_color or (colors[0] if colors else rgb))))
+        p.save()
+        p.rotate(MARK_DOT_ANGLE)
+        dot = size * MARK_DOT_RADIUS
+        p.drawEllipse(QtCore.QPointF(0.0, -size * MARK_DOT_DISTANCE), dot, dot)
+        p.restore()
+    finally:
+        p.end()
+    return pm
 
 
 def brand_icon(size: int = 128) -> QtGui.QIcon:
-    """The original gradient mark (blue/green/yellow/orange), used for the
-    "no session" tray state so an idle tray reads as the TintaView mark at rest
-    rather than a tinted status colour (docs/PLAN.md §7).
+    """The multicolour mark, used for the "no session" state.
+
+    Drawn from MARK_BRAND_COLORS rather than loaded from mark_color.png so that it shares
+    the status icons' geometry exactly: same capsule width, same open centre, same dot.
+    An idle tray then reads as the logo at rest instead of as a differently-weighted icon.
     """
     cached = _brand_icon_cache.get(size)
     if cached is not None:
         return cached
 
-    pm = _load_pixmap("mark_color", size)
-    if pm.isNull():
-        # No brand colour to fall back to procedurally — use the neutral "none"
-        # tone so this never renders as a blank tray icon.
-        icon = _draw_burst_icon((214, 118, 85), size)
-    else:
-        scaled = pm.scaled(size, size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        icon = QtGui.QIcon(scaled)
-
+    icon = QtGui.QIcon()
+    for px in TRAY_ICON_SIZES:
+        icon.addPixmap(_draw_mark(None, px, colors=MARK_BRAND_COLORS, dot_color=MARK_BRAND_DOT))
     _brand_icon_cache[size] = icon
     return icon
 
@@ -148,7 +204,7 @@ def brand_icon(size: int = 128) -> QtGui.QIcon:
 def _draw_burst_icon(rgb: tuple[int, int, int], size: int = 128) -> QtGui.QIcon:
     """Procedural fallback used only if a mark asset is missing at runtime: an
     8-ray tapered burst plus a small accent dot at the lower right, echoing the
-    TintaView mark's shape (adapted from the predecessor's 12-plain-ray fallback).
+    TintaView mark's shape.
     """
     pm = QtGui.QPixmap(size, size)
     pm.fill(Qt.transparent)

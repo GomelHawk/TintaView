@@ -1,5 +1,5 @@
 """The setup wizard — a text-mode flow, deliberately, because it's the same code run by
-`Setup.exe`'s post-install step, `install.sh` over SSH, and `tintaview setup` in a
+`install.ps1`'s post-install step, `install.sh` over SSH, and `tintaview setup` in a
 terminal. Qt would rule out the first two, so this is plain `print`/`input` throughout.
 
 This is also the one place in TintaView a non-technical user actually looks at, so the
@@ -77,60 +77,80 @@ def _prompt_yes_no(question: str, default: bool, assume_yes: bool) -> bool:
 
 
 def _prompt_choice(question: str, options: list[tuple[str, str]], default: str, assume_yes: bool) -> str:
-    """`options` is `[(key, label), ...]`; the answer must be one of the keys."""
+    """`options` is `[(key, label), ...]`; returns one key.
+
+    Answered by **number**, not by typing the key's name. The keys are internal config
+    values ("openrgb", "wsl-split") and asking someone to retype one is both more work
+    and more ways to get it wrong than picking "2". The key is still accepted, so an
+    existing habit or a copied instruction keeps working.
+    """
     if assume_yes:
         return default
     keys = [k for k, _ in options]
     print(question)
-    for key, label in options:
-        marker = "*" if key == default else " "
-        print(f"  [{marker}] {key} - {label}")
+    for i, (key, label) in enumerate(options, start=1):
+        marker = "  (current)" if key == default else ""
+        print(f"  {i}. {label}{marker}")
+    default_num = keys.index(default) + 1 if default in keys else 1
     while True:
-        raw = _input(f"Choose [{default}]: ").strip()
+        raw = _input(f"Enter a number [{default_num}]: ").strip()
         if not raw:
             return default
-        if raw in keys:
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return keys[int(raw) - 1]
+        if raw in keys:  # still accept the key itself
             return raw
-        print(f"Please type one of: {', '.join(keys)}")
+        print(f"Please enter a number from 1 to {len(options)}.")
 
 
 def _prompt_multiselect(
     question: str, items: list[tuple[str, str, bool]], assume_yes: bool
 ) -> list[str]:
-    """`items` is `[(key, label, preselected), ...]`. At least one key must come back —
-    re-prompts (or, under `assume_yes`, falls back to the first item) until it does.
+    """`items` is `[(key, label, preselected), ...]`; returns the keys the user picked.
+
+    What you type **is** the selection — "1 3" means items 1 and 3 and nothing else.
+    This used to toggle each number against a pre-ticked list, which reads fine once you
+    know it and is quietly confusing until then: typing "1 3" when everything was already
+    ticked *deselected* those two, the exact opposite of what it looks like it does. A
+    plain selection needs no explanation and cannot be misread.
+
+    Enter keeps the suggestion (what was detected, or what is already configured), which
+    is shown explicitly rather than implied by checkboxes.
     """
     default_keys = [k for k, _, selected in items if selected]
     if assume_yes:
         return default_keys or [items[0][0]]
 
+    suggested = [str(i) for i, (_k, _l, sel) in enumerate(items, start=1) if sel]
     while True:
         print(question)
-        for i, (_key, label, selected) in enumerate(items, start=1):
-            mark = "x" if selected else " "
-            print(f"  {i}. [{mark}] {label}")
-        print(
-            "Type the numbers to toggle (e.g. '1 3'), or press Enter to accept the "
-            "list shown above."
-        )
+        for i, (_key, label, _selected) in enumerate(items, start=1):
+            print(f"  {i}. {label}")
+        if suggested:
+            print(f'Enter the numbers you want, e.g. "1 3". '
+                  f'Press Enter for {" ".join(suggested)}.')
+        else:
+            print('Enter the numbers you want, e.g. "1 3".')
+
         raw = _input("> ").strip()
         if not raw:
-            chosen = list(default_keys)
-        else:
-            chosen = list(default_keys)
-            bad = False
-            for token in raw.replace(",", " ").split():
-                if not token.isdigit() or not (1 <= int(token) <= len(items)):
-                    print(f"'{token}' isn't one of the numbers listed above.")
-                    bad = True
-                    break
-                key = items[int(token) - 1][0]
-                if key in chosen:
-                    chosen.remove(key)
-                else:
-                    chosen.append(key)
-            if bad:
-                continue
+            if default_keys:
+                return default_keys
+            print("Pick at least one — TintaView needs at least one agent to do anything.")
+            continue
+
+        chosen: list[str] = []
+        bad = False
+        for token in raw.replace(",", " ").split():
+            if not token.isdigit() or not (1 <= int(token) <= len(items)):
+                print(f"'{token}' isn't one of the numbers listed above.")
+                bad = True
+                break
+            key = items[int(token) - 1][0]
+            if key not in chosen:  # "1 1 3" is a typo, not a request for duplicates
+                chosen.append(key)
+        if bad:
+            continue
         if chosen:
             return chosen
         print("Pick at least one — TintaView needs at least one agent to do anything.")
@@ -241,8 +261,9 @@ def _step_agents(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
     for adapter in adapters:
         detected = _detect_agent(adapter, env)
         preselected = detected or adapter.key in cfg.enabled_agents
-        status = "detected" if detected else "not found"
-        items.append((adapter.key, f"{adapter.display_name} — {status}", preselected))
+        mark = _MARK_READY if detected else _MARK_NOT_RUNNING
+        status = "installed" if detected else "not found — you can still pick it"
+        items.append((adapter.key, f"{mark} {adapter.display_name} — {status}", preselected))
 
     chosen = _prompt_multiselect("Which coding agents do you use?", items, assume_yes)
 
@@ -278,28 +299,65 @@ def _step_agents(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
 # --------------------------------------------------------------------------- step 4: engine
 
 
+_ENGINE_DISPLAY = {"chroma": "Razer Chroma", "openrgb": "OpenRGB"}
+
+
+#: Availability markers. Every option stays selectable — someone configuring a machine
+#: before installing Synapse or OpenRGB, or setting up over SSH, has a perfectly good
+#: reason to choose something that isn't answering yet. But an option that cannot work
+#: right now has to *say so on its own line*, or the wizard silently accepts a choice
+#: that produces no lighting at all and gives no hint why.
+_MARK_READY = "[ready]"
+_MARK_NOT_RUNNING = "[not running]"
+_MARK_UNSUPPORTED = "[unavailable here]"
+
+
 def _engine_label(name: str, env: Environment, probe_ok: bool) -> str:
+    if name == "auto":
+        return f"{_MARK_READY} Detect automatically (recommended) — use whichever is running"
     if name == "none":
-        return "Status-only (no lights, just tracks activity) — always available"
+        return f"{_MARK_READY} Status-only — no lights, just tracks activity"
+    display = _ENGINE_DISPLAY.get(name, name)
     supported = env.supports_chroma if name == "chroma" else env.supports_openrgb
     if not supported:
-        return f"{name} — not supported on this platform"
-    return f"{name} — {'detected' if probe_ok else 'not running right now'}"
+        return f"{_MARK_UNSUPPORTED} {display} — not supported on {env.platform}"
+    if probe_ok:
+        return f"{_MARK_READY} {display} — running now"
+    hint = ("start Razer Synapse" if name == "chroma"
+            else "start OpenRGB and turn on its SDK server")
+    return f"{_MARK_NOT_RUNNING} {display} — you can still pick it; {hint}"
 
 
 def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> str:
     print("\n=== Lighting ===")
     probes = dict(available_engines(cfg))
 
-    order = ["chroma", "openrgb", "none"]
+    detected = [n for n in ("chroma", "openrgb") if probes.get(n)]
+    if detected:
+        print("  Detected: " + ", ".join(_ENGINE_DISPLAY.get(n, n) for n in detected))
+    else:
+        print("  No lighting software is answering right now (Razer Synapse for Chroma, "
+              "the OpenRGB app with its SDK server on for OpenRGB).")
+
+    # "auto" first and default. Pinning a single engine is what turns "the app I picked
+    # isn't running" into "no lighting at all, silently" — auto re-probes on every start
+    # and falls back on its own, so it survives Synapse being closed or OpenRGB being
+    # installed later. The explicit choices stay for anyone running both and wanting one.
+    order = ["auto", "chroma", "openrgb", "none"]
     options = [(name, _engine_label(name, env, probes.get(name, False))) for name in order]
 
-    current = cfg.engine.mode if cfg.engine.mode in ("chroma", "openrgb", "none") else None
-    default = current or ("chroma" if probes.get("chroma") else "openrgb" if probes.get("openrgb") else "none")
+    current = cfg.engine.mode if cfg.engine.mode in ("auto", "chroma", "openrgb", "none") else None
+    default = current or "auto"
 
     choice = _prompt_choice("Which engine should drive your lights?", options, default, assume_yes)
 
-    if choice != "none":
+    if choice == "auto":
+        print(
+            "  TintaView will probe "
+            + " then ".join(_ENGINE_DISPLAY.get(n, n) for n in cfg.engine.order)
+            + " each time it starts, and fall back to status-only if neither answers."
+        )
+    elif choice != "none":
         supported = env.supports_chroma if choice == "chroma" else env.supports_openrgb
         if not supported:
             print(
@@ -324,9 +382,71 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
                 "kernel module before it can see your hardware — see openrgb.org for "
                 "the install steps for your distro."
             )
+        _ensure_openrgb_ready(cfg, assume_yes)
 
     cfg.engine.mode = choice
     return choice
+
+
+def _ensure_openrgb_ready(cfg: config_mod.Config, assume_yes: bool) -> None:
+    """Check what OpenRGB needs, and offer to install what TintaView can install.
+
+    Picking an engine in a list used to be all it took to end up with no lighting and a
+    `doctor` line blaming the SDK server — the three prerequisites (client library,
+    application, SDK server) are indistinguishable from the outside once it just doesn't
+    work. So each is named, and the two that can be automated are offered rather than
+    described.
+    """
+    from ..install import components
+
+    if not components.openrgb_python_installed():
+        print(
+            "\n  OpenRGB needs the 'openrgb-python' package, which isn't in this "
+            "TintaView environment.\n"
+            "  Without it the OpenRGB engine can't be used at all."
+        )
+        if assume_yes or _prompt_yes_no("  Install it now?", True, assume_yes):
+            ok, message = components.install_openrgb_python()
+            print(f"  {'OK: ' if ok else 'Failed: '}{message}")
+            if not ok:
+                print("  Install it by hand with: pip install openrgb-python")
+        else:
+            print("  Skipped — the OpenRGB engine will stay unavailable until it's installed.")
+
+    # The library alone proves nothing: the app has to be running and its SDK server
+    # switched on. Re-probe rather than trusting the earlier `available_engines` scan,
+    # which ran before any of the above.
+    from ..engines.openrgb import OpenRGBEngine
+
+    try:
+        reachable = OpenRGBEngine(cfg.engine.openrgb).probe()
+    except Exception:
+        reachable = False
+    if reachable:
+        print("  OpenRGB is reachable — you're set.")
+        return
+
+    o = cfg.engine.openrgb
+    print(f"\n  Nothing is answering on {o.host}:{o.port}, so OpenRGB isn't reachable yet.")
+
+    installed = components.winget_package_installed(components.OPENRGB_WINGET_ID)
+    if installed is False and components.winget_available() and not assume_yes:
+        print("  The OpenRGB application doesn't appear to be installed on this machine.")
+        if _prompt_yes_no("  Install OpenRGB now with winget?", True, assume_yes):
+            ok, message = components.winget_install(components.OPENRGB_WINGET_ID)
+            print(f"  {'OK: ' if ok else 'Failed: '}{message}")
+            if not ok:
+                print("  Download it yourself from https://openrgb.org instead.")
+    elif installed is False:
+        print("  The OpenRGB application doesn't appear to be installed — get it from "
+              "https://openrgb.org.")
+
+    # Not automatable at any point: the SDK server is off by default and lives behind a
+    # checkbox in OpenRGB's own UI.
+    print(
+        "  Then open OpenRGB and turn on Settings > SDK Server > 'Start Server', leave it "
+        "running, and re-run `tintaview setup` (or `tintaview doctor`) to confirm."
+    )
 
 
 # --------------------------------------------------------------------------- step 5: install path
@@ -530,6 +650,15 @@ def _step_verify(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
     path = config_mod.save(cfg)
     print(f"Settings saved to {path}.")
 
+    # A tray that is already running read its config at startup, so until it is restarted
+    # none of the answers above have any visible effect — which reads as "the wizard did
+    # nothing". Do it here, right after the save, so the live check below tests the
+    # instance that is actually running the new settings.
+    from ..install import restart as restart_mod
+
+    if restart_mod.restart_if_running(cfg):
+        print("Restarted TintaView so the new settings take effect.")
+
     if env.platform == PLATFORM_WINDOWS and env.mode == MODE_WSL_SPLIT and env.distro:
         from ..install import wsl as wsl_mod
 
@@ -625,7 +754,7 @@ def _run(platform_override: str | None, assume_yes: bool) -> int:
 def run_wizard(platform_override: str | None = None, assume_yes: bool = False) -> int:
     """Run the setup wizard. Returns 0 on success, matching a Unix exit code.
 
-    Called identically by `Setup.exe`'s post-install step, `install.sh`, and `tintaview
+    Called identically by `install.ps1`'s post-install step, `install.sh`, and `tintaview
     setup` — see the module docstring for why this has to stay plain text/stdin.
     """
     try:

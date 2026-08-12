@@ -2,13 +2,13 @@
 
 Per the locked decision in docs/PLAN.md, TintaView is a *single* process (tray + status
 broker in-process), so there is exactly one autostart mechanism per platform, not the
-predecessor's split of a background-service entry plus a separate tray entry:
+alternative of a background-service entry plus a separate tray entry:
 
-- **Windows**: a `.lnk` in the per-user Startup folder. No admin, no Scheduled Task —
-  the Startup folder is read by explorer.exe for the interactive user at logon, which is
-  exactly where a tray icon needs to run. Creating a real `.lnk` from Python without
-  pywin32 means shelling out to a short PowerShell one-liner that drives the
-  `WScript.Shell` COM object, same trick the predecessor's README used by hand.
+- **Windows**: a value under `HKCU\\...\\CurrentVersion\\Run`. No admin, no Scheduled
+  Task — explorer.exe runs it for the interactive user at logon, which is exactly where a
+  tray icon needs to be. This was a Startup-folder `.lnk` until Windows 11 turned out to
+  refuse *any* shortcut written into that folder as a persistence technique; see
+  `_enable_windows` for the measurements behind the switch.
 - **Linux**: a systemd `--user` unit (restart-on-failure, gated on the graphical
   session) *plus* an XDG `~/.config/autostart/*.desktop` entry. The two are not
   redundant: systemd `--user` may be unavailable or not import the graphical session's
@@ -92,14 +92,28 @@ _MACOS_PLIST_TEMPLATE = """\
 def _executable_command() -> list[str]:
     """The command line that should run TintaView at login.
 
-    A PyInstaller build sets `sys.frozen`, and there `sys.executable` *is* the app (no
-    interpreter to reinvoke). Otherwise prefer the `tintaview` console-script that
-    `install.sh` puts on PATH, resolved fresh each time so autostart keeps working even
-    if the venv is later reinstalled at the same prefix; fall back to `python -m
-    tintaview` for a from-checkout dev run that never went through the installer.
+    Windows deliberately does *not* use the `tintaview` console script, even though pip
+    puts one in the venv's Scripts directory. Two reasons, both load-bearing:
+
+    - It is a console application, so a login launch would park an empty console window
+      on the taskbar for the whole session behind a tray app that has no terminal UI.
+      `pythonw.exe` is the windowed interpreter and shows nothing.
+    - `pythonw.exe` carries the Python Software Foundation's Authenticode signature, and
+      a venv's copy of it keeps that signature; the pip-generated shim is an unsigned
+      binary. Windows **Smart App Control** only permits executables that are signed or
+      cloud-reputable, so routing the login entry point through the signed interpreter
+      keeps autostart working on machines where SAC is enforcing (see `__main__.py`).
+
+    Elsewhere, prefer the `tintaview` console script `install.sh` puts on PATH, resolved
+    fresh each time so autostart keeps working even if the venv is later reinstalled at
+    the same prefix. `python -m tintaview` is the fallback everywhere, and is what a
+    from-checkout dev run that never went through an installer ends up on.
     """
-    if getattr(sys, "frozen", False):
-        return [sys.executable]
+    if sys.platform == "win32":
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        if pythonw.exists():
+            return [str(pythonw), "-m", "tintaview"]
+        return [sys.executable, "-m", "tintaview"]
     exe = shutil.which("tintaview")
     if exe:
         return [exe]
@@ -135,67 +149,98 @@ def _write_text(path: Path, content: str) -> bool:
 # --------------------------------------------------------------------------- Windows
 
 
+#: The per-user autorun key explorer.exe reads at logon. Per-user, so no admin is needed,
+#: and it is a plain registry value rather than a Scheduled Task (docs/PLAN.md §0).
+_WINDOWS_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_WINDOWS_RUN_VALUE = "TintaView"
+
+
 def _windows_startup_dir() -> Path:
     appdata = os.environ.get("APPDATA")
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
     return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 
 
-def _windows_shortcut_path() -> Path:
+def _windows_legacy_shortcut_path() -> Path:
+    """Where autostart used to live, kept only so `disable()` can still clean it up."""
     return _windows_startup_dir() / "TintaView.lnk"
 
 
-def _ps_quote(value: str) -> str:
-    """Single-quote a value for a PowerShell -Command string (double any embedded ')."""
-    return "'" + value.replace("'", "''") + "'"
+def _enable_windows(command: list[str]) -> bool:
+    """Register the login command in HKCU's Run key.
 
+    **Not a Startup-folder shortcut**, which is what this used to be. Windows 11 blocks
+    any `.lnk` from landing in the Startup folder: creating one there through
+    `WScript.Shell` fails with an access-denied error, and so does building it elsewhere
+    and copying it in — measured on a stock machine with Controlled Folder Access off and
+    no Attack Surface Reduction rules configured, so this is the built-in persistence
+    protection, not something the user opted into or can be asked to turn off. Writing a
+    plain file into that same folder succeeds, so it is specifically shortcuts-as-autorun
+    that are refused.
 
-def _enable_windows(target: Path, workdir: Path) -> bool:
-    shortcut = _windows_shortcut_path()
+    The Run key is the other per-user autorun mechanism, needs no admin, and is written
+    with `winreg` — no PowerShell subprocess and no COM. It keeps every property the
+    locked decision actually cared about: one entry, per-user, no Scheduled Task.
+    """
+    import winreg  # Windows-only stdlib module; importing at call time keeps this file importable everywhere
+
+    # The Run key holds a single command *string*, not a program plus separate arguments
+    # the way a .lnk does, so the whole command line is quoted here. list2cmdline applies
+    # the rules Windows itself parses with, which matters the moment the venv sits under
+    # a path containing a space -- as %LOCALAPPDATA% does for plenty of user names.
+    value = subprocess.list2cmdline(command)
     try:
-        shortcut.parent.mkdir(parents=True, exist_ok=True)
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _WINDOWS_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, _WINDOWS_RUN_VALUE, 0, winreg.REG_SZ, value)
     except OSError as exc:
-        log.warning("autostart: could not create %s: %s", shortcut.parent, exc)
-        return False
-
-    shortcut_q, target_q, workdir_q = (
-        _ps_quote(str(shortcut)), _ps_quote(str(target)), _ps_quote(str(workdir))
-    )
-    script = (
-        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({shortcut_q}); "
-        f"$s.TargetPath = {target_q}; $s.WorkingDirectory = {workdir_q}; $s.Save()"
-    )
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
-    try:
-        result = subprocess.run(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, timeout=_SUBPROCESS_TIMEOUT, check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("autostart: could not launch PowerShell to create the Startup "
-                    "shortcut: %s", exc)
-        return False
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", "ignore").strip() if result.stderr else ""
-        log.warning("autostart: creating the Startup shortcut failed (exit %s): %s",
-                    result.returncode, stderr)
+        log.warning("autostart: could not write the Run key value: %s", exc)
         return False
     return True
 
 
 def _disable_windows() -> bool:
-    shortcut = _windows_shortcut_path()
+    import winreg
+
+    ok = True
     try:
-        if shortcut.exists():
-            shortcut.unlink()
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _WINDOWS_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.DeleteValue(key, _WINDOWS_RUN_VALUE)
+    except FileNotFoundError:
+        pass  # already absent, which is the state disable() is asked to produce
     except OSError as exc:
-        log.warning("autostart: could not remove %s: %s", shortcut, exc)
-        return False
-    return True
+        log.warning("autostart: could not remove the Run key value: %s", exc)
+        ok = False
+
+    # Also clear the Startup shortcut this used to create, so an install that predates
+    # the switch does not end up launching TintaView twice at login.
+    legacy = _windows_legacy_shortcut_path()
+    try:
+        if legacy.exists():
+            legacy.unlink()
+    except OSError as exc:
+        log.warning("autostart: could not remove %s: %s", legacy, exc)
+        ok = False
+    return ok
 
 
 def _status_windows() -> bool:
-    return _windows_shortcut_path().exists()
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _WINDOWS_RUN_KEY, 0, winreg.KEY_QUERY_VALUE
+        ) as key:
+            winreg.QueryValueEx(key, _WINDOWS_RUN_VALUE)
+    except FileNotFoundError:
+        return _windows_legacy_shortcut_path().exists()
+    except OSError as exc:
+        log.warning("autostart: could not read the Run key value: %s", exc)
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- Linux
@@ -376,8 +421,7 @@ def enable(cfg: Config | None = None) -> bool:
     command = _executable_command()
     try:
         if sys.platform == "win32":
-            target = Path(command[0])
-            return _enable_windows(target, target.parent)
+            return _enable_windows(command)
         if sys.platform == "darwin":
             return _enable_macos(command)
         return _enable_linux(command)

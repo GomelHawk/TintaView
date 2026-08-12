@@ -75,6 +75,10 @@ def make_cfg() -> Config:
     cfg.server.port = 0  # ephemeral: lets many tests/servers run without clashing
     cfg.server.host = "127.0.0.1"
     cfg.colors.blink_ms = 20  # fast blink so tests don't need long sleeps
+    # `Config()` enables only "claude" by default, and the ingress now drops events for
+    # agents the user hasn't enabled. These tests are about the state machine, not that
+    # filter (which `test_disabled_agent_events_are_ignored` covers), so enable all three.
+    cfg.enabled_agents = ["claude", "codex", "cursor"]
     return cfg
 
 
@@ -151,7 +155,9 @@ def test_full_session_lifecycle(server_engine):
 
     _event(server, "working", agent="claude", sid="s1")
     assert _wait_until(lambda: _get_state(server)["effective"] == "working")
-    assert engine.colors[-1] == cfg.colors.rgb("working")
+    # device_rgb, not rgb: the hardware gets saturated primaries, the tray icon
+    # gets the brand palette (see DeviceColorsConfig).
+    assert engine.colors[-1] == cfg.colors.device_rgb("working")
 
     _event(server, "confirm", agent="claude", sid="s1")
     assert _wait_until(lambda: _get_state(server)["effective"] == "confirm")
@@ -159,7 +165,7 @@ def test_full_session_lifecycle(server_engine):
     # Poll for both blink halves rather than sleeping a fixed window and snapshotting:
     # the (fast, 20ms-period) blink thread's actual wake-up latency is at the mercy of
     # the OS scheduler, which can be surprisingly slow on loaded CI hosts.
-    assert _wait_until(lambda: cfg.colors.rgb("confirm") in engine.colors[-5:])
+    assert _wait_until(lambda: cfg.colors.device_rgb("confirm") in engine.colors[-5:])
     assert _wait_until(lambda: (0, 0, 0) in engine.colors[-5:])
 
     _event(server, "idle", agent="claude", sid="s1")
@@ -396,3 +402,56 @@ def test_controller_thread_safety_smoke():
 
     assert not errors
     controller.shutdown()
+
+
+def test_disabled_agent_events_are_ignored():
+    """Unticking an agent must stop it driving the lighting, not just stop hook management.
+
+    A hook entry left behind in that agent's config (installed by an earlier run, by hand,
+    or in a project-scoped file) keeps firing regardless of what TintaView thinks, so the
+    filter has to live at the ingress.
+    """
+    cfg = make_cfg()
+    cfg.enabled_agents = ["claude"]
+    server, engine = make_server(cfg)
+    try:
+        _event(server, "session-start", agent="cursor", sid="c1")
+        _event(server, "working", agent="cursor", sid="c1")
+
+        state = _get_state(server)
+        assert state["agents"] == {}, "a disabled agent must not appear in /state"
+        assert state["effective"] == "none"
+        assert engine.colors == [], "a disabled agent must not touch the lighting"
+
+        # ...while an enabled one on the same server is unaffected.
+        _event(server, "session-start", agent="claude", sid="a1")
+        _event(server, "working", agent="claude", sid="a1")
+        assert _get_state(server)["agents"]["claude"]["effective"] == "working"
+    finally:
+        server.stop()
+
+
+def test_hardware_gets_saturated_colours_not_the_brand_palette():
+    """The tray icon and the LEDs are different media and need different colours.
+
+    The brand red is RGB(244, 45, 60) — more blue than green — which an RGB LED behind a
+    diffuser renders visibly pink/purple instead of "stop and look" red.
+    """
+    cfg = make_cfg()
+    server, engine = make_server(cfg)
+    try:
+        _event(server, "session-start", agent="claude", sid="s1")
+        _event(server, "confirm", agent="claude", sid="s1")
+        assert _wait_until(lambda: (255, 0, 0) in engine.colors[-5:]), "hardware must get pure red"
+        # The two palettes are resolved independently: changing the icon's colour must
+        # not follow through to the LEDs.
+        cfg.colors.confirm = "#123456"
+        assert cfg.colors.device_rgb("confirm") == (255, 0, 0)
+    finally:
+        server.stop()
+
+
+def test_blank_device_colour_falls_back_to_the_brand_colour():
+    cfg = make_cfg()
+    cfg.colors.device.confirm = ""
+    assert cfg.colors.device_rgb("confirm") == cfg.colors.rgb("confirm")

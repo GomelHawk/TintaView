@@ -7,6 +7,7 @@ platform's own command reports "not enabled" even though the file is still on di
 
 from __future__ import annotations
 
+import contextlib
 import sys
 
 import pytest
@@ -160,50 +161,118 @@ def test_linux_status_true_from_desktop_file_alone(tmp_path, monkeypatch, fake_w
 # --------------------------------------------------------------------------- Windows
 
 
-def test_windows_enable_invokes_powershell_and_never_shells_to_real_powershell(
-    tmp_path, monkeypatch, fake_run, fake_which
+class FakeWinreg:
+    """A stand-in for the `winreg` stdlib module, which only exists on Windows.
+
+    The Windows backend has to be exercised on the Linux/macOS CI runners too, and a real
+    registry write would be an unacceptable side effect even when they *are* Windows.
+    Modelled closely enough to catch the mistakes that matter: the key/value names, the
+    exact command string written, and `FileNotFoundError` for a value that isn't there
+    (which is what `winreg` actually raises, and what `disable()`/`status()` branch on).
+    """
+
+    HKEY_CURRENT_USER = "HKCU"
+    KEY_SET_VALUE = 0x0002
+    KEY_QUERY_VALUE = 0x0001
+    REG_SZ = 1
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.opened: list[tuple[str, str, int]] = []
+
+    def OpenKey(self, root, sub_key, reserved, access):  # noqa: N802 - mirrors winreg's API
+        self.opened.append((root, sub_key, access))
+        return contextlib.nullcontext(self)
+
+    def SetValueEx(self, key, name, reserved, type_, value):  # noqa: N802
+        self.values[name] = value
+
+    def QueryValueEx(self, key, name):  # noqa: N802
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        return (self.values[name], self.REG_SZ)
+
+    def DeleteValue(self, key, name):  # noqa: N802
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        del self.values[name]
+
+
+@pytest.fixture
+def fake_winreg(monkeypatch):
+    fake = FakeWinreg()
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    return fake
+
+
+def test_windows_enable_writes_the_run_key_not_a_startup_shortcut(
+    tmp_path, monkeypatch, fake_run, fake_which, fake_winreg
 ):
+    """Windows 11 blocks any .lnk written into the Startup folder — see `_enable_windows`."""
     monkeypatch.setattr(sys, "platform", "win32")
     appdata = tmp_path / "AppData" / "Roaming"
     monkeypatch.setenv("APPDATA", str(appdata))
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "TintaView" / "TintaView.exe"))
+    venv_scripts = tmp_path / "Program Files" / "TintaView" / "venv" / "Scripts"
+    venv_scripts.mkdir(parents=True)
+    (venv_scripts / "pythonw.exe").write_bytes(b"")
+    monkeypatch.setattr(sys, "executable", str(venv_scripts / "python.exe"))
 
     assert autostart.enable() is True
 
-    shortcut = (appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-                / "TintaView.lnk")
-    assert shortcut.parent.exists()  # the Startup dir was created for the .lnk to land in
+    # Nothing was shelled out to: no PowerShell, no COM, no subprocess at all.
+    assert fake_run.calls == []
+    startup = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    assert not startup.exists(), "the Startup folder must not be touched any more"
 
-    assert len(fake_run.calls) == 1
-    cmd = fake_run.calls[0]
-    assert cmd[0].lower().endswith("powershell.exe")
-    script = cmd[-1]
-    assert "WScript.Shell" in script
-    assert "CreateShortcut" in script
-    assert str(shortcut) in script
-    assert "TintaView.exe" in script
+    assert fake_winreg.opened[0][1] == r"Software\Microsoft\Windows\CurrentVersion\Run"
+    value = fake_winreg.values["TintaView"]
+    # The windowed, PSF-signed interpreter — not the unsigned pip console shim, and not
+    # python.exe, which would leave a console window open for the whole session.
+    assert "pythonw.exe" in value
+    assert value.endswith("-m tintaview")
+    # The install prefix here contains a space, which is the normal case under
+    # %LOCALAPPDATA% for most user names: the path must come back out quoted.
+    assert value.startswith('"') and '" -m' in value
 
 
-def test_windows_status_and_disable(tmp_path, monkeypatch, fake_run, fake_which):
+def test_windows_status_and_disable(tmp_path, monkeypatch, fake_run, fake_which, fake_winreg):
     monkeypatch.setattr(sys, "platform", "win32")
     appdata = tmp_path / "AppData" / "Roaming"
     monkeypatch.setenv("APPDATA", str(appdata))
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "TintaView.exe"))
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "venv" / "Scripts" / "python.exe"))
 
     assert autostart.status() is False
-
-    autostart.enable()
-    shortcut = (appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-                / "TintaView.lnk")
-    # enable() only invokes PowerShell (stubbed above) to create the real binary .lnk;
-    # simulate what that call would have produced so status()/disable() have a file to see.
-    shortcut.write_bytes(b"")
-
+    assert autostart.enable() is True
     assert autostart.status() is True
+
     assert autostart.disable() is True
-    assert not shortcut.exists()
+    assert autostart.status() is False
+    assert "TintaView" not in fake_winreg.values
+
+    # disable() on an already-disabled install is a no-op, not an error: winreg raises
+    # FileNotFoundError for a missing value and that must not surface as a failure.
+    assert autostart.disable() is True
+
+
+def test_windows_disable_also_clears_a_legacy_startup_shortcut(
+    tmp_path, monkeypatch, fake_run, fake_which, fake_winreg
+):
+    """An install predating the Run-key switch must not end up launching twice."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    appdata = tmp_path / "AppData" / "Roaming"
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "venv" / "Scripts" / "python.exe"))
+
+    legacy = (appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+              / "TintaView.lnk")
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"")
+
+    # With no Run-key value, status() still reports the old shortcut as "enabled".
+    assert autostart.status() is True
+
+    assert autostart.disable() is True
+    assert not legacy.exists()
     assert autostart.status() is False
 
 

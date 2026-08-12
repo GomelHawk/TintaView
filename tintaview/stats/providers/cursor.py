@@ -31,6 +31,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -156,32 +157,83 @@ def _find_number(obj: Any, names: tuple[str, ...]) -> float | None:
     return None
 
 
-def _parse_usage(payload: dict[str, Any]) -> UsageRow | None:
-    # GUESSED field names — none of this is documented. Candidates chosen from the
-    # plausible shape described in PLAN.md 6.3 ("plan usage in cents, remaining, %").
-    # If neither a percent nor a cents figure turns up anywhere in the payload, this
-    # is treated as an unrecognised response, not a zero.
-    percent = _find_number(payload, ("percent", "pct", "utilization"))
-    cents_used = _find_number(payload, ("usedcents", "spendcents", "cents"))
-    limit_cents = _find_number(payload, ("limitcents", "hardlimit", "limit"))
+def _fmt_cycle_end(value: Any) -> str:
+    """Billing-cycle end as "Resets 14 Sep", from an epoch-milliseconds string.
 
-    if percent is None and cents_used is None:
+    Observed as a 13-character digit string (``"1789125077000"``). Seconds are accepted
+    too, so a change of unit degrades to a wrong-but-harmless label rather than a crash.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text.lstrip("+-").isdigit():
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return ""
+    if abs(number) > 1e11:  # 1e11 seconds is year 5138 — this is milliseconds
+        number /= 1000.0
+    try:
+        dt = datetime.fromtimestamp(number, UTC).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return f"Resets {dt.day} {_MONTHS[dt.month - 1]}"
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _usage_row(label: str, pct: Any, right: str) -> UsageRow | None:
+    if not isinstance(pct, int | float) or isinstance(pct, bool):
         return None
+    severity = "critical" if pct >= 90 else "warning" if pct >= 75 else "normal"
+    return UsageRow(label=label, pct=float(pct), right=right, show_pct=True,
+                    severity=severity, kind="limit")
 
-    right = ""
-    if cents_used is not None and limit_cents:
-        right = f"${cents_used / 100:.2f} of ${limit_cents / 100:.2f}"
-    elif cents_used is not None:
-        right = f"${cents_used / 100:.2f} used this period"
 
-    return UsageRow(
-        label="Current period usage",
-        pct=float(percent) if percent is not None else 0.0,
-        right=right,
-        show_pct=percent is not None,
-        severity="normal",
-        kind="limit" if percent is not None else "info",
-    )
+def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
+    """The two quotas a Pro plan actually has, matching Cursor's own usage screen.
+
+    Field names confirmed against a live `GetCurrentPeriodUsage` response rather than
+    guessed (an earlier version searched for any key containing "percent" and so
+    collapsed both quotas into one row showing whichever it hit first):
+
+        planUsage.autoPercentUsed  -> "Cursor Models" (Composer, Cursor Grok, …)
+        planUsage.apiPercentUsed   -> "Other Models"  (third-party models, on-demand spend)
+        planUsage.includedSpend    -> cents of API usage the plan includes
+        billingCycleEnd            -> epoch millis, shared by both quotas
+
+    Returns [] for a response carrying neither percentage, which the caller reports as an
+    unrecognised payload — deliberately not a row of zeroes, which would look like real
+    "you have used nothing" data.
+    """
+    plan = payload.get("planUsage")
+    if not isinstance(plan, dict):
+        return []
+
+    resets = _fmt_cycle_end(payload.get("billingCycleEnd"))
+    rows: list[UsageRow] = []
+
+    auto = _usage_row("Cursor Models", plan.get("autoPercentUsed"), resets)
+    if auto is not None:
+        rows.append(auto)
+
+    # The included API allowance is what makes "Other Models" legible — Cursor's own UI
+    # says "your plan includes at least $20 of API usage" next to this bar. Only shown
+    # when the cycle-reset text isn't already occupying the first row's slot.
+    api_right = ""
+    included = plan.get("includedSpend")
+    if isinstance(included, int | float) and not isinstance(included, bool) and included > 0:
+        api_right = f"${included / 100:,.2f} included"
+    elif not rows:
+        api_right = resets
+    api = _usage_row("Other Models", plan.get("apiPercentUsed"), api_right)
+    if api is not None:
+        rows.append(api)
+
+    return rows
 
 
 # --------------------------------------------------------------------------- provider
@@ -217,10 +269,10 @@ class CursorUsageProvider(UsageProvider):
             return UsageResult(agent=self.key, error=f"Cursor usage unavailable: {e!r}")
 
         log.debug("cursor usage payload shape: %s", _shape(data))
-        row = _parse_usage(data)
-        if row is None:
+        rows = _parse_usage(data)
+        if not rows:
             return UsageResult(agent=self.key, error="Cursor usage unavailable (unofficial endpoint changed).")
-        return UsageResult(agent=self.key, rows=[row], header="Cursor usage", source="official")
+        return UsageResult(agent=self.key, rows=rows, header="Included in Pro", source="official")
 
     def _post_with_retry(self, token: str, db_path: Path, timeout: float) -> dict[str, Any]:
         try:

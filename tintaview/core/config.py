@@ -1,7 +1,7 @@
 """TintaView configuration — one TOML file shared by the daemon, tray, wizard and doctor.
 
 Deliberately dependency-free: `tomllib` reads it and a small writer below emits it, so
-the config layer works on a bare WSL distro and inside a PyInstaller bundle. Unknown keys
+the config layer works on a bare WSL distro with nothing else installed. Unknown keys
 in the file are preserved on load (`Config.extra`) but not round-tripped through nested
 tables — the wizard is the writer of record.
 """
@@ -106,6 +106,27 @@ class EngineConfig:
 
 
 @dataclass
+class DeviceColorsConfig:
+    """Status colours sent to the **lighting hardware**, kept separate from the icon's.
+
+    The brand palette in :class:`ColorsConfig` is designed for a 16px tray icon on a
+    screen, where a colour is judged next to its neighbours and subtle hues read fine. An
+    RGB LED behind a diffuser is a different medium: whatever sits in the secondary
+    channels desaturates the hue, and blue reads far brighter per unit than red. The
+    brand red ``#F42D3C`` is RGB(244, 45, 60) — *more blue than green* — and on a mouse
+    or headset it comes out visibly pink/purple rather than "stop and look" red.
+
+    So hardware gets fully saturated primaries: unmistakable at a glance, across the room,
+    on any diffuser. Set any of these to ``""`` to fall back to the icon's brand colour.
+    """
+
+    idle: str = "#00FF00"  # green
+    working: str = "#FFC800"  # amber — pure #FFFF00 skews green on most RGB LEDs
+    confirm: str = "#FF0000"  # red
+    none: str = "#0080F7"  # the brand blue: no session, so nothing to signal
+
+
+@dataclass
 class ColorsConfig:
     """Status colours, sampled from the TintaView mark's own gradient.
 
@@ -113,25 +134,38 @@ class ColorsConfig:
     map straight onto it, so the tray icon always looks like the logo in one of its own
     hues rather than an arbitrary traffic light:
 
-        none    no agent session at all        blue    #0080F7  (the mark's blue rays)
-        idle    session open, waiting on you   green   #56D155  (the mark's green rays)
-        working the agent is busy              yellow  #F0B30C  (the mark's yellow rays)
-        confirm the agent needs you to act     red     #F42D3C  (see below)
+        none    no agent session at all        blue    #0084FF  (the mark's blue rays)
+        idle    session open, waiting on you   green   #30EA2F  (the mark's green rays)
+        working the agent is busy              amber   #FFBB00  (the mark's yellow rays)
+        confirm the agent needs you to act     red     #FF0013  (see below)
 
     Red is the one colour the logo doesn't contain — its warm end stops at orange
     (#FA8B07), which is too close to the working yellow to read as "stop and look" at
-    16px. So confirm uses a red picked to sit in the same saturated family as the rest of
-    the palette while staying unmistakably distinct from the orange dot.
+    16px. So confirm uses a red picked to sit in the same family as the rest of the
+    palette while staying unmistakably distinct from the orange dot.
+
+    Each hue is taken straight from the mark, then pushed to a higher saturation and
+    value than the logo art uses. The gradient's own tones are tuned for a large mark on
+    a white page; at 16-24px against an arbitrary taskbar they read as muted pastels, and
+    the *point* of this icon is that its colour is identifiable at a glance without
+    looking twice. Hue is unchanged, so it still reads as the logo.
     """
 
-    idle: str = "#56D155"
-    working: str = "#F0B30C"
-    confirm: str = "#F42D3C"
-    none: str = "#0080F7"
+    idle: str = "#30EA2F"
+    working: str = "#FFBB00"
+    confirm: str = "#FF0013"
+    none: str = "#0084FF"
     blink_ms: int = 400
+    device: DeviceColorsConfig = field(default_factory=lambda: DeviceColorsConfig())
 
     def rgb(self, status: str) -> tuple[int, int, int]:
+        """The **tray icon** colour for `status` — the brand palette above."""
         return hex_to_rgb(getattr(self, status, self.none))
+
+    def device_rgb(self, status: str) -> tuple[int, int, int]:
+        """The **hardware** colour for `status`, falling back to the icon colour."""
+        override = getattr(self.device, status, "")
+        return hex_to_rgb(override) if override else self.rgb(status)
 
 
 @dataclass
@@ -237,7 +271,7 @@ def load(path: Path | None = None) -> Config:
         version=int(raw.get("version", CONFIG_VERSION)),
         server=_build(ServerConfig, raw.get("server", {})),
         engine=engine,
-        colors=_build(ColorsConfig, raw.get("colors", {})),
+        colors=_colors(raw.get("colors", {})),
         stats=_build(StatsConfig, raw.get("stats", {})),
         ui=_build(UIConfig, raw.get("ui", {})),
         update=_build(UpdateConfig, raw.get("update", {})),
@@ -263,6 +297,20 @@ def _toml_value(value: Any) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
+def _colors(raw: Any) -> ColorsConfig:
+    """Assemble `[colors]` plus its nested `[colors.device]`.
+
+    `_build` drops nested tables (it only fills flat fields), so the device palette has
+    to be attached explicitly — same pattern as `engine.chroma`. A config with no
+    `[colors.device]` section gets the saturated defaults rather than inheriting the
+    brand palette, which is the whole point: hardware and icon want different colours.
+    """
+    cfg = _build(ColorsConfig, raw)
+    if isinstance(raw, dict):
+        cfg.device = _build(DeviceColorsConfig, raw.get("device", {}))
+    return cfg
+
+
 def _table(name: str, obj: Any) -> list[str]:
     lines = [f"[{name}]"]
     for f in fields(obj):
@@ -283,6 +331,7 @@ def dumps(cfg: Config) -> str:
     out += _table("engine.chroma", cfg.engine.chroma)
     out += _table("engine.openrgb", cfg.engine.openrgb)
     out += _table("colors", cfg.colors)
+    out += _table("colors.device", cfg.colors.device)
     out += _table("stats", cfg.stats)
     out += _table("ui", cfg.ui)
     out += _table("update", cfg.update)

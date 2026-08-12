@@ -62,6 +62,31 @@ def _isolated(tmp_path, monkeypatch):
     return home, tv_home
 
 
+@pytest.fixture(autouse=True)
+def _no_real_component_installs(monkeypatch):
+    """No test may run pip, run winget, or probe a real OpenRGB socket.
+
+    The wizard offers to install missing prerequisites, and its default answer is "yes" —
+    without this a test that picks OpenRGB would shell out to the network on a
+    developer's machine.
+    """
+    from tintaview.engines import openrgb as openrgb_engine
+    from tintaview.install import components
+
+    monkeypatch.setattr(components, "openrgb_python_installed", lambda: True)
+    monkeypatch.setattr(components, "winget_available", lambda: False)
+    monkeypatch.setattr(components, "winget_package_installed", lambda pkg: None)
+    monkeypatch.setattr(
+        components, "install_openrgb_python",
+        lambda: pytest.fail("the wizard tried to run pip"),
+    )
+    monkeypatch.setattr(
+        components, "winget_install",
+        lambda pkg: pytest.fail("the wizard tried to run winget"),
+    )
+    monkeypatch.setattr(openrgb_engine.OpenRGBEngine, "probe", lambda self: False)
+
+
 def _feed(monkeypatch, answers: list[str]):
     """`input()` returns each of `answers` in turn, then EOFError — like stdin closing."""
     it = iter(answers)
@@ -136,12 +161,16 @@ def test_rerun_keeps_current_engine_as_default(monkeypatch, _isolated):
     assert cfg.engine.mode == "openrgb"
 
 
-def test_enforces_at_least_one_agent(monkeypatch, capsys, _isolated):
+def test_agent_numbers_are_a_selection_not_a_toggle(monkeypatch, capsys, _isolated):
+    """Typing "1" means "I want agent 1", not "flip agent 1's checkbox".
+
+    The toggle reading is the confusing one: with everything pre-ticked, "1 3" *removed*
+    those two — the opposite of what it looks like it does.
+    """
     home, tv_home = _isolated
     _feed(monkeypatch, [
         "",   # platform: accept
-        "1",  # agents: toggle claude OFF -> empty selection -> must re-prompt
-        "1",  # agents: toggle claude back ON
+        "1",  # agents: claude, and only claude
         "",   # engine: accept default
         "",   # install path: accept default
         "n",  # autostart: no
@@ -150,12 +179,54 @@ def test_enforces_at_least_one_agent(monkeypatch, capsys, _isolated):
     ])
 
     assert wizard.run_wizard() == 0
+    assert config_mod.load(tv_home / "config.toml").enabled_agents == ["claude"]
 
-    out = capsys.readouterr().out
-    assert "at least one" in out.lower()
 
-    cfg = config_mod.load(tv_home / "config.toml")
-    assert cfg.enabled_agents == ["claude"]
+def test_multiselect_returns_exactly_what_was_typed(monkeypatch):
+    items = [("a", "Agent A", True), ("b", "Agent B", True), ("c", "Agent C", True)]
+    _feed(monkeypatch, ["1 3"])
+    assert wizard._prompt_multiselect("q", items, assume_yes=False) == ["a", "c"]
+
+
+def test_multiselect_accepts_commas_and_ignores_repeats(monkeypatch):
+    items = [("a", "A", False), ("b", "B", False), ("c", "C", False)]
+    _feed(monkeypatch, ["3,1,1"])
+    assert wizard._prompt_multiselect("q", items, assume_yes=False) == ["c", "a"]
+
+
+def test_multiselect_enter_keeps_the_suggestion(monkeypatch):
+    items = [("a", "A", True), ("b", "B", False), ("c", "C", True)]
+    _feed(monkeypatch, [""])
+    assert wizard._prompt_multiselect("q", items, assume_yes=False) == ["a", "c"]
+
+
+def test_multiselect_requires_a_pick_when_nothing_is_suggested(monkeypatch, capsys):
+    """Enter can't mean "keep the suggestion" when there is no suggestion to keep."""
+    items = [("a", "A", False), ("b", "B", False)]
+    _feed(monkeypatch, ["", "2"])
+    assert wizard._prompt_multiselect("q", items, assume_yes=False) == ["b"]
+    assert "at least one" in capsys.readouterr().out.lower()
+
+
+def test_choice_is_answered_by_number(monkeypatch):
+    options = [("chroma", "Razer Chroma"), ("openrgb", "OpenRGB"), ("none", "Status only")]
+    _feed(monkeypatch, ["2"])
+    assert wizard._prompt_choice("q", options, "chroma", assume_yes=False) == "openrgb"
+
+
+def test_choice_still_accepts_the_key_and_defaults_on_enter(monkeypatch):
+    options = [("chroma", "Razer Chroma"), ("openrgb", "OpenRGB")]
+    _feed(monkeypatch, ["openrgb"])
+    assert wizard._prompt_choice("q", options, "chroma", assume_yes=False) == "openrgb"
+    _feed(monkeypatch, [""])
+    assert wizard._prompt_choice("q", options, "chroma", assume_yes=False) == "chroma"
+
+
+def test_choice_reprompts_on_an_out_of_range_number(monkeypatch, capsys):
+    options = [("a", "A"), ("b", "B")]
+    _feed(monkeypatch, ["7", "1"])
+    assert wizard._prompt_choice("q", options, "b", assume_yes=False) == "a"
+    assert "1 to 2" in capsys.readouterr().out
 
 
 def test_hook_diff_shown_but_not_applied_when_declined(monkeypatch, capsys, _isolated):
@@ -380,3 +451,208 @@ def test_agent_homes_unc_degrades_to_empty_dict_when_unreachable(monkeypatch, ws
 
     monkeypatch.setattr(wsl_mod, "distro_home", boom)
     assert wsl_mod.agent_homes_unc("Ubuntu") == {}
+
+
+# --------------------------------------------------------------------------- restart
+
+
+def test_restart_targets_the_pid_the_daemon_reports(monkeypatch):
+    """Identified by reported PID, never by scanning for python processes.
+
+    A developer's machine can easily have a checkout, a test run and an install all
+    looking like "a python process running tintaview"; killing the wrong one is worse
+    than not restarting at all.
+    """
+    from tintaview.core.config import Config
+    from tintaview.install import restart as restart_mod
+
+    stopped: list[int] = []
+    launched: list[bool] = []
+    monkeypatch.setattr(restart_mod, "running_pid", lambda cfg: 4242)
+    monkeypatch.setattr(restart_mod, "_stop", lambda pid: stopped.append(pid) or True)
+    monkeypatch.setattr(restart_mod, "_launch", lambda: launched.append(True) or True)
+
+    assert restart_mod.restart_if_running(Config()) is True
+    assert stopped == [4242]
+    assert launched == [True]
+
+
+def test_restart_is_a_no_op_when_nothing_is_running(monkeypatch):
+    """The fresh-install path: the installer starts the tray itself after the wizard."""
+    from tintaview.core.config import Config
+    from tintaview.install import restart as restart_mod
+
+    def boom():
+        raise AssertionError("must not launch a second copy when none was running")
+
+    monkeypatch.setattr(restart_mod, "running_pid", lambda cfg: None)
+    monkeypatch.setattr(restart_mod, "_launch", boom)
+    assert restart_mod.restart_if_running(Config()) is False
+
+
+def test_restart_never_kills_the_wizards_own_process(monkeypatch):
+    import os
+
+    from tintaview.core.config import Config
+    from tintaview.install import restart as restart_mod
+
+    def boom(pid):
+        raise AssertionError("asked to kill the process running the wizard")
+
+    monkeypatch.setattr(restart_mod, "running_pid", lambda cfg: os.getpid())
+    monkeypatch.setattr(restart_mod, "_stop", boom)
+    assert restart_mod.restart_if_running(Config()) is False
+
+
+def test_restart_failure_never_breaks_the_wizard(monkeypatch):
+    from tintaview.core.config import Config
+    from tintaview.install import restart as restart_mod
+
+    def boom(cfg):
+        raise RuntimeError("network stack on fire")
+
+    monkeypatch.setattr(restart_mod, "running_pid", boom)
+    assert restart_mod.restart_if_running(Config()) is False
+
+
+# --------------------------------------------------------------------------- prerequisites
+
+
+def test_openrgb_offers_to_install_the_missing_client_library(monkeypatch, capsys):
+    """Choosing OpenRGB with nothing to talk to it used to just write config and go quiet.
+
+    The user then got no lighting plus a `doctor` line blaming the SDK server — advice
+    that sends them to fix software that was never the problem.
+    """
+    from tintaview.core.config import Config
+    from tintaview.install import components
+
+    installed: list[bool] = []
+    monkeypatch.setattr(components, "openrgb_python_installed", lambda: False)
+    monkeypatch.setattr(
+        components, "install_openrgb_python",
+        lambda: (installed.append(True), (True, "openrgb-python installed"))[1],
+    )
+    _feed(monkeypatch, ["y"])  # yes, install it
+
+    wizard._ensure_openrgb_ready(Config(), assume_yes=False)
+
+    assert installed == [True]
+    out = capsys.readouterr().out
+    assert "openrgb-python" in out
+    # And the part nothing can automate is still spelled out.
+    assert "SDK Server" in out
+
+
+def test_openrgb_declining_the_install_is_respected(monkeypatch, capsys):
+    from tintaview.core.config import Config
+    from tintaview.install import components
+
+    monkeypatch.setattr(components, "openrgb_python_installed", lambda: False)
+    monkeypatch.setattr(
+        components, "install_openrgb_python",
+        lambda: pytest.fail("installed despite the user declining"),
+    )
+    _feed(monkeypatch, ["n"])
+
+    wizard._ensure_openrgb_ready(Config(), assume_yes=False)
+    assert "skipped" in capsys.readouterr().out.lower()
+
+
+def test_openrgb_offers_winget_only_when_the_app_is_actually_absent(monkeypatch, capsys):
+    from tintaview.core.config import Config
+    from tintaview.install import components
+
+    calls: list[str] = []
+    monkeypatch.setattr(components, "winget_available", lambda: True)
+    monkeypatch.setattr(components, "winget_package_installed", lambda pkg: False)
+    monkeypatch.setattr(
+        components, "winget_install",
+        lambda pkg: (calls.append(pkg), (True, "installed"))[1],
+    )
+    _feed(monkeypatch, ["y"])
+
+    wizard._ensure_openrgb_ready(Config(), assume_yes=False)
+    assert calls == [components.OPENRGB_WINGET_ID]
+
+
+def test_openrgb_does_not_offer_winget_when_the_app_is_already_installed(monkeypatch, capsys):
+    """Installed but unreachable means the SDK server is off — reinstalling won't help."""
+    from tintaview.core.config import Config
+    from tintaview.install import components
+
+    monkeypatch.setattr(components, "winget_available", lambda: True)
+    monkeypatch.setattr(components, "winget_package_installed", lambda pkg: True)
+    monkeypatch.setattr(
+        components, "winget_install", lambda pkg: pytest.fail("offered a pointless reinstall")
+    )
+
+    wizard._ensure_openrgb_ready(Config(), assume_yes=False)
+    assert "SDK Server" in capsys.readouterr().out
+
+
+def test_openrgb_ready_says_so_and_asks_nothing(monkeypatch, capsys):
+    from tintaview.core.config import Config
+    from tintaview.engines import openrgb as openrgb_engine
+
+    monkeypatch.setattr(openrgb_engine.OpenRGBEngine, "probe", lambda self: True)
+    wizard._ensure_openrgb_ready(Config(), assume_yes=False)
+
+    out = capsys.readouterr().out
+    assert "reachable" in out.lower()
+    assert "SDK Server" not in out  # nothing left to explain
+
+
+def test_engine_step_offers_auto_and_defaults_to_it(monkeypatch, capsys, _isolated):
+    """Auto-detect must be offered, not just be an undocumented config value.
+
+    Pinning one engine is what turns "the app I picked isn't running" into "no lighting
+    at all, silently" — the wizard previously forced that choice, since `auto` existed in
+    config.toml but was never on the menu.
+    """
+    home, tv_home = _isolated
+    _feed(monkeypatch, [
+        "",   # platform: accept
+        "",   # agents: accept
+        "",   # engine: accept the default
+        "",   # install path
+        "n",  # autostart
+        "y",  # hooks
+        "n",  # verify
+    ])
+
+    assert wizard.run_wizard() == 0
+    assert config_mod.load(tv_home / "config.toml").engine.mode == "auto"
+    assert "Detect automatically" in capsys.readouterr().out
+
+
+def test_engine_step_still_allows_pinning_one(monkeypatch, _isolated):
+    home, tv_home = _isolated
+    _feed(monkeypatch, ["", "", "2", "", "n", "y", "n"])  # 2 = Razer Chroma
+    assert wizard.run_wizard() == 0
+    assert config_mod.load(tv_home / "config.toml").engine.mode == "chroma"
+
+
+def test_unavailable_options_are_marked_but_still_selectable(monkeypatch, capsys, _isolated):
+    """Marked, not hidden or blocked.
+
+    Someone setting a machine up before installing Synapse/OpenRGB, or configuring over
+    SSH, has good reason to pick something that isn't answering yet. But an option that
+    cannot work right now must say so on its own line — otherwise the wizard accepts a
+    choice that silently produces no lighting and gives no hint why.
+    """
+    home, tv_home = _isolated
+    from tintaview.engines import factory
+
+    # Nothing is running: both real engines probe False.
+    monkeypatch.setattr(factory, "available_engines", lambda cfg: [("chroma", False), ("openrgb", False), ("none", True)])
+    monkeypatch.setattr(wizard, "available_engines", lambda cfg: [("chroma", False), ("openrgb", False), ("none", True)])
+
+    _feed(monkeypatch, ["", "", "3", "", "n", "y", "n"])  # 3 = OpenRGB, unavailable
+    assert wizard.run_wizard() == 0
+
+    out = capsys.readouterr().out
+    assert "[not running]" in out
+    assert "you can still pick it" in out
+    # ...and the choice was honoured, not silently overridden.
+    assert config_mod.load(tv_home / "config.toml").engine.mode == "openrgb"

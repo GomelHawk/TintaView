@@ -246,6 +246,18 @@ def _engine_unavailable_reason(name: str, env: Environment, cfg: Config) -> str:
             return f"the Chroma REST SDK is Windows-only; this machine reports platform={env.platform}"
         return "Razer Synapse doesn't seem to be running (its Chroma Connect SDK is what's probed) — start Synapse"
     if name == "openrgb":
+        # Two different failures wear the same "not available" label, and only one of
+        # them is fixed by touching OpenRGB. Saying "start the SDK server" to someone
+        # whose install simply lacks openrgb-python sends them to restart software that
+        # was never the problem.
+        import importlib.util
+
+        if importlib.util.find_spec("openrgb") is None:
+            return (
+                "openrgb-python isn't installed in this TintaView environment, so the "
+                "OpenRGB engine can't be used at all — reinstall TintaView, or run "
+                "`pip install openrgb-python` inside its virtual environment"
+            )
         o = cfg.engine.openrgb
         return (
             f"the OpenRGB SDK server isn't answering on {o.host}:{o.port} — open OpenRGB, "

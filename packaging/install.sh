@@ -270,10 +270,15 @@ fi
 info "Upgrading pip inside the virtual environment"
 "$VENV_PY" -m pip install --quiet --upgrade pip
 
+# [openrgb] goes in either way: it is the second lighting engine, it is small and pure
+# Python, and leaving it out makes the engine permanently unavailable however the user
+# configures it -- reported as "the SDK server isn't answering", which sends people to
+# restart software that was never the problem. [ui] (PySide6, ~100MB) is the one worth
+# skipping on a headless box, since there is no tray to draw there.
 if [ "$HEADLESS" -eq 1 ]; then
-    EXTRA_SPEC="$PKG_SPEC"
+    EXTRA_SPEC="${PKG_SPEC}[openrgb]"
 else
-    EXTRA_SPEC="${PKG_SPEC}[ui]"
+    EXTRA_SPEC="${PKG_SPEC}[ui,openrgb]"
 fi
 
 info "Installing $APP_NAME ($EXTRA_SPEC) — this may take a minute the first time"

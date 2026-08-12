@@ -11,8 +11,8 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 
 # The core (status broker + hooks + engines) is deliberately stdlib-only apart from
-# tomlkit: it has to run on a bare WSL distro and inside a PyInstaller bundle without
-# dragging in a compiler toolchain. Anything heavier is an extra.
+# tomlkit: it has to run on a bare WSL distro without dragging in a compiler toolchain,
+# and it is what a `--headless` install gets. Anything heavier is an extra.
 dependencies = ["tomlkit>=0.12"]
 
 [project.optional-dependencies]

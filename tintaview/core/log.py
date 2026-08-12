@@ -1,6 +1,6 @@
 """Logging for a process that usually has no console.
 
-The tray and the daemon both run windowless (PyInstaller ``--windowed``, pythonw, a
+The tray and the daemon both run windowless (``pythonw.exe`` on Windows, a
 systemd unit). An unhandled exception anywhere outside an explicit try/except would
 otherwise vanish along with the process, leaving a bare exit code and nothing to debug —
 so hook every path that can kill us and write it down first.

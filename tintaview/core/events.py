@@ -25,9 +25,9 @@ EVENTS = (
     TOOL_END,
 )
 
-# Events the old claude_code_razer_lights hook.sh could send. Serving these as
-# aliases (defaulting to agent=claude) lets the previous install keep working
-# against the new daemon, so migration doesn't have to be a cutover.
+# Agent-less event names: the same events, but addressed as a bare `/idle`, `/working`,
+# ... with no `agent=` in the query. Serving them as aliases (defaulting to agent=claude)
+# keeps hand-written or third-party hook scripts working without a `?agent=` parameter.
 LEGACY_EVENTS = (SESSION_START, SESSION_END, WORKING, IDLE, CONFIRM)
 
 # Effective status values reported by /state.
