@@ -13,7 +13,8 @@ They also pin the decisions that are easy to undo by accident:
 - **No compiled bundle, ever.** Windows Smart App Control refuses to run executables that
   are neither signed nor cloud-reputable, and a freshly built PyInstaller binary is unique
   to each release so it can never become reputable. The app is installed as a wheel into a
-  virtual environment and launched through the PSF-signed interpreter (docs/PLAN.md §8.3).
+  virtual environment and launched through the PSF-signed interpreter (AGENTS.md, "Packaging:
+  no compiled bundle, ever").
 - The install prefix must stay the directory `config.config_dir()` resolves to, and the
   prefix itself must never be deleted recursively — on Windows the user's config.toml,
   hook.env, `bin\\tv-hook.cmd` and `logs\\` are siblings of the venv (see install.ps1's
@@ -121,7 +122,7 @@ def test_windows_launches_through_the_signed_interpreter(ps1: str):
 def test_no_compiled_bundle_is_built_or_published(build_yml: str):
     assert not list(REPO_ROOT.joinpath("packaging").rglob("*.spec")), (
         "no PyInstaller bundle: Smart App Control can never trust a per-release unique "
-        "binary (docs/PLAN.md §8.3)"
+        "binary (AGENTS.md, 'Packaging: no compiled bundle, ever')"
     )
     assert not list(REPO_ROOT.joinpath("packaging").rglob("*.iss"))
     # Comments are stripped first: the header explains *why* these tools are absent, and

@@ -291,6 +291,12 @@ broken.
   the other end fails silently and always exits 0 — but they'll keep showing up in
   `tintaview hooks status` output on any other machine that shares the config.
 
+## Contributing
+
+[AGENTS.md](AGENTS.md) documents the internals: the layout, the locked design decisions and
+why they're locked, the HTTP/event contracts, the packaging constraints, and the testing
+conventions. Read it before changing anything.
+
 ## Credits & licence
 
 MIT — see [LICENSE](LICENSE).

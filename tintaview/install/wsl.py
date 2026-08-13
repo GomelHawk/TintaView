@@ -1,4 +1,4 @@
-"""The Windows-side half of the WSL split install (docs/PLAN.md §8.2).
+"""The Windows-side half of the WSL split install (AGENTS.md, "WSL split install").
 
 When the daemon and tray run on Windows but the agents (and therefore the hooks) live
 inside a WSL distro, this module is what lets a Windows-native wizard reach into that

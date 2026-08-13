@@ -1,6 +1,6 @@
 """Infers Cursor's missing "waiting for your approval" event.
 
-Cursor has no `Notification`/`PermissionRequest` equivalent (see docs/PLAN.md §5.3):
+Cursor has no `Notification`/`PermissionRequest` equivalent (see AGENTS.md, "Cursor stall heuristic"):
 when it stops to ask the user to approve a tool call, no hook fires at all. The only
 observable symptom is that `tool-start` fired and nothing — no `tool-end`, no other
 event for that session — followed within a threshold. That silence is the signal.

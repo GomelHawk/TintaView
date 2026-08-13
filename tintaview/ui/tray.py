@@ -2,7 +2,7 @@
 usage flyout. `run_tray(cfg, server)` is `cli.py`'s entry point for the GUI path
 (see `_cmd_run`) — `server` is an already-started `StatusServer`.
 
-The broker runs in this same process (docs/PLAN.md §2.1) rather than behind an HTTP
+The broker runs in this same process (one process, per AGENTS.md) rather than behind an HTTP
 port of its own, so `TrayApp` reads `server.state_payload()` directly — a plain
 in-process dict build under a lock, not I/O — and only falls back to HTTP if that
 method isn't there at all (e.g. some other object standing in for a real server).
@@ -31,6 +31,7 @@ if TYPE_CHECKING:  # pragma: no cover - types only
 log = logging.getLogger(__name__)
 
 STATE_POLL_MS = 1500
+ANIM_TICK_MS = 100  # working-pulse redraw rate
 USAGE_MIN_REFRESH_S = 30.0  # ignore flyout-open refreshes more frequent than this
 CLICK_REOPEN_GUARD_S = 0.25  # guards against "the click that just closed it" reopening it
 ICON_SIZE = 128
@@ -197,6 +198,10 @@ class TrayApp(QtCore.QObject):
         self.blink_timer.setInterval(cfg.colors.blink_ms)
         self.blink_timer.timeout.connect(self._on_blink)
 
+        self.anim_timer = QtCore.QTimer(self)
+        self.anim_timer.setInterval(ANIM_TICK_MS)
+        self.anim_timer.timeout.connect(self._update_anim_icon)
+
         self._poll_state()
         self._stats_worker.fetch()
 
@@ -339,12 +344,19 @@ class TrayApp(QtCore.QObject):
         effective = payload.get("effective", "none")
 
         if effective == "confirm":
+            self.anim_timer.stop()
             if not self.blink_timer.isActive():
                 self._blink_on = True
                 self.blink_timer.start()
                 self.tray.setIcon(icons.state_icon(self._cfg.colors.rgb("confirm"), ICON_SIZE))
+        elif effective == "working":
+            self.blink_timer.stop()
+            if not self.anim_timer.isActive():
+                self.anim_timer.start()
+            self._update_anim_icon()
         else:
             self.blink_timer.stop()
+            self.anim_timer.stop()
             self.tray.setIcon(self._icon_for_status(effective))
 
         if effective == "confirm" and self._prev_effective != "confirm":
@@ -354,15 +366,16 @@ class TrayApp(QtCore.QObject):
         self.tray.setToolTip(self._tooltip_for(payload))
 
     def _icon_for_status(self, status: str) -> QtGui.QIcon:
-        # "No session" shows the mark in the logo's own colours; the three *active* states
-        # are the same mark flooded with one status colour. That contrast is the point:
-        # at rest the tray is just the TintaView logo, and any single-colour icon means
-        # something is happening. The earlier objection — that a multicolour icon among
-        # solid ones reads as a different icon, and looks muddy at 16px — was really an
-        # objection to *scaling the gradient PNG down*. Drawing it shares the status
-        # icons' exact geometry, so it reads as the same mark, and the hues are flat
-        # per capsule rather than smoothly interpolated, so nothing turns to mush.
-        if status == STATUS_NONE:
+        # "No session" and "idle" both show the mark in the logo's own colours, static —
+        # at rest (whether or not a session is open) the tray is just the TintaView logo.
+        # "working" is the only state that visibly does something (it pulses, see
+        # _update_anim_icon); "confirm" is the same mark flooded with its status colour,
+        # blinking. The earlier objection to a multicolour icon among solid ones — that it
+        # reads as a different icon and looks muddy at 16px — was really an objection to
+        # *scaling the gradient PNG down*. Drawing it shares the status icons' exact
+        # geometry, so it reads as the same mark, and the hues are flat per capsule rather
+        # than smoothly interpolated, so nothing turns to mush.
+        if status in (STATUS_NONE, "idle"):
             return icons.brand_icon(ICON_SIZE)
         return icons.state_icon(self._cfg.colors.rgb(status), ICON_SIZE)
 
@@ -371,6 +384,15 @@ class TrayApp(QtCore.QObject):
         confirm_rgb = self._cfg.colors.rgb("confirm")
         rgb = confirm_rgb if self._blink_on else _dim(confirm_rgb)
         self.tray.setIcon(icons.state_icon(rgb, ICON_SIZE))
+
+    def _update_anim_icon(self) -> None:
+        """Redraws the breathing working icon for the current instant.
+
+        Called on every anim_timer tick and isn't reset when working is (re-)entered,
+        so it runs off the shared monotonic clock rather than a per-state-entry phase.
+        """
+        t = time.monotonic()
+        self.tray.setIcon(icons.pulse_icon(self._cfg.colors.rgb("working"), t, ICON_SIZE))
 
     def _tooltip_for(self, payload: dict) -> str:
         agents = payload.get("agents", {})

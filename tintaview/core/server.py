@@ -325,7 +325,7 @@ class StatusServer:
 
     def _stall_seconds_for(self, agent: str) -> float | None:
         """None unless this agent is configured for the stall heuristic (Cursor) —
-        see docs/PLAN.md §5.3. Claude/Codex have a real confirm event and must never
+        see AGENTS.md, "Cursor stall heuristic". Claude/Codex have a real confirm event and must never
         be armed, or a slow tool call would eventually paint them red for no reason.
         """
         acfg = self._cfg.agent(agent)

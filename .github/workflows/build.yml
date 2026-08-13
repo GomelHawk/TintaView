@@ -8,7 +8,7 @@ name: Build release artifacts
 #   install.sh                             the Linux/macOS installer/updater
 #   SHA256SUMS.txt                         checksums for all of the above
 #
-# There is deliberately **no compiled bundle and no .exe installer** (docs/PLAN.md §8.3).
+# There is deliberately **no compiled bundle and no .exe installer** (see AGENTS.md, "Packaging").
 # Windows has two independent defences against unsigned software and a frozen binary loses
 # to both: Mark-of-the-Web gets a browser-downloaded installer blocked on reputation and
 # then by SmartScreen, and Smart App Control refuses to run any executable that is neither

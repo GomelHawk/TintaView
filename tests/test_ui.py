@@ -151,6 +151,7 @@ def tray(qapp, monkeypatch, tmp_path):
     app_instance.state_timer.stop()
     app_instance.usage_timer.stop()
     app_instance.blink_timer.stop()
+    app_instance.anim_timer.stop()
     app_instance.tray.hide()
 
 

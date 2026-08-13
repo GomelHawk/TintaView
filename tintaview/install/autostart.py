@@ -1,6 +1,6 @@
 """One autostart entry per platform — enabling/disabling TintaView at login.
 
-Per the locked decision in docs/PLAN.md, TintaView is a *single* process (tray + status
+Per the locked decisions in AGENTS.md, TintaView is a *single* process (tray + status
 broker in-process), so there is exactly one autostart mechanism per platform, not the
 alternative of a background-service entry plus a separate tray entry:
 
@@ -150,7 +150,7 @@ def _write_text(path: Path, content: str) -> bool:
 
 
 #: The per-user autorun key explorer.exe reads at logon. Per-user, so no admin is needed,
-#: and it is a plain registry value rather than a Scheduled Task (docs/PLAN.md §0).
+#: and it is a plain registry value rather than a Scheduled Task (AGENTS.md, "Locked decisions").
 _WINDOWS_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _WINDOWS_RUN_VALUE = "TintaView"
 

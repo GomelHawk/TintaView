@@ -18,7 +18,7 @@
 # mechanism, and `tintaview update` just downloads and re-runs it with -Silent.
 #
 # ---------------------------------------------------------------------------------------
-# WHY A VENV AND NOT A COMPILED .exe (docs/PLAN.md SS8.3). Two separate Windows defences
+# WHY A VENV AND NOT A COMPILED .exe (AGENTS.md, "Packaging"). Two separate Windows defences
 # block unsigned software, and they need different answers:
 #
 #   1. Mark-of-the-Web. Browsers tag downloads with a Zone.Identifier stream; Edge/Chrome

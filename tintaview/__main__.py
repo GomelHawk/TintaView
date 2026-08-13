@@ -9,7 +9,7 @@ The Startup shortcut runs the venv's **`pythonw.exe -m tintaview`** rather than 
   copy keeps that signature. Windows **Smart App Control** blocks executables that are
   neither signed nor cloud-reputable, and it will never trust a freshly built,
   one-of-a-kind binary — which is exactly why TintaView is not shipped as a compiled
-  bundle (docs/PLAN.md §8.3). Launching through the signed interpreter keeps the whole
+  bundle (AGENTS.md, "Packaging: no compiled bundle, ever"). Launching through the signed interpreter keeps the whole
   app on the allowed side of that policy.
 
 `console_scripts` cannot provide this: the shim is a small unsigned `.exe` of its own.

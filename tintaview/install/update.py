@@ -1,6 +1,6 @@
 """``tintaview update`` — self-update from the GitHub Releases API.
 
-Per docs/PLAN.md §8.4: config and every agent's hook configuration are never touched by
+Per AGENTS.md ("Updating"): config and every agent's hook configuration are never touched by
 an update (hooks point at the stable ``tv-hook`` path, not at anything version-specific),
 so this module only ever downloads and runs the release's own install script —
 ``install.ps1`` on Windows, ``install.sh`` on Linux/macOS, both of which are idempotent
@@ -40,7 +40,7 @@ GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 USER_AGENT = "TintaView-self-updater"
 
 #: Every filename this module will accept as "the" checksums file for a release, tried
-#: in order. build.yml (docs/PLAN.md §8.5) is expected to publish exactly one of these
+#: in order. build.yml (AGENTS.md, "CI and release") is expected to publish exactly one of these
 #: alongside the installer/script.
 _CHECKSUM_ASSET_NAMES = ("SHA256SUMS", "SHA256SUMS.txt", "checksums.txt", "sha256sums.txt")
 

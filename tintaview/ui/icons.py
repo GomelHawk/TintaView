@@ -8,6 +8,7 @@ of needing one PNG per colour.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui
@@ -137,6 +138,11 @@ MARK_BRAND_COLORS = (
 )
 MARK_BRAND_DOT = (254, 151, 4)  # orange
 
+#: Working: the status colour breathing between PULSE_MIN and full brightness,
+#: once every PULSE_PERIOD_S seconds.
+PULSE_PERIOD_S = 3.5
+PULSE_MIN = 0.75
+
 
 def _draw_mark(
     rgb: tuple[int, int, int] | None,
@@ -181,6 +187,37 @@ def _draw_mark(
     finally:
         p.end()
     return pm
+
+
+def _scale_value(rgb: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
+    """`rgb` with its HSV value scaled by `factor` — dims towards black while
+    keeping hue/saturation, unlike scaling the RGB channels directly which also
+    desaturates.
+    """
+    c = QtGui.QColor(*rgb)
+    h, s, v, _ = c.getHsvF()
+    v = max(0.0, min(1.0, v * factor))
+    out = QtGui.QColor.fromHsvF(max(h, 0.0), s, v)
+    return (out.red(), out.green(), out.blue())
+
+
+def pulse_icon(rgb: tuple[int, int, int], t: float, size: int = 128) -> QtGui.QIcon:
+    """The working icon: `rgb` breathing between PULSE_MIN and full brightness on
+    a cosine, once every PULSE_PERIOD_S seconds — a gentle pulse to signal "busy"
+    without the sharp on/off of the confirm blink.
+
+    Not cached — `t` is continuous, so every call gets a distinct brightness and a
+    cache entry would never be reused. Drawing is cheap enough that this is fine
+    (see the module docstring on `state_icon`'s cache, which exists for a
+    different reason: reusing exactly two colours across a blink).
+    """
+    phase = (t % PULSE_PERIOD_S) / PULSE_PERIOD_S
+    brightness = PULSE_MIN + (1.0 - PULSE_MIN) * (0.5 - 0.5 * math.cos(2 * math.pi * phase))
+    pulsed = _scale_value(rgb, brightness)
+    icon = QtGui.QIcon()
+    for px in TRAY_ICON_SIZES:
+        icon.addPixmap(_draw_mark(pulsed, px))
+    return icon
 
 
 def brand_icon(size: int = 128) -> QtGui.QIcon:
