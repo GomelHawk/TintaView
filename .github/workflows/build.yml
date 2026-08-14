@@ -34,6 +34,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # setuptools-scm derives the version from `git describe --tags`, which needs
+          # the tag history available locally -- a shallow (depth-1) checkout leaves
+          # tags unfetched and the version falls back to a "0.1.dev0+unknown" guess.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -55,6 +60,17 @@ jobs:
           # `python -m tintaview` is what the Windows Startup shortcut runs, so a missing
           # __main__.py would break autostart for every Windows user and nothing else.
           /tmp/smoke/bin/python -m tintaview --version
+
+      - name: Check the built version matches the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eu
+          tag_version="${GITHUB_REF_NAME#v}"
+          built_version="$(/tmp/smoke/bin/python -c 'import tintaview; print(tintaview.__version__)')"
+          if [ "$tag_version" != "$built_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the version setuptools-scm derived ($built_version) -- checkout may be shallow or the tag isn't on this commit." >&2
+            exit 1
+          fi
 
       - name: Stage release files and compute checksums
         run: |

@@ -1,4 +1,8 @@
 """TintaView — agent-status lighting and usage tray."""
 
-__version__ = "0.1.0"
+try:
+    from tintaview._version import version as __version__
+except ImportError:
+    __version__ = "0+unknown"
+
 APP_NAME = "TintaView"
