@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -532,11 +533,17 @@ class TestJetBrains:
         # 161185.755 / 1000000 * 100
         assert included.pct == pytest.approx(16.1186, abs=1e-3)
         assert included.severity == "normal"
+        assert included.show_pct is False
         # Local-time day/month, not the raw UTC date — matches how the provider
         # formats it (astimezone()), so this must not hardcode a runner's timezone.
         reset_dt = datetime.fromisoformat(_JETBRAINS_DEFAULTS["NEXT"].replace("Z", "+00:00")).astimezone()
-        assert included.right == f"Renews {reset_dt.day} {reset_dt.strftime('%b')}"
+        # 161185.755 / 100_000 -- CREDIT_SCALE, reverse-engineered from the IDE's own
+        # widget (see the provider's module docstring) -- shown as *used* credit
+        # points, matching every other provider's percentage-of-usage convention
+        # (Claude's "Usage credits" row, Copilot's quota rows) rather than "left".
+        assert included.right == f"1.61 / 10.00 used · {reset_dt.day} {reset_dt.strftime('%b')}"
         assert top_up.pct == 0.0
+        assert top_up.show_pct is False
         # 4498808.015 / 100_000 -- CREDIT_SCALE, reverse-engineered from the IDE's own
         # widget (see the provider's module docstring).
         assert top_up.right == "44.99 credits available"
@@ -559,6 +566,7 @@ class TestJetBrains:
         # still pinning the CREDIT_SCALE conversion to two significant digits.
         remaining_credits = 10.0 - included.pct / 100 * 10.0
         assert remaining_credits == pytest.approx(8.27, abs=0.01)
+        assert included.right.startswith("1.72 / 10.00 used")
         assert top_up.right == "44.99 credits available"
 
     def test_quota_path_accepts_an_ide_directory_not_just_the_file(self, tmp_path):
@@ -653,8 +661,20 @@ def _make_copilot_db(path: Path, events: list[tuple[str, int, int, str]]) -> Non
         con.close()
 
 
+def _deny_copilot_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forces the quota path to fail fast, as it always does off Windows, so the
+    token-totals fallback tests exercise that fallback deterministically instead of
+    depending on whatever's really sitting in a CI runner's credential store."""
+
+    def _raise() -> str:
+        raise copilot_mod._TokenError("no token in this test")
+
+    monkeypatch.setattr(copilot_mod, "_read_copilot_token", _raise)
+
+
 class TestCopilot:
-    def test_sums_tokens_per_model_within_the_window(self, tmp_path):
+    def test_sums_tokens_per_model_within_the_window(self, tmp_path, monkeypatch):
+        _deny_copilot_token(monkeypatch)
         home = tmp_path / "copilot_home"
         now = datetime.now(UTC)
         _make_copilot_db(home / "session-store.db", [
@@ -681,7 +701,8 @@ class TestCopilot:
         # Ranked by usage, largest first.
         assert [r.label for r in result.rows] == ["gpt-5-mini", "claude-sonnet-4.5"]
 
-    def test_caps_at_five_models(self, tmp_path):
+    def test_caps_at_five_models(self, tmp_path, monkeypatch):
+        _deny_copilot_token(monkeypatch)
         home = tmp_path / "copilot_home"
         now = datetime.now(UTC)
         events = [(f"model-{i}", 1000 * (i + 1), 0, _iso(now)) for i in range(7)]
@@ -693,12 +714,14 @@ class TestCopilot:
         # The five highest-usage models, not just the first five inserted.
         assert result.rows[0].label == "model-6"
 
-    def test_missing_database_degrades_cleanly(self, tmp_path):
+    def test_missing_database_degrades_cleanly(self, tmp_path, monkeypatch):
+        _deny_copilot_token(monkeypatch)
         result = CopilotUsageProvider().fetch(AgentConfig(home=str(tmp_path / "nope")))
         assert not result.ok
         assert result.error
 
-    def test_corrupt_database_degrades_cleanly(self, tmp_path):
+    def test_corrupt_database_degrades_cleanly(self, tmp_path, monkeypatch):
+        _deny_copilot_token(monkeypatch)
         home = tmp_path / "copilot_home"
         home.mkdir(parents=True)
         (home / "session-store.db").write_bytes(b"not a sqlite database")
@@ -706,7 +729,8 @@ class TestCopilot:
         assert not result.ok
         assert result.error
 
-    def test_no_recent_activity_degrades_cleanly(self, tmp_path):
+    def test_no_recent_activity_degrades_cleanly(self, tmp_path, monkeypatch):
+        _deny_copilot_token(monkeypatch)
         home = tmp_path / "copilot_home"
         now = datetime.now(UTC)
         _make_copilot_db(home / "session-store.db", [
@@ -724,6 +748,126 @@ class TestCopilot:
         _make_copilot_db(home / "session-store.db", [])
         monkeypatch.setattr(copilot_mod, "_default_home", lambda: home)
         assert copilot_mod.detect() is True
+
+    # --------------------------------------------------------------- real quota endpoint
+
+    def test_quota_parses_real_endpoint_shape_and_never_logs_token(self, monkeypatch, caplog):
+        """Payload shape captured verbatim from a live `copilot_internal/user`
+        response (see the provider's module docstring) — a free-plan account with
+        `premium_interactions.has_quota: false`, which must be omitted rather than
+        shown as a 100%-used row."""
+        token = "gho_super-secret-live-oauth-token"  # noqa: S105 - test fixture, not a real credential
+        reset_at = datetime.now(UTC) + timedelta(days=17, hours=2)
+        payload = {
+            "login": "GomelHawk",
+            "access_type_sku": "free_limited_copilot",
+            "copilot_plan": "individual",
+            "quota_reset_date_utc": _iso(reset_at),
+            "quota_snapshots": {
+                "chat": {
+                    "has_quota": True, "unlimited": False, "percent_remaining": 97.4,
+                    "quota_remaining": 194.8, "entitlement": 200, "remaining": 194, "credits_used": 5,
+                },
+                "completions": {
+                    "has_quota": True, "unlimited": False, "percent_remaining": 100.0,
+                    "entitlement": 2000, "remaining": 2000,
+                },
+                "premium_interactions": {
+                    "has_quota": False, "unlimited": False, "percent_remaining": 0.0, "entitlement": 0,
+                },
+            },
+        }
+        monkeypatch.setattr(copilot_mod, "_read_copilot_token", lambda: token)
+        seen_auth = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen_auth["header"] = req.get_header("Authorization")
+            return _FakeResponse(json.dumps(payload).encode())
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        caplog.set_level(logging.DEBUG)
+        result = CopilotUsageProvider().fetch(AgentConfig())
+
+        assert result.ok
+        assert result.source == "official"
+        assert result.header == "GitHub Copilot — Copilot Free"
+        assert seen_auth["header"] == f"token {token}"
+
+        # premium_interactions (has_quota: false) must be omitted, not shown as 100% used.
+        assert [r.label for r in result.rows] == ["Chat messages", "Code completions"]
+        chat, completions = result.rows
+        assert chat.pct == pytest.approx(2.6, abs=1e-6)  # 100 - 97.4
+        assert chat.show_pct is True
+        assert chat.right == "Resets in 18d"
+        assert chat.severity == "normal"
+        assert completions.pct == 0.0
+        assert completions.right == "Resets in 18d"
+
+        assert token not in caplog.text
+
+    def test_quota_unlimited_snapshot_shown_without_a_percentage(self, monkeypatch):
+        payload = {
+            "quota_reset_date_utc": _iso(datetime.now(UTC) + timedelta(days=5)),
+            "quota_snapshots": {
+                "chat": {"has_quota": True, "unlimited": True, "percent_remaining": 100.0},
+            },
+        }
+        monkeypatch.setattr(copilot_mod, "_read_copilot_token", lambda: "gho_x")  # noqa: S106
+        monkeypatch.setattr(
+            urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(json.dumps(payload).encode())
+        )
+        result = CopilotUsageProvider().fetch(AgentConfig())
+        assert result.ok
+        assert result.rows[0].right == "Unlimited"
+        assert result.rows[0].show_pct is False
+        assert result.rows[0].kind == "info"
+
+    def test_quota_high_usage_is_flagged_critical(self, monkeypatch):
+        payload = {
+            "quota_reset_date_utc": _iso(datetime.now(UTC) + timedelta(days=1)),
+            "quota_snapshots": {"chat": {"has_quota": True, "unlimited": False, "percent_remaining": 5.0}},
+        }
+        monkeypatch.setattr(copilot_mod, "_read_copilot_token", lambda: "gho_x")  # noqa: S106
+        monkeypatch.setattr(
+            urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(json.dumps(payload).encode())
+        )
+        result = CopilotUsageProvider().fetch(AgentConfig())
+        assert result.rows[0].severity == "critical"
+
+    def test_quota_falls_back_to_token_totals_on_malformed_response(self, tmp_path, monkeypatch):
+        """A response with no recognisable `quota_snapshots` (endpoint shape changed,
+        or an org account without the field seen on a personal one) must degrade to
+        the local totals, not surface a blank/broken quota card."""
+        home = tmp_path / "copilot_home"
+        _make_copilot_db(home / "session-store.db", [("gpt-5-mini", 100, 50, _iso(datetime.now(UTC)))])
+        monkeypatch.setattr(copilot_mod, "_read_copilot_token", lambda: "gho_x")  # noqa: S106
+        monkeypatch.setattr(
+            urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(b'{"unexpected": true}')
+        )
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(home)))
+        assert result.ok
+        assert result.source == "activity"
+
+    def test_quota_falls_back_to_token_totals_when_endpoint_errors(self, tmp_path, monkeypatch):
+        home = tmp_path / "copilot_home"
+        _make_copilot_db(home / "session-store.db", [("gpt-5-mini", 100, 50, _iso(datetime.now(UTC)))])
+        monkeypatch.setattr(copilot_mod, "_read_copilot_token", lambda: "gho_x")  # noqa: S106
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: (_ for _ in ()).throw(_http_error(401)))
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(home)))
+        assert result.ok
+        assert result.source == "activity"
+
+    def test_quota_skipped_off_windows_falls_back_to_token_totals(self, tmp_path):
+        """No monkeypatching of `_read_copilot_token` itself here — this is the real
+        function, which must refuse to touch Windows-only APIs on any other
+        platform."""
+        home = tmp_path / "copilot_home"
+        _make_copilot_db(home / "session-store.db", [("gpt-5-mini", 100, 50, _iso(datetime.now(UTC)))])
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(home)))
+        assert result.ok
+        if sys.platform != "win32":
+            assert result.source == "activity"
 
 
 # --------------------------------------------------------------------------- cache

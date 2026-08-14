@@ -202,19 +202,41 @@ def _quota_row(label: str, sub_quota: Any, right: str, kind: str) -> UsageRow | 
     pct = _pct(current, maximum)
     if pct is None:
         return None
-    return UsageRow(label=label, pct=pct, right=right, show_pct=True,
+    # The bar still fills and colours by `pct` — only the raw "NN%" text is dropped, in
+    # favour of the credit points the IDE's own widget shows (see module docstring),
+    # matching the "Usage credits" row Claude's provider already uses the same way.
+    return UsageRow(label=label, pct=pct, right=right, show_pct=False,
                      severity=_severity(pct), kind=kind)
 
 
 def _parse_usage(quota: dict[str, Any], next_refill: dict[str, Any] | None) -> list[UsageRow]:
-    """The two rows the IDE's own widget shows: monthly credits (a bar + "Renews ..."
-    date) and, only once any have been purchased, a top-up balance in credits."""
+    """The two rows the IDE's own widget is built from: monthly credits (a bar plus
+    how much of it is *used*, matching every other provider's percentage-of-usage
+    convention — Claude's "Usage credits" row and Copilot's quota rows both read as
+    "how much have I consumed", not "how much is left") and, only once any have been
+    purchased, a top-up balance in credits."""
     rows: list[UsageRow] = []
 
     reset = ""
     if isinstance(next_refill, dict) and next_refill.get("type") == "Known":
         reset = _fmt_date(next_refill.get("next"), "Renews")
-    included = _quota_row("Monthly Credits", quota.get("tariffQuota"), reset, "limit")
+
+    tariff = quota.get("tariffQuota")
+    right = reset
+    if isinstance(tariff, dict):
+        current = _num(tariff.get("current"))
+        maximum = _num(tariff.get("maximum"))
+        if current is not None and maximum is not None:
+            # `current` is the amount already used (this is also what `_pct`/severity
+            # are computed from, so the text must match: a higher `current` means more
+            # consumed and a redder bar, not more remaining).
+            credits = f"{current / CREDIT_SCALE:.2f} / {maximum / CREDIT_SCALE:.2f} used"
+            # Dropping the "Renews " word (not the date) is what keeps this row inside
+            # the flyout's 380px card alongside the "Monthly Credits" label — the full
+            # "X / Y used · Renews DD Mon" combination measures wider than the card.
+            short_reset = reset.removeprefix("Renews ")
+            right = f"{credits} · {short_reset}" if short_reset else credits
+    included = _quota_row("Monthly Credits", tariff, right, "limit")
     if included is not None:
         rows.append(included)
 
