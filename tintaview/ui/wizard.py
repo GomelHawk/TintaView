@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from ..agents import base as agents_base
@@ -254,6 +255,39 @@ def _detect_agent(adapter, env: Environment) -> bool:
 # --------------------------------------------------------------------------- step 3: agents
 
 
+#: Stats-only integrations: no hook layer at all, so they have no `AgentAdapter` and
+#: never go through `install.hooks`. Listed here (key, display label, detect
+#: callable) rather than forced into `AgentAdapter` with stub hook methods, which
+#: would make the wizard's hook-diff/confirmation step run for something that
+#: installs nothing.
+#:   - JetBrains AI Assistant is an IDE plugin with no scriptable event API at all.
+#:   - GitHub Copilot CLI has a real hook system, but it is dispatched over an
+#:     internal "SDK callback transport" for `@github/copilot-sdk` embedders, not a
+#:     documented external shell-command hook — see providers/copilot.py.
+def _jetbrains_detect() -> bool:
+    from ..stats.providers import jetbrains as jetbrains_mod
+
+    try:
+        return bool(jetbrains_mod.detect())
+    except Exception:
+        return False
+
+
+def _copilot_detect() -> bool:
+    from ..stats.providers import copilot as copilot_mod
+
+    try:
+        return bool(copilot_mod.detect())
+    except Exception:
+        return False
+
+
+_STATS_ONLY_AGENTS: tuple[tuple[str, str, Callable[[], bool]], ...] = (
+    ("jetbrains", "JetBrains AI Assistant", _jetbrains_detect),
+    ("copilot", "GitHub Copilot CLI", _copilot_detect),
+)
+
+
 def _step_agents(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> list[str]:
     print("\n=== Agents ===")
     adapters = agents_base.all_agents()
@@ -264,6 +298,13 @@ def _step_agents(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
         mark = _MARK_READY if detected else _MARK_NOT_RUNNING
         status = "installed" if detected else "not found — you can still pick it"
         items.append((adapter.key, f"{mark} {adapter.display_name} — {status}", preselected))
+
+    for key, label, detect_fn in _STATS_ONLY_AGENTS:
+        detected = detect_fn()
+        preselected = detected or key in cfg.enabled_agents
+        mark = _MARK_READY if detected else _MARK_NOT_RUNNING
+        status = "usage found" if detected else "usage stats only, no hook install"
+        items.append((key, f"{mark} {label} — {status}", preselected))
 
     chosen = _prompt_multiselect("Which coding agents do you use?", items, assume_yes)
 

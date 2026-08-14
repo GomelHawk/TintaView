@@ -50,24 +50,29 @@ def asset_path(name: str) -> Path:
 
 
 def logo_pixmap(width: int = 480) -> QtGui.QPixmap:
-    """The full wordmark logo (mark + "TintaView" + tagline), scaled to `width`.
+    """The full wordmark logo (mark + "TintaView" + tagline) on its own black
+    backdrop, scaled to `width`.
 
-    logo_transparent.png sits on a much taller canvas than its artwork — measured via
-    its alpha channel, the actual ink only spans roughly the middle 40% of the image
-    height. Scaling the raw asset therefore renders mostly blank space; the vertical
-    padding is trimmed here (via the alpha channel, not hardcoded pixel offsets, so a
-    re-export from build_assets.py with different margins still trims correctly)
-    before scaling.
+    Deliberately logo_full.png, not logo_transparent.png: the transparent asset's
+    wordmark is inked for a light backdrop, so it goes dark-on-dark and unreadable in
+    an About dialog that has picked up the host OS's dark theme. logo_full.png bakes
+    in an opaque black backdrop, so it stays readable regardless of the caller's theme.
+
+    logo_full.png sits on a taller canvas than its artwork — measured via luminance,
+    the actual ink only spans the middle of the image height. Scaling the raw asset
+    therefore renders a lot of plain black; the vertical padding is trimmed here (not
+    hardcoded pixel offsets, so a re-export from build_assets.py with different
+    margins still trims correctly) before scaling.
     """
-    image = QtGui.QImage(str(asset_path("logo_transparent.png")))
+    image = QtGui.QImage(str(asset_path("logo_full.png")))
     if image.isNull():
         return QtGui.QPixmap()
 
-    alpha = image.convertToFormat(QtGui.QImage.Format_Alpha8)
-    w, h = alpha.width(), alpha.height()
+    gray = image.convertToFormat(QtGui.QImage.Format_Grayscale8)
+    w, h = gray.width(), gray.height()
 
     def row_has_ink(y: int, threshold: int = 10) -> bool:
-        return max(bytes(alpha.scanLine(y))[:w]) > threshold
+        return max(bytes(gray.scanLine(y))[:w]) > threshold
 
     try:
         top = next(y for y in range(h) if row_has_ink(y))

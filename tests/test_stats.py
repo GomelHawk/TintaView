@@ -24,9 +24,13 @@ import pytest
 from tintaview.core.config import AgentConfig, Config
 from tintaview.stats.cache import UsageCache
 from tintaview.stats.model import UsageProvider, UsageResult, UsageRow
+from tintaview.stats.providers import copilot as copilot_mod
+from tintaview.stats.providers import jetbrains as jetbrains_mod
 from tintaview.stats.providers.claude import ClaudeUsageProvider
 from tintaview.stats.providers.codex import CodexUsageProvider
+from tintaview.stats.providers.copilot import CopilotUsageProvider
 from tintaview.stats.providers.cursor import CursorUsageProvider
+from tintaview.stats.providers.jetbrains import JetBrainsUsageProvider
 from tintaview.stats.service import StatsService
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -488,6 +492,238 @@ class TestCursor:
         result = CursorUsageProvider().fetch(AgentConfig(state_db=str(db_path)))
         assert result.ok
         assert seen["auth"] == f"Bearer {self.TOKEN}"
+
+
+# --------------------------------------------------------------------------- JetBrains
+
+
+# Field names and the escaped-XML shape are copied verbatim from a real
+# AIAssistantQuotaManager2.xml (WebStorm 2026.2) rather than invented — the encoding
+# (`&#10;`/`&quot;` wrapping a JSON string) is exactly what trips up a naive parser.
+_JETBRAINS_DEFAULTS = {
+    "NEXT": "2026-08-16T10:00:11.989Z",
+    "CURRENT": "161185.755",
+    "MAXIMUM": "5498808.015",
+    "UNTIL": "2027-03-19T21:00:00Z",
+    "TARIFF_CURRENT": "161185.755",
+    "TARIFF_MAX": "1000000",
+    "TARIFF_AVAIL": "838814.245",
+    "TOPUP_CURRENT": "0",
+    "TOPUP_MAX": "4498808.015",
+    "TOPUP_AVAIL": "4498808.015",
+}
+
+
+def _write_quota_file(path: Path, **overrides: str) -> Path:
+    subs = {**_JETBRAINS_DEFAULTS, **overrides}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_load_template("jetbrains_quota.xml.template", **subs), encoding="utf-8")
+    return path
+
+
+class TestJetBrains:
+    def test_success_parses_both_quotas(self, tmp_path):
+        path = _write_quota_file(tmp_path / "AIAssistantQuotaManager2.xml")
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(path)))
+
+        assert result.ok
+        assert [r.label for r in result.rows] == ["Monthly Credits", "Top-up Credits"]
+        included, top_up = result.rows
+        # 161185.755 / 1000000 * 100
+        assert included.pct == pytest.approx(16.1186, abs=1e-3)
+        assert included.severity == "normal"
+        # Local-time day/month, not the raw UTC date — matches how the provider
+        # formats it (astimezone()), so this must not hardcode a runner's timezone.
+        reset_dt = datetime.fromisoformat(_JETBRAINS_DEFAULTS["NEXT"].replace("Z", "+00:00")).astimezone()
+        assert included.right == f"Renews {reset_dt.day} {reset_dt.strftime('%b')}"
+        assert top_up.pct == 0.0
+        # 4498808.015 / 100_000 -- CREDIT_SCALE, reverse-engineered from the IDE's own
+        # widget (see the provider's module docstring).
+        assert top_up.right == "44.99 credits available"
+
+    def test_matches_a_real_ide_widget_reading(self, tmp_path):
+        """Values captured from a live PyCharm 2026.2 quota file at the exact moment
+        its AI Assistant widget showed "8.27 / 10.00 monthly credits left" and
+        "44.99 top-up credits" — the strongest evidence for the CREDIT_SCALE
+        conversion, so pinned here as a regression guard."""
+        path = _write_quota_file(
+            tmp_path / "AIAssistantQuotaManager2.xml",
+            CURRENT="172494.4", TARIFF_CURRENT="172494.4", TARIFF_AVAIL="827505.6",
+        )
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(path)))
+
+        assert result.ok
+        included, top_up = result.rows
+        # The screenshot and the quota-file read weren't taken at the exact same
+        # instant (usage accrues continuously), so this allows a little drift while
+        # still pinning the CREDIT_SCALE conversion to two significant digits.
+        remaining_credits = 10.0 - included.pct / 100 * 10.0
+        assert remaining_credits == pytest.approx(8.27, abs=0.01)
+        assert top_up.right == "44.99 credits available"
+
+    def test_quota_path_accepts_an_ide_directory_not_just_the_file(self, tmp_path):
+        ide_dir = tmp_path / "PyCharm2026.2"
+        _write_quota_file(ide_dir / "options" / "AIAssistantQuotaManager2.xml")
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(ide_dir)))
+        assert result.ok
+
+    def test_top_up_row_omitted_when_no_top_up_balance_exists(self, tmp_path):
+        path = _write_quota_file(tmp_path / "quota.xml", TOPUP_MAX="0", TOPUP_CURRENT="0")
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(path)))
+        assert result.ok
+        assert [r.label for r in result.rows] == ["Monthly Credits"]
+
+    def test_high_usage_is_flagged_critical(self, tmp_path):
+        path = _write_quota_file(tmp_path / "quota.xml", TARIFF_CURRENT="950000")
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(path)))
+        assert result.rows[0].severity == "critical"
+
+    def test_missing_file_degrades_cleanly(self, tmp_path):
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(tmp_path / "nope.xml")))
+        assert not result.ok
+        assert result.error
+
+    def test_corrupt_xml_degrades_cleanly(self, tmp_path):
+        path = tmp_path / "quota.xml"
+        path.write_text("this is not xml at all <<<", encoding="utf-8")
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(path)))
+        assert not result.ok
+        assert result.error
+
+    def test_missing_quota_info_degrades_cleanly(self, tmp_path):
+        path = tmp_path / "quota.xml"
+        path.write_text(
+            '<application><component name="AIAssistantQuotaManager2"></component></application>',
+            encoding="utf-8",
+        )
+        result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(path)))
+        assert not result.ok
+        assert result.error
+
+    def test_auto_detect_picks_the_most_recently_synced_ide(self, tmp_path, monkeypatch):
+        """Every installed IDE keeps its own copy of the account-wide quota, synced
+        only when that IDE last talked to the JetBrains AI service — the newest file
+        on disk is the freshest signal available, so it must win over an older one
+        even if the older one alphabetically sorts first."""
+        monkeypatch.setattr(jetbrains_mod, "_default_jetbrains_root", lambda: tmp_path)
+
+        old_path = _write_quota_file(
+            tmp_path / "AWebStorm2025.1" / "options" / "AIAssistantQuotaManager2.xml",
+            TARIFF_CURRENT="1000",
+        )
+        os.utime(old_path, (time.time() - 3600, time.time() - 3600))
+
+        new_path = _write_quota_file(
+            tmp_path / "ZPyCharm2026.2" / "options" / "AIAssistantQuotaManager2.xml",
+            TARIFF_CURRENT="500000",
+        )
+        os.utime(new_path, (time.time(), time.time()))
+
+        assert jetbrains_mod.detect() is True
+        result = JetBrainsUsageProvider().fetch(AgentConfig())
+        assert result.ok
+        assert result.rows[0].pct == pytest.approx(50.0, abs=1e-3)
+
+    def test_detect_false_when_root_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(jetbrains_mod, "_default_jetbrains_root", lambda: tmp_path / "nope")
+        assert jetbrains_mod.detect() is False
+
+
+# --------------------------------------------------------------------------- Copilot
+
+
+def _make_copilot_db(path: Path, events: list[tuple[str, int, int, str]]) -> None:
+    """`events` is `[(model, input_tokens, output_tokens, created_at), ...]` — the
+    columns this provider actually reads, out of the full real table (verified
+    against a live `~/.copilot/session-store.db`, which carries many more)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(path))
+    try:
+        con.execute(
+            "CREATE TABLE assistant_usage_events ("
+            "model TEXT, input_tokens INTEGER, output_tokens INTEGER, created_at TEXT)"
+        )
+        con.executemany(
+            "INSERT INTO assistant_usage_events (model, input_tokens, output_tokens, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            events,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+class TestCopilot:
+    def test_sums_tokens_per_model_within_the_window(self, tmp_path):
+        home = tmp_path / "copilot_home"
+        now = datetime.now(UTC)
+        _make_copilot_db(home / "session-store.db", [
+            ("gpt-5-mini", 30261, 1002, _iso(now - timedelta(hours=1))),
+            ("gpt-5-mini", 27931, 435, _iso(now - timedelta(days=2))),
+            ("claude-sonnet-4.5", 5000, 500, _iso(now - timedelta(days=6))),
+            # Outside the 7-day window: must not be counted.
+            ("gpt-5-mini", 999_999, 999_999, _iso(now - timedelta(days=8))),
+        ])
+
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert result.ok
+        assert result.source == "activity"
+        by_label = {row.label: row for row in result.rows}
+        assert set(by_label) == {"gpt-5-mini", "claude-sonnet-4.5"}
+        for row in result.rows:
+            assert row.show_pct is False
+            assert row.kind == "info"
+            assert row.pct == 0.0
+        # (30261+1002) + (27931+435) = 59629 -> "59.6k tokens"
+        assert by_label["gpt-5-mini"].right == "59.6k tokens"
+        assert by_label["claude-sonnet-4.5"].right == "5.5k tokens"
+        # Ranked by usage, largest first.
+        assert [r.label for r in result.rows] == ["gpt-5-mini", "claude-sonnet-4.5"]
+
+    def test_caps_at_five_models(self, tmp_path):
+        home = tmp_path / "copilot_home"
+        now = datetime.now(UTC)
+        events = [(f"model-{i}", 1000 * (i + 1), 0, _iso(now)) for i in range(7)]
+        _make_copilot_db(home / "session-store.db", events)
+
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(home)))
+        assert result.ok
+        assert len(result.rows) == 5
+        # The five highest-usage models, not just the first five inserted.
+        assert result.rows[0].label == "model-6"
+
+    def test_missing_database_degrades_cleanly(self, tmp_path):
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(tmp_path / "nope")))
+        assert not result.ok
+        assert result.error
+
+    def test_corrupt_database_degrades_cleanly(self, tmp_path):
+        home = tmp_path / "copilot_home"
+        home.mkdir(parents=True)
+        (home / "session-store.db").write_bytes(b"not a sqlite database")
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(home)))
+        assert not result.ok
+        assert result.error
+
+    def test_no_recent_activity_degrades_cleanly(self, tmp_path):
+        home = tmp_path / "copilot_home"
+        now = datetime.now(UTC)
+        _make_copilot_db(home / "session-store.db", [
+            ("gpt-5-mini", 100, 100, _iso(now - timedelta(days=30))),
+        ])
+        result = CopilotUsageProvider().fetch(AgentConfig(home=str(home)))
+        assert not result.ok
+        assert result.error
+
+    def test_detect(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(copilot_mod, "_default_home", lambda: tmp_path / "nope")
+        assert copilot_mod.detect() is False
+
+        home = tmp_path / "copilot_home"
+        _make_copilot_db(home / "session-store.db", [])
+        monkeypatch.setattr(copilot_mod, "_default_home", lambda: home)
+        assert copilot_mod.detect() is True
 
 
 # --------------------------------------------------------------------------- cache

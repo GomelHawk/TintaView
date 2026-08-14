@@ -46,6 +46,11 @@ def _severity_color(sev: str) -> QtGui.QColor:
     return {"warning": WARN, "critical": CRIT}.get(sev, FILL)
 
 
+#: Overrides for keys with no `AgentAdapter` (stats-only integrations, see
+#: `ui.wizard._STATS_ONLY_AGENTS`) whose correct casing plain `.title()` can't produce.
+_DISPLAY_NAME_OVERRIDES = {"jetbrains": "JetBrains AI Assistant", "copilot": "GitHub Copilot CLI"}
+
+
 def _display_name(key: str) -> str:
     """Best-effort human name for an agent key ("claude" -> "Claude Code").
 
@@ -61,7 +66,7 @@ def _display_name(key: str) -> str:
             return adapter.display_name
     except Exception:
         pass
-    return key.replace("_", " ").title() or key
+    return _DISPLAY_NAME_OVERRIDES.get(key) or key.replace("_", " ").title() or key
 
 
 class Flyout(QtWidgets.QWidget):

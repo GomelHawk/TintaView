@@ -174,6 +174,7 @@ class AgentConfig:
     confirm_detection: str = "event"  # event | stall | none
     stall_seconds: float = 8.0  # only used when confirm_detection == "stall"
     state_db: str = ""  # Cursor only: path to state.vscdb; empty = auto-detect
+    quota_path: str = ""  # JetBrains only: quota XML or IDE dir; empty = auto-detect newest
 
 
 @dataclass

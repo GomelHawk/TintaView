@@ -27,7 +27,7 @@ tintaview/
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
   engines/   base.py  chroma.py  openrgb.py  null.py  factory.py
   agents/    base.py  claude.py  codex.py  cursor.py     # hook manifest + paths per agent
-  stats/     providers/{claude,codex,cursor}.py  cache.py  model.py  service.py
+  stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py  cache.py  model.py  service.py
   ui/        tray.py  flyout.py  wizard.py  icons.py
   install/   detect.py  hooks.py  hookscript.py  codex_flag.py  autostart.py  wsl.py
              components.py  doctor.py  update.py  restart.py
@@ -121,6 +121,9 @@ OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in p
 | Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
 | Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`, `postToolUse` | none → stall heuristic |
 
+JetBrains AI Assistant and GitHub Copilot CLI are deliberately absent from this table — see
+[Statistics](#statistics) for why each is stats-only with no `agents/` adapter.
+
 Per-agent gotchas that must keep being handled:
 
 - **Cursor sends `conversation_id`, not `session_id`** in hook stdin (`session_id_field` on the
@@ -191,6 +194,32 @@ rate-limited response replace good data with an estimate.
   - On 401/403 re-read from disk (Cursor refreshes it while signed in).
   - Degrade to "not signed in" / "usage unavailable" — this can break on any Cursor release and
     must never block the tray or affect lighting.
+- **JetBrains AI Assistant** — stats-only; no adapter in `agents/` at all, since the IDE plugin
+  has no scriptable event API to hook. Reads `quotaInfo`/`nextRefill` JSON embedded in
+  `<IDE data dir>/options/AIAssistantQuotaManager2.xml`, the same cache the IDE's own status-bar
+  widget reads. Quota is account-wide, but each installed IDE only syncs its own copy on its own
+  schedule, so every `<Product><Version>` directory under the JetBrains config root is scanned and
+  the most recently modified file wins; `agents.jetbrains.quota_path` overrides this. The tariff
+  quota's own percentage (the recurring monthly allowance), not the combined total, drives
+  severity — the top-up balance is typically much larger and would make a combined percentage
+  look artificially healthy. The raw-units-to-"credits" display scale (`CREDIT_SCALE` in the
+  provider) is reverse-engineered from a live widget reading, not documented by JetBrains — see
+  the provider's module docstring before changing it.
+- **GitHub Copilot CLI** — stats-only; no adapter in `agents/` either, even though Copilot CLI
+  *does* have a real hook system (a `preToolUse`/`postToolUse`/`sessionStart`/`sessionEnd`/
+  `permissionRequest`/`notification`/... vocabulary, confirmed against the CLI's own bundled
+  `api.schema.json`). It is dispatched over an internal "SDK callback transport" for programs
+  embedding `@github/copilot-sdk`, not a documented external shell-command hook — unverified
+  whether a plain `tv-hook`-style script can register for it, so it was not attempted. Deliberately
+  no live quota percentage either: GitHub's real "X% used, resets in Nd" figure comes from an
+  internal `copilot_internal/user` endpoint that needs a token out of the OS credential store
+  (Windows Credential Manager here, target `<uuid>.github-copilot-app`) via a two-step OAuth
+  exchange (`copilot_internal/v2/token` first) — reverse-engineerable in principle, but not
+  attempted without a captured real response to verify field names against, the same bar Cursor's
+  and JetBrains's providers were held to. Instead reads `<home>/session-store.db`'s
+  `assistant_usage_events` table (confirmed against a live database) and sums input/output tokens
+  per model over the last 7 days — informational totals only (`show_pct=False`), same shape as
+  Codex's API-key fallback.
 
 In a **WSL split** install the Claude/Codex JSONL files sit behind a UNC path: scan only files
 modified in the last 7 days and cache by mtime, or the poll is slow.
@@ -280,6 +309,8 @@ the release — see `.gitattributes`.
 | --- | --- |
 | Codex hook feature flag and Windows availability | Will keep drifting; detect the version, fall back to `notify` (idle-only), state the limitation in the wizard |
 | Cursor usage RPC | Unofficial; will break without warning. Degrade, never block |
+| JetBrains `CREDIT_SCALE` | Reverse-engineered from one live widget reading, not documented. Only affects display formatting, never severity |
+| Copilot CLI live quota | Not implemented — would need OS-credential-store access plus an undocumented two-step OAuth exchange with unverified field names. Local token totals only |
 | Cursor confirm heuristic | Tune `stall_seconds` against real sessions; ship conservative; allow disabling |
 | OpenRGB SDK version drift | Pin to v5 behaviour, feature-detect, fail soft |
 | Unsigned build (accepted) | Ship via the install scripts so no MOTW tag ever reaches anything. If a Defender *heuristic* ever bites, submit to Microsoft's false-positive portal and consider free OSS signing (SignPath) or Azure Trusted Signing |

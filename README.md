@@ -10,7 +10,9 @@ agent is doing, in the TintaView mark's own colours: **blue** when no agent is r
 when it needs you to act. Click the tray icon for a usage panel (5-hour /
 weekly limits, credits, or token totals, depending on the agent). Works with
 **Claude Code**, **Codex CLI** and **Cursor**; drives **Razer Chroma** or **OpenRGB**
-devices; runs on **Windows, WSL, Linux and macOS**.
+devices; runs on **Windows, WSL, Linux and macOS**. The usage panel also has cards for
+**JetBrains AI Assistant** and **GitHub Copilot CLI** — neither lights up (see below),
+but their usage shows up alongside the others.
 
 ## What works where
 
@@ -22,6 +24,13 @@ devices; runs on **Windows, WSL, Linux and macOS**.
 | **Claude Code** | Real event (`Notification` / `permission_prompt`) | Works out of the box on every released build. |
 | **Codex CLI** | Real event (`PermissionRequest`) | Hooks are version-gated — see [Troubleshooting](docs/TROUBLESHOOTING.md#codex-hooks-not-firing). Windows-native Codex (not under WSL) falls back to the `notify` program, which only reports idle. |
 | **Cursor** | **Heuristic, not a real event.** Cursor has no "waiting for approval" hook, so TintaView guesses: if a tool starts and nothing else happens for `stall_seconds` (default 8s), it's treated as a stall and turns the light red. This can occasionally be wrong in either direction — see [Troubleshooting](docs/TROUBLESHOOTING.md#cursor-never-goes-red). |
+
+**JetBrains AI Assistant** and **GitHub Copilot CLI** are not in that table — neither
+gets lighting or session tracking, only a usage card (see [Usage stats](#usage-stats)).
+JetBrains AI Assistant is an IDE plugin with no scriptable event API at all. Copilot
+CLI actually has a rich hook system (`preToolUse`, `sessionStart`, `notification`, …),
+but it's dispatched over an internal transport aimed at `@github/copilot-sdk`
+embedders, not a documented external shell-command hook the other three expose.
 
 **Lighting engines** — Chroma is the default when it's reachable:
 
@@ -180,6 +189,16 @@ Click the tray icon to open the usage panel. What you see depends on the agent:
   same internal endpoint the Cursor app itself uses. This can break on any Cursor
   release with no warning; when it does, the panel just says usage is unavailable —
   lighting is unaffected either way.
+- **JetBrains AI Assistant** — entirely local, no network call and no hooks. TintaView
+  reads the same quota cache (`AIAssistantQuotaManager2.xml`) the IDE's own AI Assistant
+  status-bar widget uses. Quota is account-wide but each installed IDE only syncs its
+  own copy when it last talked to JetBrains, so TintaView uses whichever IDE's copy was
+  updated most recently.
+- **GitHub Copilot CLI** — entirely local, no network call. There's no official
+  percentage here: GitHub's real quota comes from an internal endpoint that needs a
+  token out of the OS credential store via a two-step exchange, which TintaView
+  doesn't attempt. Instead it sums input/output tokens per model, over the last 7
+  days, from `~/.copilot/session-store.db` — informational totals, not a limit.
 
 Usage is polled every 5 minutes (rate limits, not urgency) and the last good result is
 cached, so the panel is never blank and a rate-limit response never overwrites good data
@@ -213,10 +232,11 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `update.channel` | `stable` | Update channel (currently only `stable` is published). |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches; the wizard sets this for you. |
-| `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor`; a UNC path in a WSL-split install. |
+| `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
 | `agents.<key>.confirm_detection` | `event` | `event` (a real hook fires) or `stall` (heuristic — Cursor's default). |
 | `agents.<key>.stall_seconds` | `8.0` | Only used when `confirm_detection = "stall"`. |
 | `agents.cursor.state_db` | *(auto-detected)* | Path to Cursor's `state.vscdb`; empty auto-detects the platform default. |
+| `agents.jetbrains.quota_path` | *(auto-detected)* | Path to a specific `AIAssistantQuotaManager2.xml` or IDE data directory; empty scans every installed JetBrains IDE and uses the most recently updated one. |
 
 ## Commands
 
@@ -301,7 +321,9 @@ conventions. Read it before changing anything.
 
 MIT — see [LICENSE](LICENSE).
 
-TintaView is not affiliated with or endorsed by Anthropic, OpenAI, Cursor (Anysphere),
-or Razer Inc. "Razer", "Chroma" and "Synapse" are trademarks of Razer Inc. "Claude" and
-"Claude Code" are trademarks of Anthropic. "Codex" is a trademark of OpenAI. "Cursor" is
-a trademark of Anysphere.
+TintaView is not affiliated with or endorsed by Anthropic, OpenAI, GitHub, Cursor
+(Anysphere), JetBrains, or Razer Inc. "Razer", "Chroma" and "Synapse" are trademarks
+of Razer Inc. "Claude" and "Claude Code" are trademarks of Anthropic. "Codex" is a
+trademark of OpenAI. "Cursor" is a trademark of Anysphere. "JetBrains" and "AI
+Assistant" are trademarks of JetBrains s.r.o. "GitHub" and "GitHub Copilot" are
+trademarks of GitHub, Inc.

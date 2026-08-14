@@ -23,15 +23,22 @@ from .cache import UsageCache
 from .model import UsageProvider, UsageResult
 from .providers.claude import ClaudeUsageProvider
 from .providers.codex import CodexUsageProvider
+from .providers.copilot import CopilotUsageProvider
 from .providers.cursor import CursorUsageProvider
+from .providers.jetbrains import JetBrainsUsageProvider
 
 log = logging.getLogger(__name__)
 
 #: Built-in providers, keyed the same way as `Config.enabled_agents` / `Config.agents`.
+#: "jetbrains" and "copilot" have no entry in `tintaview.agents` — neither has a hook
+#: API TintaView can drive lighting from (see each provider's module docstring), so
+#: both are stats-only and never appear in the hook-install wizard.
 DEFAULT_PROVIDERS: dict[str, type[UsageProvider]] = {
     "claude": ClaudeUsageProvider,
     "codex": CodexUsageProvider,
     "cursor": CursorUsageProvider,
+    "jetbrains": JetBrainsUsageProvider,
+    "copilot": CopilotUsageProvider,
 }
 
 
