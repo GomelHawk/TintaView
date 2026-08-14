@@ -218,6 +218,8 @@ class TrayApp(QtCore.QObject):
         menu.addAction("Settings…", self._open_settings)
         menu.addAction("Check for updates", self._check_updates)
         menu.addSeparator()
+        menu.addAction("About", self._show_about)
+        menu.addSeparator()
         menu.addAction("Quit", self._app.quit)
         return menu
 
@@ -274,6 +276,32 @@ class TrayApp(QtCore.QObject):
                 "instead; see the log for details.",
             )
 
+    def _show_about(self) -> None:
+        from tintaview import __version__
+
+        dialog = QtWidgets.QDialog(None)
+        dialog.setWindowTitle("About TintaView")
+
+        logo = QtWidgets.QLabel()
+        pixmap = icons.logo_pixmap(480)
+        if not pixmap.isNull():
+            logo.setPixmap(pixmap)
+        logo.setAlignment(QtCore.Qt.AlignCenter)
+
+        version_label = QtWidgets.QLabel(f"Version {__version__}")
+        version_label.setAlignment(QtCore.Qt.AlignCenter)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(logo)
+        layout.addWidget(version_label)
+        layout.addWidget(buttons)
+        layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
+
+        dialog.exec()
+
     def _check_updates(self) -> None:
         """Check for a newer release and offer to install it.
 
@@ -307,9 +335,14 @@ class TrayApp(QtCore.QObject):
             )
             return
 
+        notes = str(release.get("body") or "").strip()
+        if len(notes) > 500:
+            notes = notes[:500].rstrip() + "…"
+        notes_block = f"\n\n{notes}" if notes else ""
+
         answer = QtWidgets.QMessageBox.question(
             None, "TintaView",
-            f"Version {tag} is available — you have {__version__}.\n\n"
+            f"Version {tag} is available — you have {__version__}.{notes_block}\n\n"
             "Your settings and your agents' hook configuration are never changed by an "
             "update.\n\nInstall it now?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,

@@ -49,6 +49,40 @@ def asset_path(name: str) -> Path:
     return base / "assets" / "generated" / name
 
 
+def logo_pixmap(width: int = 480) -> QtGui.QPixmap:
+    """The full wordmark logo (mark + "TintaView" + tagline), scaled to `width`.
+
+    logo_transparent.png sits on a much taller canvas than its artwork — measured via
+    its alpha channel, the actual ink only spans roughly the middle 40% of the image
+    height. Scaling the raw asset therefore renders mostly blank space; the vertical
+    padding is trimmed here (via the alpha channel, not hardcoded pixel offsets, so a
+    re-export from build_assets.py with different margins still trims correctly)
+    before scaling.
+    """
+    image = QtGui.QImage(str(asset_path("logo_transparent.png")))
+    if image.isNull():
+        return QtGui.QPixmap()
+
+    alpha = image.convertToFormat(QtGui.QImage.Format_Alpha8)
+    w, h = alpha.width(), alpha.height()
+
+    def row_has_ink(y: int, threshold: int = 10) -> bool:
+        return max(bytes(alpha.scanLine(y))[:w]) > threshold
+
+    try:
+        top = next(y for y in range(h) if row_has_ink(y))
+        bottom = next(y for y in range(h - 1, -1, -1) if row_has_ink(y))
+    except StopIteration:
+        top, bottom = 0, h - 1
+
+    margin = 6
+    top = max(0, top - margin)
+    bottom = min(h - 1, bottom + margin)
+
+    cropped = QtGui.QPixmap.fromImage(image).copy(0, top, w, bottom - top + 1)
+    return cropped.scaledToWidth(width, Qt.SmoothTransformation)
+
+
 def _closest_size(size: int) -> int:
     return min(_GENERATED_SIZES, key=lambda s: abs(s - size))
 
