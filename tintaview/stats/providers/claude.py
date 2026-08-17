@@ -180,12 +180,23 @@ def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
     window("session", "five_hour", "5-hour limit")
     window("weekly_all", "seven_day", "Weekly · all models")
 
-    # Per-model weekly buckets, if the plan exposes them.
-    for key, label in (("seven_day_opus", "Weekly · Opus"), ("seven_day_sonnet", "Weekly · Sonnet")):
+    # Per-model weekly buckets, if the plan exposes them — a key like
+    # "seven_day_fable" only appears once that model is enabled on the account, so
+    # this naturally shows/hides the row per user rather than needing a separate
+    # entitlement check.
+    for key, label in (
+        ("seven_day_opus", "Weekly · Opus"),
+        ("seven_day_sonnet", "Weekly · Sonnet"),
+        ("seven_day_fable", "Weekly · Fable"),
+    ):
         obj = data.get(key)
         if obj and obj.get("utilization") is not None:
+            resets = obj.get("resets_at")
+            # A model with no usage yet has no reset time (mirrors the in-app
+            # "You haven't used Fable yet" wording) — fall back to a plain label.
+            right = _fmt_reset(resets) if resets else "Not used yet"
             rows.append(
-                UsageRow(label=label, pct=float(obj["utilization"]), right=_fmt_reset(obj.get("resets_at")),
+                UsageRow(label=label, pct=float(obj["utilization"]), right=right,
                           show_pct=True, severity="normal", kind="limit")
             )
 

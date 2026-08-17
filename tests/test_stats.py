@@ -156,6 +156,35 @@ class TestClaudeOfficial:
         assert credits.right == "$7.33 of $20.00"
         assert credits.pct == 36.65
 
+    def test_fable_row_appears_only_when_plan_exposes_it(self, tmp_path, monkeypatch):
+        """seven_day_fable is only present once Fable is enabled for the account —
+        the row must show up when it's there and stay absent (as today) when it isn't."""
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        payload = json.loads((FIXTURES / "claude_usage_official.json").read_text())
+        payload["seven_day_fable"] = {"utilization": 0.0, "resets_at": None}
+
+        def fake_urlopen(req, timeout=None):
+            return _FakeResponse(json.dumps(payload).encode())
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        fable = next(r for r in result.rows if r.label == "Weekly · Fable")
+        assert fable.pct == 0.0
+        assert fable.right == "Not used yet"
+
+        payload["seven_day_fable"] = {"utilization": 3.5, "resets_at": "2099-01-02T00:00:00Z"}
+
+        def fake_urlopen_used(req, timeout=None):
+            return _FakeResponse(json.dumps(payload).encode())
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_used)
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+        fable = next(r for r in result.rows if r.label == "Weekly · Fable")
+        assert fable.pct == 3.5
+        assert fable.right != "Not used yet"
+
 
 class TestClaudeFallback:
     def test_reconstructs_from_transcripts_when_endpoint_unreachable(self, tmp_path, monkeypatch):
