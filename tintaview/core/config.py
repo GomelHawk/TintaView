@@ -186,6 +186,7 @@ class StatsConfig:
 @dataclass
 class UIConfig:
     chime_on_confirm: bool = False
+    collapsed_agents: list[str] = field(default_factory=list)  # flyout sections user collapsed
 
 
 @dataclass

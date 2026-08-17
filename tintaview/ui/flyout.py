@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QRectF, Qt
 
 if TYPE_CHECKING:  # pragma: no cover - types only, no runtime import of the stats layer
-    from tintaview.stats.model import UsageResult
+    from tintaview.stats.model import UsageResult, UsageRow
 
 # --------------------------------------------------------------------------- palette
 
@@ -41,10 +43,69 @@ BORDER = QtGui.QColor(255, 255, 255, 22)
 PAD = 18
 CARD_W = 380
 SECTION_GAP = 14  # extra vertical space between one agent's block and the next
+HEADER_H = 24  # height of the badge+title header line, per section
+CHEVRON_W = 16  # right-edge width reserved for the collapse affordance
 
 
 def _severity_color(sev: str) -> QtGui.QColor:
     return {"warning": WARN, "critical": CRIT}.get(sev, FILL)
+
+
+def _draw_chevron(p: QtGui.QPainter, header_rect: QRectF, collapsed: bool) -> None:
+    """Small ▸ / ▾ mark at a header's right edge — the only visual cue that a
+    section can be clicked to collapse/expand (the hover cursor is the other)."""
+    cx = header_rect.right() - CHEVRON_W / 2
+    cy = header_rect.center().y()
+    s = 4.0
+    if collapsed:
+        pts = [QtCore.QPointF(cx - s * 0.6, cy - s), QtCore.QPointF(cx - s * 0.6, cy + s),
+               QtCore.QPointF(cx + s * 0.7, cy)]
+    else:
+        pts = [QtCore.QPointF(cx - s, cy - s * 0.6), QtCore.QPointF(cx + s, cy - s * 0.6),
+               QtCore.QPointF(cx, cy + s * 0.7)]
+    p.setPen(Qt.NoPen)
+    p.setBrush(SUBTLE)
+    p.drawPolygon(QtGui.QPolygonF(pts))
+
+
+def _row_layout(rows: list[UsageRow]) -> list[tuple[UsageRow, float, float]]:
+    """(row, y-offset from the section's rows-start, block height) per row.
+
+    This is the one place row spacing lives — `_rows_height` and `Flyout.paintEvent`
+    both read from it, so sizing and drawing can never drift apart the way two
+    hand-duplicated formulas eventually would.
+    """
+    out: list[tuple[UsageRow, float, float]] = []
+    y = 0.0
+    prev = None
+    for row in rows:
+        if prev == "limit" and row.kind == "credits":
+            y += 8
+        prev = row.kind
+        # Info rows draw no bar, so they're shorter than a row with a track+fill.
+        block_h = 22 + 6 if row.kind == "info" else 22 + 6 + 16
+        out.append((row, y, block_h))
+        y += block_h
+    return out
+
+
+def _rows_height(rows: list[UsageRow]) -> float:
+    layout = _row_layout(rows)
+    return layout[-1][1] + layout[-1][2] if layout else 0.0
+
+
+@dataclass
+class _SectionLayout:
+    """One agent's on-screen geometry for this paint — shared by sizing, drawing
+    and mouse hit-testing so all three agree on where a header/body actually is."""
+
+    key: str
+    result: UsageResult
+    header_rect: QRectF  # the clickable/hoverable badge+title band
+    rows_top: float  # y where this section's body (rows or error line) starts
+    collapsible: bool  # False for errored/empty sections — nothing to hide
+    collapsed: bool
+    height: float  # total section height, header included
 
 
 #: Overrides for keys with no `AgentAdapter` (stats-only integrations, see
@@ -196,10 +257,17 @@ def _display_name(key: str) -> str:
 class Flyout(QtWidgets.QWidget):
     """Frameless dark card that paints one usage section per agent."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        collapsed: Iterable[str] | None = None,
+        on_toggle: Callable[[str, bool], None] | None = None,
+    ) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setMouseTracking(True)  # needed to get mouseMoveEvent without a button held
         self._results: dict[str, UsageResult] = {}
+        self._collapsed: set[str] = set(collapsed or ())
+        self._on_toggle = on_toggle
         self.hidden_at = 0.0
         self.resize(CARD_W, 140)
 
@@ -227,31 +295,68 @@ class Flyout(QtWidgets.QWidget):
 
     # --- layout ------------------------------------------------------------------
 
-    def _section_height(self, result: UsageResult) -> float:
-        h = 24.0  # agent header line
-        if result.ok:
-            prev = None
-            for row in result.rows:
-                if prev == "limit" and row.kind == "credits":
-                    h += 8
-                prev = row.kind
-                # Must mirror paintEvent: info rows draw no bar, so they are shorter.
-                h += 22 + 6 if row.kind == "info" else 22 + 6 + 16
-        else:
-            h += 20.0  # one-line reason
-        return h
+    def _layout(self) -> tuple[list[_SectionLayout], float]:
+        """Single layout pass for the current results, shared by sizing, painting
+        and mouse hit-testing (see `_SectionLayout`). Cheap enough to redo on every
+        paint/mouse-move: a handful of agents, no QPainter calls involved."""
+        x, w = float(PAD), float(CARD_W - 2 * PAD)
+        y = float(PAD)
+        sections: list[_SectionLayout] = []
+        for i, result in enumerate(self._results.values()):
+            if i:
+                y += SECTION_GAP
+            header_rect = QRectF(x, y, w, HEADER_H)
+            collapsible = result.ok and bool(result.rows)
+            collapsed = collapsible and result.agent in self._collapsed
+            rows_top = y + HEADER_H
+            if not result.ok:
+                body_h = 20.0  # one-line reason
+            elif collapsed:
+                body_h = 0.0
+            else:
+                body_h = _rows_height(result.rows)
+            height = HEADER_H + body_h
+            sections.append(_SectionLayout(result.agent, result, header_rect, rows_top,
+                                            collapsible, collapsed, height))
+            y += height
+        return sections, y
 
     def _resize_to_content(self) -> None:
-        h = float(PAD)
         if not self._results:
-            h += 20 + 8  # "no agents enabled" message
+            h = PAD + 20 + 8 + PAD  # "no agents enabled" message
         else:
-            for i, result in enumerate(self._results.values()):
-                if i:
-                    h += SECTION_GAP
-                h += self._section_height(result)
-        h += PAD
+            _sections, y = self._layout()
+            h = y + PAD
         self.setFixedSize(CARD_W, max(80, int(h)))
+
+    def _toggle(self, key: str) -> None:
+        if key in self._collapsed:
+            self._collapsed.discard(key)
+        else:
+            self._collapsed.add(key)
+        self._resize_to_content()
+        self.update()
+        if self._on_toggle is not None:
+            self._on_toggle(key, key in self._collapsed)
+
+    # --- mouse -------------------------------------------------------------------
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        sections, _ = self._layout()
+        pos = event.position()
+        hovering = any(s.collapsible and s.header_rect.contains(pos) for s in sections)
+        self.setCursor(Qt.PointingHandCursor if hovering else Qt.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            sections, _ = self._layout()
+            pos = event.position()
+            for s in sections:
+                if s.collapsible and s.header_rect.contains(pos):
+                    self._toggle(s.key)
+                    return
+        super().mousePressEvent(event)
 
     # --- paint ------------------------------------------------------------------
 
@@ -265,7 +370,7 @@ class Flyout(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(BORDER))
         p.drawPath(path)
 
-        x, w, y = float(PAD), float(self.width() - 2 * PAD), float(PAD)
+        x, w = float(PAD), float(self.width() - 2 * PAD)
         f = p.font()
 
         if not self._results:
@@ -273,16 +378,17 @@ class Flyout(QtWidgets.QWidget):
             p.setFont(f)
             p.setPen(SUBTLE)
             p.drawText(
-                QRectF(x, y, w, self.height() - y - PAD),
+                QRectF(x, PAD, w, self.height() - PAD - PAD),
                 Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
                 "No agents enabled.",
             )
             p.end()
             return
 
-        for i, result in enumerate(self._results.values()):
-            if i:
-                y += SECTION_GAP
+        sections, _ = self._layout()
+        for section in sections:
+            result = section.result
+            header = section.header_rect
 
             f.setPointSize(10)
             p.setFont(f)
@@ -292,7 +398,7 @@ class Flyout(QtWidgets.QWidget):
             badge_size = QtGui.QFontMetrics(f).height()
             badge_gap = 6
             p.drawPixmap(
-                QRectF(x, y + (20 - badge_size) / 2, badge_size, badge_size),
+                QRectF(header.x(), header.y() + (20 - badge_size) / 2, badge_size, badge_size),
                 _provider_badge(result.agent, badge_size),
                 QRectF(0, 0, badge_size, badge_size),
             )
@@ -301,51 +407,50 @@ class Flyout(QtWidgets.QWidget):
             # several agents on screen at once, identifying *which* agent a section
             # belongs to matters more than the tier blurb the old single-agent
             # flyout led with.
-            p.drawText(QRectF(x + badge_size + badge_gap, y, w - badge_size - badge_gap, 20),
+            name_w = header.width() - badge_size - badge_gap - (CHEVRON_W if section.collapsible else 0)
+            p.drawText(QRectF(header.x() + badge_size + badge_gap, header.y(), name_w, 20),
                        Qt.AlignLeft | Qt.AlignVCenter, _display_name(result.agent))
-            y += 24
+
+            if section.collapsible:
+                _draw_chevron(p, header, section.collapsed)
 
             if not result.ok:
                 p.setPen(SUBTLE)
                 reason = result.error or "No usage data."
-                p.drawText(QRectF(x, y, w, 20), Qt.AlignLeft | Qt.AlignVCenter, reason)
-                y += 20
+                p.drawText(QRectF(x, section.rows_top, w, 20), Qt.AlignLeft | Qt.AlignVCenter, reason)
                 continue
 
-            prev = None
-            for row in result.rows:
-                if prev == "limit" and row.kind == "credits":
-                    y += 8
-                prev = row.kind
+            if section.collapsed:
+                continue
+
+            for row, y_off, _block_h in _row_layout(result.rows):
+                ry = section.rows_top + y_off
 
                 f.setPointSize(11)
                 p.setFont(f)
                 p.setPen(TEXT)
-                p.drawText(QRectF(x, y, w, 18), Qt.AlignLeft | Qt.AlignVCenter, row.label)
+                p.drawText(QRectF(x, ry, w, 18), Qt.AlignLeft | Qt.AlignVCenter, row.label)
 
                 right = row.right
                 if row.show_pct:
                     right = f"{right}   {row.pct:.0f}%" if right else f"{row.pct:.0f}%"
                 p.setPen(SUBTLE)
-                p.drawText(QRectF(x, y, w, 18), Qt.AlignRight | Qt.AlignVCenter, right)
-                y += 22
+                p.drawText(QRectF(x, ry, w, 18), Qt.AlignRight | Qt.AlignVCenter, right)
 
                 # Informational rows (Codex token totals, Claude's local estimate) have
                 # no percentage to show. Drawing an empty track for them reads as "0% of
-                # your limit", which is a different and wrong claim — so skip the bar and
-                # close the gap instead.
+                # your limit", which is a different and wrong claim — so skip the bar.
                 if row.kind == "info":
-                    y += 6
                     continue
 
+                bar_y = ry + 22 + 6
                 track = QtGui.QPainterPath()
-                track.addRoundedRect(QRectF(x, y, w, 6), 3, 3)
+                track.addRoundedRect(QRectF(x, bar_y, w, 6), 3, 3)
                 p.fillPath(track, TRACK)
                 fw = max(0.0, min(1.0, row.pct / 100.0)) * w
                 if fw > 0:
                     fill = QtGui.QPainterPath()
-                    fill.addRoundedRect(QRectF(x, y, fw, 6), 3, 3)
+                    fill.addRoundedRect(QRectF(x, bar_y, fw, 6), 3, 3)
                     p.fillPath(fill, _severity_color(row.severity))
-                y += 6 + 16
 
         p.end()

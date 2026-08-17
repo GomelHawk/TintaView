@@ -10,6 +10,7 @@ method isn't there at all (e.g. some other object standing in for a real server)
 
 from __future__ import annotations
 
+import datetime
 import logging
 import subprocess
 import sys
@@ -35,6 +36,7 @@ ANIM_TICK_MS = 100  # working-pulse redraw rate
 USAGE_MIN_REFRESH_S = 30.0  # ignore flyout-open refreshes more frequent than this
 CLICK_REOPEN_GUARD_S = 0.25  # guards against "the click that just closed it" reopening it
 ICON_SIZE = 128
+FIRST_COPYRIGHT_YEAR = 2026
 
 _STATUS_LABELS = {
     "idle": "idle",
@@ -175,7 +177,7 @@ class TrayApp(QtCore.QObject):
         self._stats_worker = StatsWorker(cfg)
         self._stats_worker.results_ready.connect(self._apply_results)
 
-        self.flyout = Flyout()
+        self.flyout = Flyout(collapsed=cfg.ui.collapsed_agents, on_toggle=self._on_flyout_toggle)
 
         self.tray = QtWidgets.QSystemTrayIcon(icons.brand_icon(ICON_SIZE))
         self.tray.setToolTip("TintaView: connecting…")
@@ -232,6 +234,23 @@ class TrayApp(QtCore.QObject):
         except Exception:
             log.exception("could not persist chime_on_confirm")
 
+    def _on_flyout_toggle(self, agent_key: str, collapsed: bool) -> None:
+        """The flyout owns collapse/expand as live UI state; this just mirrors that
+        state into config so a section stays collapsed across restarts."""
+        agents = self._cfg.ui.collapsed_agents
+        if collapsed and agent_key not in agents:
+            agents.append(agent_key)
+        elif not collapsed and agent_key in agents:
+            agents.remove(agent_key)
+        else:
+            return
+        try:
+            from tintaview.core.config import save
+
+            save(self._cfg)
+        except Exception:
+            log.exception("could not persist collapsed_agents")
+
     def _open_settings(self) -> None:
         """Open the setup wizard — in a console of its own, not in this process.
 
@@ -279,6 +298,9 @@ class TrayApp(QtCore.QObject):
     def _show_about(self) -> None:
         from tintaview import __version__
 
+        year = datetime.date.today().year
+        copyright_years = str(FIRST_COPYRIGHT_YEAR) if year <= FIRST_COPYRIGHT_YEAR else f"{FIRST_COPYRIGHT_YEAR}-{year}"
+
         dialog = QtWidgets.QDialog(None)
         dialog.setWindowTitle("About TintaView")
 
@@ -291,12 +313,16 @@ class TrayApp(QtCore.QObject):
         version_label = QtWidgets.QLabel(f"Version {__version__}")
         version_label.setAlignment(QtCore.Qt.AlignCenter)
 
+        copyright_label = QtWidgets.QLabel(f"Copyright (C) {copyright_years} Dmitry Koshelenko")
+        copyright_label.setAlignment(QtCore.Qt.AlignCenter)
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
         buttons.accepted.connect(dialog.accept)
 
         layout = QtWidgets.QVBoxLayout(dialog)
         layout.addWidget(logo)
         layout.addWidget(version_label)
+        layout.addWidget(copyright_label)
         layout.addWidget(buttons)
         layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
 
