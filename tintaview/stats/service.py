@@ -68,18 +68,24 @@ class StatsService:
         if not keys:
             return {}
 
-        results: dict[str, UsageResult] = {}
+        completed: dict[str, UsageResult] = {}
         with ThreadPoolExecutor(max_workers=len(keys), thread_name_prefix="tv-stats") as pool:
             future_to_key = {pool.submit(self._fetch_one, key, timeout): key for key in keys}
             for future in as_completed(future_to_key):
                 key = future_to_key[future]
                 try:
-                    results[key] = future.result()
+                    completed[key] = future.result()
                 except Exception as e:  # noqa: BLE001 - a provider bug must not sink the whole poll
                     log.exception("stats provider %s raised unexpectedly", key)
-                    results[key] = self._apply_cache_policy(
+                    completed[key] = self._apply_cache_policy(
                         UsageResult(agent=key, error=f"internal error: {e!r}")
                     )
+
+        # Rebuilt in `keys` order rather than returned as `completed` directly: threads
+        # finish in whatever order the network/disk I/O happens to resolve, and the tray
+        # (flyout sections, tooltip lines) renders dict order as display order. Without
+        # this, the agent order configured in the wizard would only hold by luck.
+        results = {key: completed[key] for key in keys if key in completed}
 
         with self._lock:
             self._latest.update(results)

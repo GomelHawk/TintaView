@@ -149,6 +149,41 @@ class StateWorker(QtCore.QObject):
         self.state_ready.emit(payload)
 
 
+class UpdateCheckWorker(QtCore.QObject):
+    """One-shot background check against the GitHub Releases API, off the GUI thread —
+    same reasoning as `StatsWorker`: real network I/O must never block painting.
+
+    Only emits when a strictly newer release actually exists; "up to date" and "the
+    check failed" (no network, rate-limited, no releases yet) are silent, since this
+    runs unattended on every start and neither is something the user needs to see.
+    """
+
+    update_available = QtCore.Signal(str, str)  # (latest_tag, current_version)
+
+    def fetch(self) -> None:
+        threading.Thread(target=self._run, daemon=True, name="tv-tray-update-check").start()
+
+    def _run(self) -> None:
+        from tintaview import __version__
+
+        try:
+            from tintaview.install import update as update_mod
+        except ImportError:
+            return
+
+        try:
+            release = update_mod.latest_release()
+            if release is None:
+                return
+            tag = str(release.get("tag_name") or "").lstrip("vV").strip()
+            if not tag or update_mod.compare_versions(__version__, tag) >= 0:
+                return
+        except Exception:
+            log.exception("startup update check failed")
+            return
+        self.update_available.emit(tag, __version__)
+
+
 class TrayApp(QtCore.QObject):
     """Owns the tray icon, the flyout and the polling timers.
 
@@ -176,6 +211,9 @@ class TrayApp(QtCore.QObject):
 
         self._stats_worker = StatsWorker(cfg)
         self._stats_worker.results_ready.connect(self._apply_results)
+
+        self._update_worker = UpdateCheckWorker()
+        self._update_worker.update_available.connect(self._on_update_available)
 
         self.flyout = Flyout(collapsed=cfg.ui.collapsed_agents, on_toggle=self._on_flyout_toggle)
 
@@ -206,6 +244,8 @@ class TrayApp(QtCore.QObject):
 
         self._poll_state()
         self._stats_worker.fetch()
+        if cfg.update.check:
+            self._update_worker.fetch()
 
     # --- menu -------------------------------------------------------------
 
@@ -327,6 +367,19 @@ class TrayApp(QtCore.QObject):
         layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
 
         dialog.exec()
+
+    def _on_update_available(self, tag: str, current: str) -> None:
+        """Startup check found a newer release — surface it as a tray balloon rather
+        than a modal dialog: this fires unattended on every launch, so it must never
+        interrupt whatever the user is doing. "Check for updates" in the menu (below)
+        is where the actual install prompt lives."""
+        self.tray.showMessage(
+            "TintaView update available",
+            f"Version {tag} is available — you have {current}. Use \"Check for "
+            "updates\" in the tray menu to install it.",
+            QtWidgets.QSystemTrayIcon.Information,
+            8000,
+        )
 
     def _check_updates(self) -> None:
         """Check for a newer release and offer to install it.
@@ -524,22 +577,10 @@ class TrayApp(QtCore.QObject):
         self._show_flyout_near_cursor()
 
     def _show_flyout_near_cursor(self) -> None:
-        self.flyout.adjustSize()
-        screen = (
-            QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
-            or QtGui.QGuiApplication.primaryScreen()
-        )
-        area = screen.availableGeometry()
-        pos = QtGui.QCursor.pos()
-        x = min(pos.x(), area.right() - self.flyout.width() - 8)
-        y = pos.y() - self.flyout.height() - 12  # above the cursor (tray is usually bottom)
-        if y < area.top():
-            y = pos.y() + 12
-        x = max(area.left() + 8, x)
-        self.flyout.move(x, y)
-        self.flyout.show()
-        self.flyout.raise_()
-        self.flyout.activateWindow()
+        # Positioning (and re-clamping on later resize) lives on Flyout itself now —
+        # see `Flyout.show_near` — since it has to run again on every collapse/expand,
+        # not just here at initial open.
+        self.flyout.show_near(QtGui.QCursor.pos())
 
 
 def run_tray(cfg: Config, server: Any) -> int:

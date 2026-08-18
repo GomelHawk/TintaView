@@ -269,6 +269,7 @@ class Flyout(QtWidgets.QWidget):
         self._collapsed: set[str] = set(collapsed or ())
         self._on_toggle = on_toggle
         self.hidden_at = 0.0
+        self._anchor: QtCore.QPoint | None = None
         self.resize(CARD_W, 140)
 
     def event(self, e: QtCore.QEvent) -> bool:
@@ -284,6 +285,33 @@ class Flyout(QtWidgets.QWidget):
         # CLICK_REOPEN_GUARD_S.
         self.hidden_at = time.monotonic()
         super().hideEvent(e)
+
+    # --- positioning -------------------------------------------------------------
+
+    def _clamped_position(self, anchor: QtCore.QPoint) -> QtCore.QPoint:
+        screen = (
+            QtGui.QGuiApplication.screenAt(anchor) or QtGui.QGuiApplication.primaryScreen()
+        )
+        area = screen.availableGeometry()
+        x = min(anchor.x(), area.right() - self.width() - 8)
+        y = anchor.y() - self.height() - 12  # above the cursor (tray is usually bottom)
+        if y < area.top():
+            y = anchor.y() + 12
+        x = max(area.left() + 8, x)
+        return QtCore.QPoint(x, y)
+
+    def show_near(self, anchor: QtCore.QPoint) -> None:
+        """Position the card near `anchor` (the cursor, at the moment the tray icon was
+        clicked) and show it. `anchor` is remembered so a later resize — collapsing a
+        section, or a usage refresh that changes a section's height — can re-clamp to
+        the screen immediately (see `_resize_to_content`) instead of only being correct
+        the next time the flyout happens to be reopened."""
+        self._anchor = anchor
+        self.adjustSize()
+        self.move(self._clamped_position(anchor))
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     # --- data ------------------------------------------------------------------
 
@@ -328,6 +356,8 @@ class Flyout(QtWidgets.QWidget):
             _sections, y = self._layout()
             h = y + PAD
         self.setFixedSize(CARD_W, max(80, int(h)))
+        if self._anchor is not None and self.isVisible():
+            self.move(self._clamped_position(self._anchor))
 
     def _toggle(self, key: str) -> None:
         if key in self._collapsed:

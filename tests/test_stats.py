@@ -1024,6 +1024,34 @@ class TestStatsService:
         service = StatsService(cfg, cache=UsageCache(path=tmp_path / "cache.json"), providers={})
         assert service.fetch_all() == {}
 
+    def test_result_order_matches_configured_order_not_completion_order(self, tmp_path):
+        # codex is made to finish first (no sleep) while claude finishes last (a
+        # sleep) — if `fetch_all` returned results in completion order, "codex" would
+        # land before "claude" here despite "claude" being configured first.
+        def fast(agent_config, timeout):
+            return UsageResult(agent="codex", rows=[UsageRow(label="x", pct=1.0)])
+
+        def slow(agent_config, timeout):
+            time.sleep(0.2)
+            return UsageResult(agent="claude", rows=[UsageRow(label="x", pct=1.0)])
+
+        def medium(agent_config, timeout):
+            time.sleep(0.1)
+            return UsageResult(agent="cursor", rows=[UsageRow(label="x", pct=1.0)])
+
+        cfg = self._cfg(["claude", "codex", "cursor"])
+        service = StatsService(
+            cfg,
+            cache=UsageCache(path=tmp_path / "cache.json"),
+            providers={
+                "claude": _FakeProvider("claude", slow),
+                "codex": _FakeProvider("codex", fast),
+                "cursor": _FakeProvider("cursor", medium),
+            },
+        )
+        results = service.fetch_all()
+        assert list(results) == ["claude", "codex", "cursor"]
+
     def test_unconfigured_provider_key_is_skipped(self, tmp_path):
         cfg = self._cfg(["claude", "unknown-agent"])
         service = StatsService(

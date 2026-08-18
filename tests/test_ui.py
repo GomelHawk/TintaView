@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6 import QtGui, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 import tintaview.ui.tray as tray_mod  # noqa: E402
 from tintaview.core.config import Config  # noqa: E402
@@ -117,6 +117,34 @@ def test_flyout_handles_empty_results(qapp):
     assert not pixmap.isNull()
 
 
+def test_flyout_show_near_positions_above_the_anchor(qapp):
+    flyout = Flyout()
+    flyout.set_results(_sample_results())
+    anchor = QtCore.QPoint(500, 500)
+
+    flyout.show_near(anchor)
+
+    assert flyout.pos().y() == anchor.y() - flyout.height() - 12
+    flyout.hide()
+
+
+def test_flyout_repositions_immediately_after_collapsing_a_section(qapp):
+    """Collapsing/expanding a section changes the card's height; the card must
+    re-anchor to the same point immediately rather than only being correctly placed
+    the next time it happens to be reopened (see Flyout.show_near)."""
+    flyout = Flyout()
+    flyout.set_results(_sample_results())
+    anchor = QtCore.QPoint(500, 500)
+    flyout.show_near(anchor)
+    height_before = flyout.height()
+
+    flyout._toggle("claude")  # claude has rows and is collapsible; cursor errored, is not
+
+    assert flyout.height() < height_before
+    assert flyout.pos().y() == anchor.y() - flyout.height() - 12
+    flyout.hide()
+
+
 # --------------------------------------------------------------------------- tray
 
 
@@ -142,6 +170,9 @@ def tray(qapp, monkeypatch, tmp_path):
     # and a real StatsService would hit disk/network from a background thread with
     # no way to await or clean it up in a synchronous test.
     monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
+    # Same reasoning: the startup update check is real network I/O on a background
+    # thread, which every other tray test would otherwise trigger unattended.
+    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
 
     cfg = Config()
     cfg.enabled_agents = ["claude", "codex"]
@@ -221,6 +252,80 @@ def test_tray_sound_toggle_persists(tray, tmp_path):
 
     assert app_instance._cfg.ui.chime_on_confirm is True
     assert (tmp_path / "config.toml").exists()
+
+
+# --------------------------------------------------------------------------- update check
+
+
+def test_update_check_worker_emits_only_when_a_newer_release_exists(qapp, monkeypatch):
+    from tintaview.install import update as update_mod
+
+    monkeypatch.setattr(update_mod, "latest_release", lambda: {"tag_name": "v9.9.9"})
+    worker = tray_mod.UpdateCheckWorker()
+    seen = []
+    worker.update_available.connect(lambda tag, current: seen.append((tag, current)))
+
+    worker._run()
+
+    assert len(seen) == 1
+    tag, current = seen[0]
+    assert tag == "9.9.9"
+
+
+def test_update_check_worker_silent_when_already_current_or_unreachable(qapp, monkeypatch):
+    from tintaview import __version__
+    from tintaview.install import update as update_mod
+
+    worker = tray_mod.UpdateCheckWorker()
+    seen = []
+    worker.update_available.connect(lambda tag, current: seen.append((tag, current)))
+
+    monkeypatch.setattr(update_mod, "latest_release", lambda: {"tag_name": f"v{__version__}"})
+    worker._run()
+    assert seen == []
+
+    monkeypatch.setattr(update_mod, "latest_release", lambda: None)  # network/rate-limit/no-release
+    worker._run()
+    assert seen == []
+
+
+def test_tray_runs_update_check_on_start_only_when_enabled(qapp, monkeypatch, tmp_path):
+    monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
+    monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
+    calls = []
+    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: calls.append(1))
+
+    cfg = Config()
+    cfg.update.check = False
+    app_instance = TrayApp(cfg, _FakeServer(), qapp)
+    try:
+        assert calls == []
+    finally:
+        app_instance.tray.hide()
+
+    cfg2 = Config()
+    cfg2.update.check = True
+    app_instance2 = TrayApp(cfg2, _FakeServer(), qapp)
+    try:
+        assert calls == [1]
+    finally:
+        app_instance2.tray.hide()
+
+
+def test_tray_shows_a_balloon_when_an_update_is_found(tray, monkeypatch):
+    app_instance, _ = tray
+    calls = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage",
+        lambda self, title, message, *a, **k: calls.append((title, message)),
+    )
+
+    app_instance._on_update_available("9.9.9", "1.0.0")
+
+    assert len(calls) == 1
+    title, message = calls[0]
+    assert "9.9.9" in message
+    assert "1.0.0" in message
 
 
 def test_mark_is_bold_but_keeps_its_shape(qapp):

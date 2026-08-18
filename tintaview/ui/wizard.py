@@ -105,20 +105,28 @@ def _prompt_choice(question: str, options: list[tuple[str, str]], default: str, 
 
 
 def _prompt_multiselect(
-    question: str, items: list[tuple[str, str, bool]], assume_yes: bool
+    question: str, items: list[tuple[str, str, bool]], assume_yes: bool,
+    default_order: list[str] | None = None,
 ) -> list[str]:
     """`items` is `[(key, label, preselected), ...]`; returns the keys the user picked.
 
-    What you type **is** the selection — "1 3" means items 1 and 3 and nothing else.
-    This used to toggle each number against a pre-ticked list, which reads fine once you
-    know it and is quietly confusing until then: typing "1 3" when everything was already
-    ticked *deselected* those two, the exact opposite of what it looks like it does. A
-    plain selection needs no explanation and cannot be misread.
+    What you type **is** the selection — "1 3" means items 1 and 3 and nothing else, in
+    that order. This used to toggle each number against a pre-ticked list, which reads
+    fine once you know it and is quietly confusing until then: typing "1 3" when
+    everything was already ticked *deselected* those two, the exact opposite of what it
+    looks like it does. A plain selection needs no explanation and cannot be misread.
 
     Enter keeps the suggestion (what was detected, or what is already configured), which
-    is shown explicitly rather than implied by checkboxes.
+    is shown explicitly rather than implied by checkboxes. `default_order`, if given,
+    reorders that suggestion to match it (e.g. an existing config's already-chosen
+    order) — otherwise it falls back to `items`' own order. Without this, simply
+    pressing Enter to re-confirm settings would silently reset a previously-configured
+    order back to the fixed list order every time.
     """
     default_keys = [k for k, _, selected in items if selected]
+    if default_order:
+        order_index = {k: i for i, k in enumerate(default_order)}
+        default_keys.sort(key=lambda k: order_index.get(k, len(default_order)))
     if assume_yes:
         return default_keys or [items[0][0]]
 
@@ -306,7 +314,12 @@ def _step_agents(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
         status = "usage found" if detected else "usage stats only, no hook install"
         items.append((key, f"{mark} {label} — {status}", preselected))
 
-    chosen = _prompt_multiselect("Which coding agents do you use?", items, assume_yes)
+    chosen = _prompt_multiselect(
+        "Which coding agents do you use? Type the numbers in the order you'd like them "
+        'shown in the tray flyout and tooltip — e.g. "2 1" shows the second agent above '
+        "the first.",
+        items, assume_yes, default_order=cfg.enabled_agents,
+    )
 
     for key in chosen:
         adapter = agents_base.get(key)

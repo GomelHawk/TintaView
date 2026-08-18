@@ -231,7 +231,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `update.channel` | `stable` | Update channel (currently only `stable` is published). |
-| `agents.enabled` | `["claude"]` | Which agents TintaView watches; the wizard sets this for you. |
+| `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout and tooltip. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
 | `agents.<key>.confirm_detection` | `event` | `event` (a real hook fires) or `stall` (heuristic — Cursor's default). |
 | `agents.<key>.stall_seconds` | `8.0` | Only used when `confirm_detection = "stall"`. |
@@ -273,9 +273,14 @@ and tooltip, and polls the same GET /state endpoint a doctor or a remote tool wo
 
 ## Updating
 
-- **Windows** — the tray's **Check for updates** menu item checks GitHub Releases (the
-  result goes to the log, not a popup, today); to actually install a newer version, run
-  `tintaview update` from a terminal, or re-run the `install.ps1` one-liner yourself.
+- The tray checks GitHub Releases once, automatically, on every start (set
+  `update.check = false` to turn this off) — if a newer version exists it shows a
+  tray notification, without interrupting anything or installing on its own. Use the
+  tray's **Check for updates** menu item any time to see the same check as a dialog
+  and choose to install.
+- **Windows** — to install a newer version, use the **Check for updates** menu item
+  and accept the prompt, run `tintaview update` from a terminal, or re-run the
+  `install.ps1` one-liner yourself.
 - **Linux / macOS** — re-run `packaging/install.sh` (or `tintaview update`, which does
   the same thing).
 

@@ -208,6 +208,27 @@ def test_multiselect_requires_a_pick_when_nothing_is_suggested(monkeypatch, caps
     assert "at least one" in capsys.readouterr().out.lower()
 
 
+def test_multiselect_default_order_reorders_the_suggestion(monkeypatch):
+    # Items are preselected in list order (a, b, c), but a previously-configured
+    # order of ["c", "a", "b"] should win when the user just presses Enter — otherwise
+    # re-running the wizard would silently reset a custom display order every time.
+    items = [("a", "A", True), ("b", "B", True), ("c", "C", True)]
+    _feed(monkeypatch, [""])
+    assert wizard._prompt_multiselect(
+        "q", items, assume_yes=False, default_order=["c", "a", "b"]
+    ) == ["c", "a", "b"]
+
+
+def test_multiselect_default_order_ignores_unselected_and_unknown_keys(monkeypatch):
+    # "b" isn't preselected, so it's not in the default at all; a stale key in
+    # default_order that no longer matches any item must not blow up the sort.
+    items = [("a", "A", True), ("b", "B", False), ("c", "C", True)]
+    _feed(monkeypatch, [""])
+    assert wizard._prompt_multiselect(
+        "q", items, assume_yes=False, default_order=["stale", "c", "a"]
+    ) == ["c", "a"]
+
+
 def test_choice_is_answered_by_number(monkeypatch):
     options = [("chroma", "Razer Chroma"), ("openrgb", "OpenRGB"), ("none", "Status only")]
     _feed(monkeypatch, ["2"])
