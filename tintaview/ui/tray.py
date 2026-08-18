@@ -353,7 +353,7 @@ class TrayApp(QtCore.QObject):
         version_label = QtWidgets.QLabel(f"Version {__version__}")
         version_label.setAlignment(QtCore.Qt.AlignCenter)
 
-        copyright_label = QtWidgets.QLabel(f"Copyright (C) {copyright_years} Dmitry Koshelenko")
+        copyright_label = QtWidgets.QLabel(f"Copyright (C) {copyright_years} Dmitry Koshelenko, Igor Koshelenko")
         copyright_label.setAlignment(QtCore.Qt.AlignCenter)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)

@@ -46,6 +46,13 @@ class Environment:
         return self.platform == PLATFORM_WINDOWS
 
     @property
+    def supports_ghub(self) -> bool:
+        # The LED Illumination SDK DLL G HUB installs is a Windows binary, same
+        # reasoning as supports_chroma — including the WSL-split case, where the
+        # daemon that would load it runs on the Windows side, not this process.
+        return self.platform == PLATFORM_WINDOWS
+
+    @property
     def supports_openrgb(self) -> bool:
         return self.platform in (PLATFORM_WINDOWS, PLATFORM_LINUX, PLATFORM_WSL, PLATFORM_MACOS)
 

@@ -17,7 +17,9 @@ from typing import Any
 
 APP_NAME = "TintaView"
 DEFAULT_PORT = 8777
-CONFIG_VERSION = 1
+#: Bumped to 2 when the `ghub` engine was added — see `_migrate_engine_order` for why
+#: a version bump is what triggers the one-time `engine.order` fix-up.
+CONFIG_VERSION = 2
 
 
 # --------------------------------------------------------------------------- paths
@@ -84,6 +86,23 @@ class ChromaConfig:
 
 
 @dataclass
+class GHubConfig:
+    """Logitech G HUB, via the LED Illumination SDK DLL G HUB itself installs.
+
+    Unlike OpenRGB, this needs no host/port — the SDK is loaded in-process — so the only
+    knobs are where to find it and which capability classes to drive.
+    """
+
+    dll_path: str = ""  # empty = auto-discover (G HUB's install dir, the registry, PATH)
+    # SDK capability bitmask names (LOGI_DEVICETYPE_*), not device instances like
+    # OpenRGB's device_types — the legacy LED SDK has no way to address "the mouse" vs
+    # "the keyboard", only "every monochrome/RGB/per-key-RGB device". All three by
+    # default, since there is no finer-grained target to narrow it to.
+    device_types: list[str] = field(default_factory=lambda: ["monochrome", "rgb", "perkey"])
+    restore_on_release: bool = True  # LogiLedSaveCurrentLighting/RestoreLighting round trip
+
+
+@dataclass
 class OpenRGBConfig:
     host: str = "127.0.0.1"
     port: int = 6742
@@ -99,9 +118,10 @@ class OpenRGBConfig:
 
 @dataclass
 class EngineConfig:
-    mode: str = "auto"  # auto | chroma | openrgb | none
-    order: list[str] = field(default_factory=lambda: ["chroma", "openrgb"])
+    mode: str = "auto"  # auto | chroma | ghub | openrgb | none
+    order: list[str] = field(default_factory=lambda: ["chroma", "ghub", "openrgb"])
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
+    ghub: GHubConfig = field(default_factory=GHubConfig)
     openrgb: OpenRGBConfig = field(default_factory=OpenRGBConfig)
 
 
@@ -249,6 +269,24 @@ def _build(cls: type, data: Any):
     return cls(**{k: v for k, v in data.items() if k in names})
 
 
+def _migrate_engine_order(order: list[str], version: int) -> list[str]:
+    """Fix up a pre-`ghub` `engine.order` on load, so upgrading doesn't silently drop
+    the new engine out of `auto` mode's probe order.
+
+    `dumps()` writes every field, so essentially every config.toml saved by a version
+    before this one has `order = ["chroma", "openrgb"]` sitting in the file explicitly —
+    a newer *default* order is not enough, because the explicit value always wins. Only
+    runs for a file whose `version` predates `CONFIG_VERSION` and that doesn't already
+    list `ghub` (an already-migrated or hand-edited file is left alone either way).
+    """
+    if version >= CONFIG_VERSION or "ghub" in order:
+        return order
+    if "chroma" in order:
+        idx = order.index("chroma") + 1
+        return order[:idx] + ["ghub"] + order[idx:]
+    return ["ghub", *order]
+
+
 def load(path: Path | None = None) -> Config:
     """Load the config, returning defaults when the file is missing or unreadable."""
     p = path or config_path()
@@ -260,17 +298,25 @@ def load(path: Path | None = None) -> Config:
         cfg.path = p
         return cfg
 
+    version = int(raw.get("version", CONFIG_VERSION))
+
     engine_raw = raw.get("engine", {}) or {}
     engine = _build(EngineConfig, engine_raw)
     engine.chroma = _build(ChromaConfig, engine_raw.get("chroma", {}))
+    engine.ghub = _build(GHubConfig, engine_raw.get("ghub", {}))
     engine.openrgb = _build(OpenRGBConfig, engine_raw.get("openrgb", {}))
+
+    migrated_order = _migrate_engine_order(list(engine.order), version)
+    if migrated_order != engine.order:
+        engine.order = migrated_order
+        version = CONFIG_VERSION  # the in-memory config now matches the current schema
 
     agents_raw = dict(raw.get("agents", {}) or {})
     enabled = agents_raw.pop("enabled", None) or ["claude"]
     agents = {k: _build(AgentConfig, v) for k, v in agents_raw.items() if isinstance(v, dict)}
 
     cfg = Config(
-        version=int(raw.get("version", CONFIG_VERSION)),
+        version=version,
         server=_build(ServerConfig, raw.get("server", {})),
         engine=engine,
         colors=_colors(raw.get("colors", {})),
@@ -331,6 +377,7 @@ def dumps(cfg: Config) -> str:
     out += _table("server", cfg.server)
     out += _table("engine", cfg.engine)
     out += _table("engine.chroma", cfg.engine.chroma)
+    out += _table("engine.ghub", cfg.engine.ghub)
     out += _table("engine.openrgb", cfg.engine.openrgb)
     out += _table("colors", cfg.colors)
     out += _table("colors.device", cfg.colors.device)

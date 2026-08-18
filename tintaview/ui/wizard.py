@@ -353,7 +353,21 @@ def _step_agents(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
 # --------------------------------------------------------------------------- step 4: engine
 
 
-_ENGINE_DISPLAY = {"chroma": "Razer Chroma", "openrgb": "OpenRGB"}
+_ENGINE_DISPLAY = {"chroma": "Razer Chroma", "ghub": "Logitech G HUB", "openrgb": "OpenRGB"}
+
+#: `Environment.supports_*` to check per engine, and what to tell someone whose pick
+#: isn't answering yet — kept as one lookup rather than an `if`/`elif` ladder that grows
+#: another branch every time an engine is added.
+_ENGINE_SUPPORTED = {
+    "chroma": lambda env: env.supports_chroma,
+    "ghub": lambda env: env.supports_ghub,
+    "openrgb": lambda env: env.supports_openrgb,
+}
+_ENGINE_NOT_RUNNING_HINT = {
+    "chroma": "start Razer Synapse",
+    "ghub": "start Logitech G HUB",
+    "openrgb": "start OpenRGB and turn on its SDK server",
+}
 
 
 #: Availability markers. Every option stays selectable — someone configuring a machine
@@ -372,13 +386,12 @@ def _engine_label(name: str, env: Environment, probe_ok: bool) -> str:
     if name == "none":
         return f"{_MARK_READY} Status-only — no lights, just tracks activity"
     display = _ENGINE_DISPLAY.get(name, name)
-    supported = env.supports_chroma if name == "chroma" else env.supports_openrgb
+    supported = _ENGINE_SUPPORTED.get(name, lambda _env: True)(env)
     if not supported:
         return f"{_MARK_UNSUPPORTED} {display} — not supported on {env.platform}"
     if probe_ok:
         return f"{_MARK_READY} {display} — running now"
-    hint = ("start Razer Synapse" if name == "chroma"
-            else "start OpenRGB and turn on its SDK server")
+    hint = _ENGINE_NOT_RUNNING_HINT.get(name, "check that it's running")
     return f"{_MARK_NOT_RUNNING} {display} — you can still pick it; {hint}"
 
 
@@ -386,21 +399,22 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
     print("\n=== Lighting ===")
     probes = dict(available_engines(cfg))
 
-    detected = [n for n in ("chroma", "openrgb") if probes.get(n)]
+    detected = [n for n in ("chroma", "ghub", "openrgb") if probes.get(n)]
     if detected:
         print("  Detected: " + ", ".join(_ENGINE_DISPLAY.get(n, n) for n in detected))
     else:
         print("  No lighting software is answering right now (Razer Synapse for Chroma, "
-              "the OpenRGB app with its SDK server on for OpenRGB).")
+              "Logitech G HUB for G HUB, the OpenRGB app with its SDK server on for "
+              "OpenRGB).")
 
     # "auto" first and default. Pinning a single engine is what turns "the app I picked
     # isn't running" into "no lighting at all, silently" — auto re-probes on every start
     # and falls back on its own, so it survives Synapse being closed or OpenRGB being
     # installed later. The explicit choices stay for anyone running both and wanting one.
-    order = ["auto", "chroma", "openrgb", "none"]
+    order = ["auto", "chroma", "ghub", "openrgb", "none"]
     options = [(name, _engine_label(name, env, probes.get(name, False))) for name in order]
 
-    current = cfg.engine.mode if cfg.engine.mode in ("auto", "chroma", "openrgb", "none") else None
+    current = cfg.engine.mode if cfg.engine.mode in order else None
     default = current or "auto"
 
     choice = _prompt_choice("Which engine should drive your lights?", options, default, assume_yes)
@@ -412,7 +426,7 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
             + " each time it starts, and fall back to status-only if neither answers."
         )
     elif choice != "none":
-        supported = env.supports_chroma if choice == "chroma" else env.supports_openrgb
+        supported = _ENGINE_SUPPORTED.get(choice, lambda _env: True)(env)
         if not supported:
             print(
                 f"  Note: {choice} isn't supported on {env.platform} — TintaView will "
@@ -424,11 +438,21 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
                 "running yet — TintaView will keep trying once it's installed."
             )
 
+    if choice == "ghub":
+        print(
+            "  Good news: unlike OpenRGB, G HUB can keep running — TintaView drives the "
+            "lights through the same SDK G HUB itself uses, so there's nothing to close.\n"
+            "  Note: that SDK has no way to target a single device, so this drives every "
+            "detected Logitech G device at once."
+        )
+        _ensure_ghub_ready(cfg, assume_yes)
+
     if choice == "openrgb":
         print(
             "  Warning: OpenRGB and Razer Synapse / Logitech G HUB both try to drive the "
             "same lighting hardware. Running both at once makes them fight over your "
-            "devices — only run one at a time."
+            "devices — only run one at a time. If your devices are Logitech, the "
+            "built-in G HUB engine above can run alongside G HUB instead of fighting it."
         )
         if env.platform in (PLATFORM_LINUX, PLATFORM_WSL):
             print(
@@ -500,6 +524,55 @@ def _ensure_openrgb_ready(cfg: config_mod.Config, assume_yes: bool) -> None:
     print(
         "  Then open OpenRGB and turn on Settings > SDK Server > 'Start Server', leave it "
         "running, and re-run `tintaview setup` (or `tintaview doctor`) to confirm."
+    )
+
+
+def _ensure_ghub_ready(cfg: config_mod.Config, assume_yes: bool) -> None:
+    """Check what G HUB needs, and offer to install it if the SDK DLL can't be found.
+
+    G HUB has only two prerequisites, not OpenRGB's three: the application (which ships
+    the DLL — no separate client library to install) and it actually running with
+    lighting control enabled. A missing DLL is a definite "G HUB isn't installed" signal
+    on its own, unlike OpenRGB's library-vs-app-vs-server ambiguity, so this always says
+    so before deciding whether winget can offer to fix it.
+    """
+    from ..engines.ghub import GHubEngine, discover_dll_path
+    from ..install import components
+
+    path = discover_dll_path(cfg.engine.ghub)
+    if path is None:
+        print(
+            "\n  The Logitech LED Illumination SDK DLL wasn't found — it ships inside "
+            "Logitech G HUB itself, and G HUB doesn't appear to be installed here."
+        )
+        installed = components.winget_package_installed(components.GHUB_WINGET_ID)
+        if installed is False and components.winget_available() and not assume_yes:
+            if _prompt_yes_no("  Install Logitech G HUB now with winget?", True, assume_yes):
+                ok, message = components.winget_install(components.GHUB_WINGET_ID)
+                print(f"  {'OK: ' if ok else 'Failed: '}{message}")
+                if not ok:
+                    print("  Download it yourself from "
+                          "https://www.logitechg.com/en-us/innovation/g-hub.html instead.")
+            else:
+                print("  Skipped — the G HUB engine will stay unavailable until it's installed.")
+        else:
+            print("  Get it from https://www.logitechg.com/en-us/innovation/g-hub.html.")
+        print("  Then re-run `tintaview setup` (or `tintaview doctor`) to confirm.")
+        return
+
+    try:
+        reachable = GHubEngine(cfg.engine.ghub).probe()
+    except Exception:
+        reachable = False
+    if reachable:
+        print(f"  Found the SDK at {path} and it responded — you're set.")
+        return
+
+    print(
+        f"\n  Found the SDK at {path}, but it didn't respond just now. Make sure G HUB "
+        'is running with "Game lighting control" enabled in its settings, and that G '
+        "HUB was started before TintaView — start G HUB first, then restart TintaView, "
+        "and re-run `tintaview doctor` to confirm."
     )
 
 

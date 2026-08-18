@@ -28,7 +28,7 @@ change (what changed, in one or two sentences) — even if the change isn't actu
 ```
 tintaview/
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
-  engines/   base.py  chroma.py  openrgb.py  null.py  factory.py
+  engines/   base.py  chroma.py  ghub.py  openrgb.py  null.py  factory.py
   agents/    base.py  claude.py  codex.py  cursor.py     # hook manifest + paths per agent
   stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py  cache.py  model.py  service.py
   ui/        tray.py  flyout.py  wizard.py  icons.py
@@ -53,7 +53,7 @@ optional at runtime.
 | Packaging | **A pure-Python wheel installed into a private venv, on every platform.** No compiled bundle, no `.exe` installer. This is a hard requirement of Windows Smart App Control, not a preference — see [Packaging](#packaging-no-compiled-bundle-ever). |
 | Autostart | **One per-user entry per platform, never a Scheduled Task**: HKCU `…\CurrentVersion\Run` value on Windows (*not* a Startup-folder shortcut — Windows 11 blocks those), a systemd `--user` unit plus an XDG autostart entry on Linux, a launchd agent on macOS. No admin rights, ever. |
 | Hook install | **Auto-merge with a per-agent before/after diff and explicit confirmation.** A copy-paste snippet stays available as a fallback for locked-down environments. |
-| Engines | **Both Chroma and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → openrgb → status-only`. |
+| Engines | **Chroma, G HUB and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → ghub → openrgb → status-only`. |
 | Tray icon | **A single whole-icon state.** No per-agent ray splitting or zone splitting: a user watches one agent at a time, and a gradient icon among solid ones reads as a different icon rather than a fourth state. |
 | Cursor stats | Local session token from `state.vscdb` → Cursor's own Connect RPC. No login UI of our own. |
 | Stack | Python 3.12+, PySide6 (Qt) tray, stdlib HTTP server. |
@@ -100,9 +100,26 @@ Configuration table — keep that table in sync when adding one.
 `close()`, `heartbeat()`, `active` property. `BaseEngine` carries the shared failure cooldown.
 
 - **Chroma** is the default. POST to open, PUT `/heartbeat` every 4 s, PUT per device with **BGR**
-  packing, DELETE to close. Release is automatic — Synapse takes back over on DELETE.
+ packing, DELETE to close. Release is automatic — Synapse takes back over on DELETE.
+- **G HUB** (`engines/ghub.py`) loads `sdk_legacy_led_x64.dll` with `ctypes` — no new
+ dependency, no bundled binary, Windows-only. Three things about the legacy LED
+ Illumination SDK that must keep being handled:
+ 1. **Colour is 0-100 percent, not 0-255** — every `set_color` call converts.
+ 2. **`LogiLedInit` after `LogiLedShutdown` in the same process is unreliable.**
+ `LightController` opens/closes an engine on every session start/end, so `close()`
+ only ever calls `LogiLedRestoreLighting`; the one real `LogiLedShutdown` is deferred
+ to process exit via `atexit`. Do not "simplify" this into calling `Shutdown` from
+ `close()` — that is the one thing this module exists to avoid.
+ 3. **The SDK initialises per calling thread**, so every call — from hook handler
+ threads, the blink thread, the heartbeat thread — is funnelled through one
+ dedicated worker thread owned by the engine, never called ad hoc from whichever
+ thread happens to be handling a request.
+ Unlike OpenRGB, G HUB does not need to be closed — it is designed to be driven while
+ it runs — and it has no per-device targeting, only a `LOGI_DEVICETYPE_*` capability
+ bitmask (`engine.ghub.device_types`), so a solid colour always lands on every
+ matching device at once.
 - **OpenRGB** is **RGB, not BGR**, and has no session concept, so it must do by hand three things
-  Chroma gets for free:
+ Chroma gets for free:
   1. **Snapshot & restore** — record each target device's active mode and per-LED colours on
      `open()`, restore them on `close()`. Without this the rig stays green after the agent exits.
   2. **Direct mode only** — skip devices with no Direct mode. Blinking a non-Direct device writes
@@ -298,13 +315,14 @@ the release — see `.gitattributes`.
 - **Unit:** state priority across agents; engine factory per config/platform; **hook merge is
   idempotent and lossless** (golden-file tests against a realistic pre-existing `settings.json`);
   stats parsers against the captured fixtures in `tests/fixtures/`; stall-detector timing.
-- **Integration:** fake Chroma REST and fake OpenRGB SDK servers, asserting snapshot/restore
-  round-trips.
+- **Integration:** fake Chroma REST and fake OpenRGB SDK servers, plus a fake DLL object
+ injected into `GHubEngine`'s constructor, asserting snapshot/restore round-trips.
 - Tests must pass on Windows too — watch for path separators, file permissions (`chmod` is a no-op
   there) and locked files.
-- **Manual matrix before a release:** Windows+WSL (Chroma), Windows+WSL (OpenRGB), native Ubuntu
-  (OpenRGB), macOS (status-only) × each agent — walk
-  `session-start → working → confirm → idle → session-end` and confirm the lights return to normal.
+- **Manual matrix before a release:** Windows+WSL (Chroma), Windows+WSL (G HUB), Windows+WSL
+ (OpenRGB), native Ubuntu (OpenRGB), macOS (status-only) × each agent — walk
+ `session-start → working → confirm → idle → session-end` and confirm the lights return to
+ normal (for G HUB specifically, that G HUB itself takes its own profile back on `close()`).
 
 ## Known fragile surfaces
 
@@ -315,6 +333,7 @@ the release — see `.gitattributes`.
 | JetBrains `CREDIT_SCALE` | Reverse-engineered from one live widget reading, not documented. Only affects display formatting, never severity |
 | Copilot CLI live quota | Not implemented — would need OS-credential-store access plus an undocumented two-step OAuth exchange with unverified field names. Local token totals only |
 | Cursor confirm heuristic | Tune `stall_seconds` against real sessions; ship conservative; allow disabling |
+| G HUB legacy LED SDK + start order | Undocumented/unofficial by Logitech's own admission; "DLL found but refused to init" almost always means G HUB started *after* TintaView backed off — `doctor` says so, restarting TintaView is the fix |
 | OpenRGB SDK version drift | Pin to v5 behaviour, feature-detect, fail soft |
 | Unsigned build (accepted) | Ship via the install scripts so no MOTW tag ever reaches anything. If a Defender *heuristic* ever bites, submit to Microsoft's false-positive portal and consider free OSS signing (SignPath) or Azure Trusted Signing |
 | PySide6 size (~60 MB) | Accepted for the usage-card quality; revisit `pystray` only if it becomes a real problem |

@@ -34,6 +34,10 @@ log = logging.getLogger(__name__)
 #: The winget package that provides the OpenRGB application on Windows.
 OPENRGB_WINGET_ID = "OpenRGB.OpenRGB"
 
+#: The winget package that provides Logitech G HUB, which ships the LED Illumination
+#: SDK DLL the `ghub` engine loads — see engines/ghub.py.
+GHUB_WINGET_ID = "Logitech.GHUB"
+
 _PIP_TIMEOUT = 300  # a small pure-Python wheel, but allow for a slow index
 _WINGET_QUERY_TIMEOUT = 60
 _WINGET_INSTALL_TIMEOUT = 900  # a real download plus a possible UAC prompt

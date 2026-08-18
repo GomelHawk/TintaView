@@ -2,9 +2,11 @@
 
 Chroma is exercised against a real (fake) HTTP server on a random localhost port —
 no Razer hardware or Synapse needed. OpenRGB is exercised against a fake ``openrgb``
-module injected into ``sys.modules`` — no openrgb-python install needed. Together these
-cover the full lifecycle (probe/open/set_color/close) without any vendor SDK present,
-which is also exactly the environment CI runs in.
+module injected into ``sys.modules`` — no openrgb-python install needed. G HUB is
+exercised against a fake DLL object passed straight into ``GHubEngine``'s constructor —
+no ``ctypes.WinDLL``, and therefore no real G HUB, needed even on Windows CI. Together
+these cover the full lifecycle (probe/open/set_color/close) without any vendor SDK
+present, which is also exactly the environment CI runs in.
 """
 
 from __future__ import annotations
@@ -18,9 +20,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from tintaview.core.config import ChromaConfig, Config, OpenRGBConfig
+from tintaview.core.config import ChromaConfig, Config, GHubConfig, OpenRGBConfig
 from tintaview.engines.chroma import ChromaEngine
 from tintaview.engines.factory import available_engines, make_engine
+from tintaview.engines.ghub import GHubEngine
 from tintaview.engines.null import NullEngine
 from tintaview.engines.openrgb import OpenRGBEngine
 
@@ -323,6 +326,181 @@ def test_openrgb_missing_dependency_is_quiet(monkeypatch):
     engine.close()
 
 
+# --------------------------------------------------------------------------- G HUB
+
+
+class _FakeGHubDll:
+    """Stand-in for the ctypes-loaded LED Illumination SDK DLL.
+
+    Records every call as (name, args, calling-thread-id) so tests can assert both the
+    sequence of SDK calls and — the point of `GHubEngine`'s call pump — that every one of
+    them ran on the same thread, never the thread that invoked the engine method.
+    """
+
+    def __init__(self, init_ok: bool = True) -> None:
+        self._init_ok = init_ok
+        self.calls: list[tuple[str, tuple, int]] = []
+
+    def _record(self, name: str, *args) -> None:
+        self.calls.append((name, args, threading.get_ident()))
+
+    def names(self) -> list[str]:
+        return [call[0] for call in self.calls]
+
+    def LogiLedInit(self) -> bool:  # noqa: N802 - matches the real SDK's exported name
+        self._record("LogiLedInit")
+        return self._init_ok
+
+    def LogiLedSetTargetDevice(self, mask: int) -> bool:  # noqa: N802
+        self._record("LogiLedSetTargetDevice", mask)
+        return True
+
+    def LogiLedSaveCurrentLighting(self) -> bool:  # noqa: N802
+        self._record("LogiLedSaveCurrentLighting")
+        return True
+
+    def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
+        self._record("LogiLedSetLighting", r, g, b)
+        return True
+
+    def LogiLedRestoreLighting(self) -> bool:  # noqa: N802
+        self._record("LogiLedRestoreLighting")
+        return True
+
+    def LogiLedShutdown(self) -> bool:  # noqa: N802
+        self._record("LogiLedShutdown")
+        return True
+
+
+def test_ghub_open_sets_target_device_then_saves_lighting():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(device_types=["rgb"]), dll=dll)
+
+    assert engine.open() is True
+    assert engine.active is True
+    assert dll.names() == [
+        "LogiLedInit", "LogiLedSetTargetDevice", "LogiLedSaveCurrentLighting",
+    ]
+    assert dll.calls[1][1] == (1 << 1,)  # "rgb" alone -> LOGI_DEVICETYPE_RGB
+
+
+def test_ghub_set_color_converts_0_255_scale_to_0_100_percent():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+
+    engine.set_color(255, 128, 0)
+    name, args, _ = dll.calls[-1]
+    assert name == "LogiLedSetLighting"
+    assert args == (100, 50, 0)
+
+
+def test_ghub_close_restores_but_never_shuts_down():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+
+    engine.close()
+    assert engine.active is False
+    assert dll.names()[-1] == "LogiLedRestoreLighting"
+    # The regression test for the module's re-init hazard: LogiLedShutdown must be
+    # deferred to process exit, never called from close().
+    assert "LogiLedShutdown" not in dll.names()
+
+
+def test_ghub_reopen_after_close_does_not_reinitialize():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+
+    engine.open()
+    engine.close()
+    engine.open()
+
+    assert dll.names().count("LogiLedInit") == 1
+
+
+def test_ghub_restore_disabled_skips_restore():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(restore_on_release=False), dll=dll)
+    engine.open()
+
+    engine.close()
+    assert "LogiLedRestoreLighting" not in dll.names()
+
+
+def test_ghub_every_sdk_call_runs_on_one_dedicated_thread():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+
+    engine.open()
+    engine.set_color(1, 2, 3)
+    engine.close()
+
+    thread_ids = {call[2] for call in dll.calls}
+    assert len(thread_ids) == 1  # every SDK call funnelled through the same pump thread
+    assert threading.get_ident() not in thread_ids  # never the thread calling the engine
+
+
+def test_ghub_probe_never_takes_control():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+
+    assert engine.probe() is True
+    assert engine.active is False  # probe() must never take control
+    assert dll.names() == ["LogiLedInit"]
+
+
+def test_ghub_init_failure_sets_cooldown():
+    dll = _FakeGHubDll(init_ok=False)
+    engine = GHubEngine(GHubConfig(), dll=dll)
+
+    assert engine.open() is False
+    assert engine.active is False
+    assert engine.in_cooldown() is True
+
+
+def test_ghub_probe_is_false_off_windows(monkeypatch):
+    import tintaview.engines.ghub as ghub_mod
+
+    monkeypatch.setattr(ghub_mod.sys, "platform", "linux")
+    engine = GHubEngine(GHubConfig())  # no dll override -> exercises real discovery
+
+    assert engine.probe() is False
+    assert engine.active is False
+
+
+def test_ghub_missing_dll_is_quiet(monkeypatch):
+    import tintaview.engines.ghub as ghub_mod
+
+    # Deterministic across the whole CI matrix (including a real Windows runner):
+    # nothing here may depend on whether G HUB happens to be installed on the host.
+    monkeypatch.setattr(ghub_mod, "discover_dll_path", lambda cfg: None)
+    engine = GHubEngine(GHubConfig())
+
+    assert engine.probe() is False
+    assert engine.open() is False
+    assert engine.active is False
+
+    engine.set_color(1, 2, 3)  # must never raise even though nothing is connected
+    engine.close()
+
+
+def test_ghub_discover_dll_path_prefers_explicit_override(tmp_path):
+    from tintaview.engines.ghub import discover_dll_path
+
+    fake_dll = tmp_path / "LogitechLed.dll"
+    fake_dll.write_bytes(b"")
+
+    assert discover_dll_path(GHubConfig(dll_path=str(fake_dll))) == fake_dll
+
+
+def test_ghub_discover_dll_path_explicit_override_must_exist(tmp_path):
+    from tintaview.engines.ghub import discover_dll_path
+
+    missing = tmp_path / "does-not-exist.dll"
+    assert discover_dll_path(GHubConfig(dll_path=str(missing))) is None
+
+
 # --------------------------------------------------------------------------- Null
 
 
@@ -346,6 +524,9 @@ def test_factory_mode_forces_engine():
 
     cfg.engine.mode = "chroma"
     assert isinstance(make_engine(cfg), ChromaEngine)
+
+    cfg.engine.mode = "ghub"
+    assert isinstance(make_engine(cfg), GHubEngine)
 
     cfg.engine.mode = "openrgb"
     assert isinstance(make_engine(cfg), OpenRGBEngine)
@@ -397,10 +578,13 @@ def test_factory_auto_survives_a_probe_that_raises(monkeypatch):
 
 def test_available_engines_reports_every_known_engine(monkeypatch):
     monkeypatch.setattr(ChromaEngine, "probe", lambda self: True)
+    monkeypatch.setattr(GHubEngine, "probe", lambda self: False)
     monkeypatch.setattr(OpenRGBEngine, "probe", lambda self: False)
     cfg = Config()
 
-    assert available_engines(cfg) == [("chroma", True), ("openrgb", False), ("none", True)]
+    assert available_engines(cfg) == [
+        ("chroma", True), ("ghub", False), ("openrgb", False), ("none", True),
+    ]
 
 
 def test_available_engines_never_raises(monkeypatch):

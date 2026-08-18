@@ -245,6 +245,31 @@ def _engine_unavailable_reason(name: str, env: Environment, cfg: Config) -> str:
         if not env.supports_chroma:
             return f"the Chroma REST SDK is Windows-only; this machine reports platform={env.platform}"
         return "Razer Synapse doesn't seem to be running (its Chroma Connect SDK is what's probed) — start Synapse"
+    if name == "ghub":
+        # Two different failures wear the same "not available" label here too: the SDK
+        # DLL missing (G HUB isn't installed at all) is fixed by installing G HUB; the
+        # DLL present but refusing to init is almost always G HUB not running yet, or
+        # having started *after* TintaView already gave up and backed off.
+        if not env.supports_ghub:
+            return (
+                "the Logitech LED Illumination SDK is Windows-only; this machine "
+                f"reports platform={env.platform}"
+            )
+        from ..engines.ghub import discover_dll_path
+
+        path = discover_dll_path(cfg.engine.ghub)
+        if path is None:
+            return (
+                "the Logitech LED Illumination SDK DLL wasn't found (checked G HUB's "
+                "install directory, the registry, and PATH) — install Logitech G HUB "
+                "from https://www.logitechg.com/en-us/innovation/g-hub.html"
+            )
+        return (
+            f"found the SDK at {path}, but it refused to initialise — make sure G HUB "
+            'is running with "Game lighting control" enabled in its settings, and that '
+            "G HUB was started before TintaView (restart TintaView if you started G HUB "
+            "afterwards)"
+        )
     if name == "openrgb":
         # Two different failures wear the same "not available" label, and only one of
         # them is fixed by touching OpenRGB. Saying "start the SDK server" to someone
@@ -272,11 +297,17 @@ def _check_engine(reporter: _Reporter, cfg: Config, env: Environment) -> None:
     probes = dict(available_engines(cfg))
     mode = cfg.engine.mode
 
-    for name in ("chroma", "openrgb"):
+    for name in ("chroma", "ghub", "openrgb"):
         if name not in probes:
             continue
         if probes[name]:
-            reporter.ok("ENGINE", f"{name}: available")
+            if name == "ghub":
+                from ..engines.ghub import discover_dll_path
+
+                path = discover_dll_path(cfg.engine.ghub)
+                reporter.ok("ENGINE", f"ghub: available ({path})" if path else "ghub: available")
+            else:
+                reporter.ok("ENGINE", f"{name}: available")
             continue
         reason = _engine_unavailable_reason(name, env, cfg)
         if mode == name:
@@ -292,7 +323,7 @@ def _check_engine(reporter: _Reporter, cfg: Config, env: Environment) -> None:
                 "unless you intended to use it",
             )
 
-    if mode in ("chroma", "openrgb", "none"):
+    if mode in ("chroma", "ghub", "openrgb", "none"):
         selected = mode
     else:
         selected = next((n for n in cfg.engine.order if probes.get(n)), "none")
@@ -300,8 +331,8 @@ def _check_engine(reporter: _Reporter, cfg: Config, env: Environment) -> None:
     if mode == "auto" and selected == "none":
         reporter.warn(
             "ENGINE", "auto mode found no usable lighting engine — running status-only",
-            "start Razer Synapse or OpenRGB (with its SDK server enabled) if you expected "
-            "lighting on this machine",
+            "start Razer Synapse, Logitech G HUB, or OpenRGB (with its SDK server "
+            "enabled) if you expected lighting on this machine",
         )
     else:
         reporter.ok("ENGINE", f"engine in use: {selected}")
