@@ -65,7 +65,7 @@ param(
     # against. Env: TINTAVIEW_WHEEL
     [string] $WheelPath,
 
-    # Use this python.exe instead of searching. Must be 3.11 or newer.
+    # Use this python.exe instead of searching. Must be 3.12 or newer.
     # Env: TINTAVIEW_PYTHON
     [string] $Python,
 
@@ -98,7 +98,7 @@ $AppName      = 'TintaView'
 $GitHubRepo   = 'GomelHawk/TintaView'
 $ManifestName = '.tintaview-install.json'
 $UserAgent    = 'TintaView-installer'
-$MinPython    = [Version]'3.11'
+$MinPython    = [Version]'3.12'
 
 # --------------------------------------------------------------------------- output
 

@@ -16,9 +16,12 @@ python scripts/build_assets.py --check # generated assets must be committed and 
 QT_QPA_PLATFORM=offscreen pytest -q   # required for the Qt tests without a display server
 ```
 
-CI (`ci.yml`) runs all four on ubuntu / windows / macOS × Python 3.11 and 3.12. The UI tests
+CI (`ci.yml`) runs all four on ubuntu / windows / macOS × Python 3.12, 3.13 and 3.14. The UI tests
 construct real `QWidget`s and never `.show()` them, so `offscreen` is enough — never add a
 test that needs a real display.
+
+At the end of implementing any update or feature, give a short commit-style description of the
+change (what changed, in one or two sentences) — even if the change isn't actually committed.
 
 ## Layout
 
@@ -53,7 +56,7 @@ optional at runtime.
 | Engines | **Both Chroma and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → openrgb → status-only`. |
 | Tray icon | **A single whole-icon state.** No per-agent ray splitting or zone splitting: a user watches one agent at a time, and a gradient icon among solid ones reads as a different icon rather than a fourth state. |
 | Cursor stats | Local session token from `state.vscdb` → Cursor's own Connect RPC. No login UI of our own. |
-| Stack | Python 3.11+, PySide6 (Qt) tray, stdlib HTTP server. |
+| Stack | Python 3.12+, PySide6 (Qt) tray, stdlib HTTP server. |
 
 Non-goals: lighting effects beyond solid/blink, per-agent colours or device zoning, multi-machine
 or remote status, team dashboards, code signing / notarization, and distribution via PyPI,

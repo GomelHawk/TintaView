@@ -10,7 +10,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     env:
       # PySide6 must never try to open a real display/window server in CI — the tray and

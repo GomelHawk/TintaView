@@ -7,7 +7,7 @@ name = "tintaview"
 dynamic = ["version"]
 description = "Agent-status lighting and usage tray for Claude Code, Codex CLI and Cursor"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 
 # The core (status broker + hooks + engines) is deliberately stdlib-only apart from
@@ -37,7 +37,7 @@ tintaview = ["hooks/*", "assets/generated/*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]

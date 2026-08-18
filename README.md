@@ -56,7 +56,7 @@ irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install
 That's it — no admin rights (it installs per-user under `%LOCALAPPDATA%\TintaView`), no
 security warnings, and it finishes by launching the setup wizard.
 
-**Requires Python 3.11 or newer.** If you don't have one, the script tells you and stops;
+**Requires Python 3.12 or newer.** If you don't have one, the script tells you and stops;
 `winget install --id Python.Python.3.12 --exact --source winget` is the one-liner it
 suggests.
 
