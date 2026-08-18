@@ -93,7 +93,7 @@ class GHubConfig:
     knobs are where to find it and which capability classes to drive.
     """
 
-    dll_path: str = ""  # empty = auto-discover (G HUB's install dir, the registry, PATH)
+    dll_path: str = ""  # empty = auto-discover (LGHUB\sdks, LGHUB root, registry, PATH)
     # SDK capability bitmask names (LOGI_DEVICETYPE_*), not device instances like
     # OpenRGB's device_types — the legacy LED SDK has no way to address "the mouse" vs
     # "the keyboard", only "every monochrome/RGB/per-key-RGB device". All three by

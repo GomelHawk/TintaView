@@ -337,6 +337,12 @@ def _check_engine(reporter: _Reporter, cfg: Config, env: Environment) -> None:
     else:
         reporter.ok("ENGINE", f"engine in use: {selected}")
 
+    if mode == "ghub":
+        from ..engines.ghub import format_setup_notes
+
+        for line in format_setup_notes().splitlines():
+            reporter.ok("ENGINE", line)
+
 
 # --------------------------------------------------------------------------- 5. hook script
 

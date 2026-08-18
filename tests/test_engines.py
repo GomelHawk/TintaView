@@ -4,7 +4,7 @@ Chroma is exercised against a real (fake) HTTP server on a random localhost port
 no Razer hardware or Synapse needed. OpenRGB is exercised against a fake ``openrgb``
 module injected into ``sys.modules`` — no openrgb-python install needed. G HUB is
 exercised against a fake DLL object passed straight into ``GHubEngine``'s constructor —
-no ``ctypes.WinDLL``, and therefore no real G HUB, needed even on Windows CI. Together
+no ``ctypes.CDLL``, and therefore no real G HUB, needed even on Windows CI. Together
 these cover the full lifecycle (probe/open/set_color/close) without any vendor SDK
 present, which is also exactly the environment CI runs in.
 """
@@ -119,8 +119,9 @@ def test_chroma_set_color_writes_every_configured_device(chroma_server):
     assert engine.open() is True
 
     engine.set_color(10, 20, 30)
-    paths = {path for method, path, _ in chroma_server.requests if method == "PUT"}
-    assert paths == {"/session123/mouse", "/session123/headset"}
+    puts = [path for method, path, _ in chroma_server.requests if method == "PUT"]
+    # One PUT per device. The G HUB engine's paint-then-1%-nudge is Logitech-only.
+    assert puts == ["/session123/mouse", "/session123/headset"]
 
 
 def test_chroma_probe_leaves_no_orphaned_session(chroma_server):
@@ -259,7 +260,7 @@ def test_openrgb_direct_mode_filter_and_restore(monkeypatch):
     assert keyboard.mode_calls == []  # never touched — no Direct mode to switch into
 
     engine.set_color(10, 20, 30)
-    assert mouse.color_calls[-1] == _FakeColor(10, 20, 30)
+    assert mouse.color_calls == [_FakeColor(10, 20, 30)]  # one write; no G HUB-style nudge
     assert keyboard.color_calls == []  # non-Direct device is never driven
 
     engine.close()
@@ -351,6 +352,10 @@ class _FakeGHubDll:
         self._record("LogiLedInit")
         return self._init_ok
 
+    def LogiLedInitWithName(self, name) -> bool:  # noqa: N802
+        self._record("LogiLedInitWithName", name)
+        return self._init_ok
+
     def LogiLedSetTargetDevice(self, mask: int) -> bool:  # noqa: N802
         self._record("LogiLedSetTargetDevice", mask)
         return True
@@ -361,6 +366,12 @@ class _FakeGHubDll:
 
     def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
         self._record("LogiLedSetLighting", r, g, b)
+        return True
+
+    def LogiLedSetLightingForTargetZone(  # noqa: N802
+        self, device_type: int, zone: int, r: int, g: int, b: int
+    ) -> bool:
+        self._record("LogiLedSetLightingForTargetZone", device_type, zone, r, g, b)
         return True
 
     def LogiLedRestoreLighting(self) -> bool:  # noqa: N802
@@ -379,8 +390,9 @@ def test_ghub_open_sets_target_device_then_saves_lighting():
     assert engine.open() is True
     assert engine.active is True
     assert dll.names() == [
-        "LogiLedInit", "LogiLedSetTargetDevice", "LogiLedSaveCurrentLighting",
+        "LogiLedInitWithName", "LogiLedSetTargetDevice", "LogiLedSaveCurrentLighting",
     ]
+    assert dll.calls[0][1] == (b"TintaView",)
     assert dll.calls[1][1] == (1 << 1,)  # "rgb" alone -> LOGI_DEVICETYPE_RGB
 
 
@@ -388,11 +400,12 @@ def test_ghub_set_color_converts_0_255_scale_to_0_100_percent():
     dll = _FakeGHubDll()
     engine = GHubEngine(GHubConfig(), dll=dll)
     engine.open()
+    dll.calls.clear()
 
     engine.set_color(255, 128, 0)
-    name, args, _ = dll.calls[-1]
-    assert name == "LogiLedSetLighting"
-    assert args == (100, 50, 0)
+    lighting = [c[1] for c in dll.calls if c[0] == "LogiLedSetLighting"]
+    # Real colour first, then the 1% nudge on a second pump turn — G HUB shows N-1.
+    assert lighting == [(100, 50, 0), (99, 50, 0)]
 
 
 def test_ghub_close_restores_but_never_shuts_down():
@@ -416,7 +429,8 @@ def test_ghub_reopen_after_close_does_not_reinitialize():
     engine.close()
     engine.open()
 
-    assert dll.names().count("LogiLedInit") == 1
+    assert dll.names().count("LogiLedInitWithName") == 1
+    assert "LogiLedInit" not in dll.names()
 
 
 def test_ghub_restore_disabled_skips_restore():
@@ -447,7 +461,7 @@ def test_ghub_probe_never_takes_control():
 
     assert engine.probe() is True
     assert engine.active is False  # probe() must never take control
-    assert dll.names() == ["LogiLedInit"]
+    assert dll.names() == ["LogiLedInitWithName"]
 
 
 def test_ghub_init_failure_sets_cooldown():
@@ -499,6 +513,96 @@ def test_ghub_discover_dll_path_explicit_override_must_exist(tmp_path):
 
     missing = tmp_path / "does-not-exist.dll"
     assert discover_dll_path(GHubConfig(dll_path=str(missing))) is None
+
+
+def test_ghub_falls_back_to_init_when_init_with_name_missing():
+    dll = _FakeGHubDll()
+    dll.LogiLedInitWithName = None  # pre-9.00 LGS has no such export
+    engine = GHubEngine(GHubConfig(), dll=dll)
+
+    assert engine.open() is True
+    assert dll.names()[0] == "LogiLedInit"
+    assert "LogiLedInitWithName" not in dll.names()
+
+
+def test_ghub_set_color_paints_mouse_zones_then_nudges():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+    dll.calls.clear()
+    engine.set_color(255, 0, 0)
+
+    # One paint of the real colour (keyboard SetLighting + mouse zones 0–1), then the
+    # same burst with a 1% nudge. Chroma/OpenRGB must not grow a matching second write.
+    assert dll.names() == [
+        "LogiLedSetLighting",
+        "LogiLedSetLightingForTargetZone",
+        "LogiLedSetLightingForTargetZone",
+        "LogiLedSetLighting",
+        "LogiLedSetLightingForTargetZone",
+        "LogiLedSetLightingForTargetZone",
+    ]
+    assert dll.calls[0][1] == (100, 0, 0)
+    assert {(c[1][0], c[1][1], c[1][2]) for c in dll.calls[1:3]} == {(0x3, 0, 100), (0x3, 1, 100)}
+    assert dll.calls[3][1] == (99, 0, 0)
+    assert {(c[1][0], c[1][1], c[1][2]) for c in dll.calls[4:6]} == {(0x3, 0, 99), (0x3, 1, 99)}
+
+
+def test_ghub_nudge_pct_is_one_percent_off():
+    from tintaview.engines.ghub import _nudge_pct
+
+    assert _nudge_pct((100, 0, 0)) == (99, 0, 0)
+    assert _nudge_pct((0, 50, 0)) == (0, 49, 0)
+    assert _nudge_pct((0, 0, 80)) == (0, 0, 79)
+    assert _nudge_pct((0, 0, 0)) == (1, 0, 0)  # off-half of the confirm blink
+
+
+def test_ghub_fake_dll_does_not_pump_win32_messages(monkeypatch):
+    """PeekMessage is a real-DLL hazard; injected fakes must not pay the 0.3s drain."""
+    import tintaview.engines.ghub as ghub_mod
+
+    drained: list[float] = []
+    monkeypatch.setattr(ghub_mod, "_drain_windows_messages", lambda s: drained.append(s))
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+    engine.set_color(255, 0, 0)
+    assert drained == []
+
+
+def test_ghub_discover_dll_path_finds_sdks_subdirectory(tmp_path, monkeypatch):
+    import tintaview.engines.ghub as ghub_mod
+    from tintaview.engines.ghub import discover_dll_path
+
+    monkeypatch.setattr(ghub_mod.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    monkeypatch.delenv("PROGRAMW6432", raising=False)
+
+    bitness = "x64" if sys.maxsize > 2**32 else "x86"
+    sdks = tmp_path / "LGHUB" / "sdks"
+    sdks.mkdir(parents=True)
+    dll = sdks / f"sdk_legacy_led_{bitness}.dll"
+    dll.write_bytes(b"")
+    # Older root copy must not win over sdks\.
+    (tmp_path / "LGHUB" / f"sdk_legacy_led_{bitness}.dll").write_bytes(b"")
+
+    assert discover_dll_path(GHubConfig()) == dll
+
+
+def test_ghub_setup_notes_list_what_to_turn_on_and_off():
+    from tintaview.engines.ghub import format_setup_notes
+
+    notes = format_setup_notes()
+    assert "turn these ON" in notes
+    assert "Turn these OFF" in notes
+    assert "Game lighting control" in notes
+    assert "TintaView" in notes
+    assert "onboard" in notes.lower()
+    assert "Dynamic Lighting" in notes
+    assert "OpenRGB" in notes
+    # Indent is only for the wizard's hanging block, not the doctor lines.
+    indented = format_setup_notes(indent="  ")
+    assert indented.splitlines()[0].startswith("  In Logitech")
 
 
 # --------------------------------------------------------------------------- Null

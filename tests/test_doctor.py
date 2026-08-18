@@ -337,6 +337,49 @@ def test_ghub_unavailable_reason_explains_start_order_when_dll_found_but_refuses
     assert "before TintaView" in reason
 
 
+def test_pinned_ghub_prints_on_off_checklist(monkeypatch, capsys):
+    from pathlib import Path
+
+    from tintaview.engines import factory as factory_mod
+    from tintaview.engines import ghub as ghub_engine
+    from tintaview.install.detect import Environment
+
+    monkeypatch.setattr(
+        factory_mod, "available_engines",
+        lambda cfg: [("chroma", False), ("ghub", True), ("openrgb", False)],
+    )
+    monkeypatch.setattr(
+        ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"),
+    )
+    cfg = Config()
+    cfg.engine.mode = "ghub"
+    D._check_engine(
+        D._Reporter(verbose=False), cfg, Environment(platform="windows", mode="native"),
+    )
+    out = capsys.readouterr().out
+    assert "turn these ON" in out
+    assert "Turn these OFF" in out
+    assert "Game lighting control" in out
+    assert "Dynamic Lighting" in out
+
+
+def test_auto_mode_does_not_print_ghub_checklist(monkeypatch, capsys):
+    from tintaview.engines import factory as factory_mod
+    from tintaview.install.detect import Environment
+
+    monkeypatch.setattr(
+        factory_mod, "available_engines",
+        lambda cfg: [("chroma", False), ("ghub", False), ("openrgb", False)],
+    )
+    cfg = Config()
+    cfg.engine.mode = "auto"
+    D._check_engine(
+        D._Reporter(verbose=False), cfg, Environment(platform="windows", mode="native"),
+    )
+    out = capsys.readouterr().out
+    assert "turn these ON" not in out
+
+
 # --------------------------------------------------------------------------- config
 
 

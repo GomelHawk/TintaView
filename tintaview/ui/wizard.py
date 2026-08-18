@@ -439,12 +439,15 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
             )
 
     if choice == "ghub":
+        from ..engines.ghub import format_setup_notes
+
         print(
             "  Good news: unlike OpenRGB, G HUB can keep running — TintaView drives the "
             "lights through the same SDK G HUB itself uses, so there's nothing to close.\n"
             "  Note: that SDK has no way to target a single device, so this drives every "
             "detected Logitech G device at once."
         )
+        print(format_setup_notes(indent="  "))
         _ensure_ghub_ready(cfg, assume_yes)
 
     if choice == "openrgb":

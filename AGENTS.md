@@ -102,22 +102,31 @@ Configuration table — keep that table in sync when adding one.
 - **Chroma** is the default. POST to open, PUT `/heartbeat` every 4 s, PUT per device with **BGR**
  packing, DELETE to close. Release is automatic — Synapse takes back over on DELETE.
 - **G HUB** (`engines/ghub.py`) loads `sdk_legacy_led_x64.dll` with `ctypes` — no new
- dependency, no bundled binary, Windows-only. Three things about the legacy LED
- Illumination SDK that must keep being handled:
- 1. **Colour is 0-100 percent, not 0-255** — every `set_color` call converts.
- 2. **`LogiLedInit` after `LogiLedShutdown` in the same process is unreliable.**
- `LightController` opens/closes an engine on every session start/end, so `close()`
- only ever calls `LogiLedRestoreLighting`; the one real `LogiLedShutdown` is deferred
- to process exit via `atexit`. Do not "simplify" this into calling `Shutdown` from
- `close()` — that is the one thing this module exists to avoid.
- 3. **The SDK initialises per calling thread**, so every call — from hook handler
- threads, the blink thread, the heartbeat thread — is funnelled through one
- dedicated worker thread owned by the engine, never called ad hoc from whichever
- thread happens to be handling a request.
- Unlike OpenRGB, G HUB does not need to be closed — it is designed to be driven while
- it runs — and it has no per-device targeting, only a `LOGI_DEVICETYPE_*` capability
- bitmask (`engine.ghub.device_types`), so a solid colour always lands on every
- matching device at once.
+  dependency, no bundled binary, Windows-only. Current G HUB ships it under
+  `LGHUB\sdks\`; older installs keep it in the `LGHUB` root. Things about the legacy LED
+  Illumination SDK that must keep being handled:
+  1. **Colour is 0-100 percent, not 0-255** — every `set_color` call converts.
+  2. **`LogiLedInit` after `LogiLedShutdown` is unreliable.**
+     `LightController` opens/closes an engine on every session start/end, so `close()`
+     only ever calls `LogiLedRestoreLighting`; the one real `LogiLedShutdown` is deferred
+     to process exit via `atexit`. Do not "simplify" this into calling `Shutdown` from
+     `close()` — that is the one thing this module exists to avoid.
+  3. **The SDK initialises per calling thread**, so every call — from hook handler
+     threads, the blink thread, the heartbeat thread — is funnelled through one
+     dedicated worker thread owned by the engine, never called ad hoc from whichever
+     thread happens to be handling a request.
+  4. **`LogiLedInitWithName("TintaView")`**, not bare `LogiLedInit`. Without a name G HUB
+     registers the process as `python.exe` and typically leaves lighting disabled for it,
+     so init succeeds and every later `SetLighting` is a silent no-op.
+  5. **Mice are zoned, and G HUB is one colour behind.** `SetLighting` covers keyboards;
+     mouse zones 0–1 are painted too. G HUB shows colour N-1 until a *later lighting
+     call on a later turn of the SDK thread* — `SetTargetDevice` in the same burst and a
+     sleep after `set_color` returns do not commit it. `set_color` therefore paints, then
+     on a second pump job pumps Win32 messages and paints a 1% nudge so `pct` becomes N-1.
+  Unlike OpenRGB, G HUB does not need to be closed — it is designed to be driven while
+  it runs — and the capability bitmask (`engine.ghub.device_types`) still has no
+  mouse-vs-keyboard instance targeting, so a solid colour lands on every matching
+  device at once.
 - **OpenRGB** is **RGB, not BGR**, and has no session concept, so it must do by hand three things
  Chroma gets for free:
   1. **Snapshot & restore** — record each target device's active mode and per-LED colours on

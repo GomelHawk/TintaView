@@ -155,6 +155,25 @@ real signal, so some false positives/negatives are inherent, not a configuration
   G HUB is fully started, and if you started G HUB after TintaView, restart TintaView so
   it tries again immediately instead of waiting out the cooldown.
 
+If `doctor` says the G HUB engine is available but the lights still don't move:
+
+- In G HUB, **Settings → Allow games and applications to control illumination** (the
+  wording drifts; look for "Game lighting control"). Then under **Integrations** (or
+  the Games list), find **TintaView** — or `python.exe` / `pythonw.exe` on an older
+  build — and enable lighting for it. New entries are often off by default.
+- Take the device **off onboard memory mode**. Onboard profiles ignore the SDK
+  entirely; switch the device to a G HUB (automatic) profile.
+- Turn off **Windows 11 Dynamic Lighting** (Settings → Personalization → Dynamic
+  lighting). It fights G HUB for the same LEDs.
+- Restart TintaView after changing any of the above — the SDK's `LogiLedInit` is a
+  one-way door for the process, so a failed first attempt stays failed until restart.
+
+TintaView registers with the SDK as **TintaView** (`LogiLedInitWithName`), not as
+`python.exe`. After the first successful session it should appear under that name.
+Mice are zoned: the engine paints mouse zones 0–1 and then a 1% colour nudge so G HUB
+commits the colour immediately (without that, the mouse shows the *previous* status
+until the next event).
+
 Unlike OpenRGB, **G HUB does not need to be closed** — TintaView drives lighting through
 the same SDK G HUB itself uses, so the two coexist. The SDK also has no way to address a
 single device (mouse vs. keyboard): `set_color` lands on every device matching

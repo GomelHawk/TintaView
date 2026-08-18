@@ -721,6 +721,10 @@ def test_engine_step_can_pick_ghub(monkeypatch, capsys, _isolated):
     assert config_mod.load(tv_home / "config.toml").engine.mode == "ghub"
     out = capsys.readouterr().out
     assert "G HUB can keep running" in out
+    assert "turn these ON" in out
+    assert "Turn these OFF" in out
+    assert "Game lighting control" in out
+    assert "Dynamic Lighting" in out
 
 
 def test_engine_step_offers_auto_and_defaults_to_it(monkeypatch, capsys, _isolated):

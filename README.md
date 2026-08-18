@@ -163,7 +163,10 @@ by `install.sh`, or by hand:
 3. **Lighting engine** — probes Chroma, G HUB and OpenRGB and shows each as detected /
    not running / unsupported here; warns that OpenRGB and Razer Synapse / Logitech G HUB
    fight over the same hardware (G HUB itself doesn't — it can keep running), and that
-   Linux OpenRGB usually needs udev rules and the `i2c-dev` kernel module.
+   Linux OpenRGB usually needs udev rules and the `i2c-dev` kernel module. Pinning
+   **Logitech G HUB** prints the ON/OFF checklist for G HUB (Game lighting control and
+   the TintaView integration on; onboard memory, Windows Dynamic Lighting and OpenRGB
+   off).
 4. **Install location** — where the program files go (separate from your settings,
    which always live under `~/.tintaview` or `%LOCALAPPDATA%\TintaView`).
 5. **Autostart** — a per-user `Run` registry entry (Windows), a systemd `--user` unit plus
@@ -221,7 +224,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `engine.mode` | `auto` | `auto` \| `chroma` \| `ghub` \| `openrgb` \| `none`. `auto` probes `engine.order` and uses the first that responds. |
 | `engine.order` | `["chroma", "ghub", "openrgb"]` | Probe order for `auto` mode. |
 | `engine.chroma.devices` | `["mouse", "headset"]` | Chroma device endpoints to drive. |
-| `engine.ghub.dll_path` | *(auto-detected)* | Path to the Logitech LED Illumination SDK DLL; empty searches G HUB's install directory, the registry, then `PATH`. |
+| `engine.ghub.dll_path` | *(auto-detected)* | Path to the Logitech LED Illumination SDK DLL; empty searches `LGHUB\\sdks\\` then the G HUB install root, the registry, then `PATH`. |
 | `engine.ghub.device_types` | `["monochrome", "rgb", "perkey"]` | Which SDK device *classes* to drive — a capability bitmask, not per-device targeting like OpenRGB's `device_types`; there's no way to address "just the mouse". |
 | `engine.ghub.restore_on_release` | `true` | Save the current lighting on open, restore it on close. |
 | `engine.openrgb.host` / `.port` | `127.0.0.1` / `6742` | Where the OpenRGB SDK server is listening. |

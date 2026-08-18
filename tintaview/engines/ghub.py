@@ -23,6 +23,11 @@ Two hazards from the vendor SDK drive this module's shape:
    is funnelled through one dedicated worker thread (`_CallPump` below), started lazily
    and never restarted, so `LogiLedInit` and everything after it always run on the same
    OS thread.
+3. **G HUB shows colour N-1 until the next lighting call on a later turn of that
+   thread.** A sleep after `set_color` returns does nothing, and a second `SetLighting`
+   in the same burst is coalesced. `set_color` therefore paints, then on a second pump
+   job pumps Win32 messages (`PeekMessage`) and paints a 1% nudge so `pct` becomes N-1
+   and the mouse matches the status now, not on the next event.
 
 The SDK also has no concept of addressing a single device (mouse vs. keyboard) — only a
 capability bitmask (`LOGI_DEVICETYPE_*`), so unlike OpenRGB's `device_types` this targets
@@ -40,6 +45,7 @@ import queue
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 
 from ..core.config import GHubConfig, expand
@@ -61,6 +67,57 @@ _DEVICE_TYPE_ALL = sum(_DEVICE_TYPE_BITS.values())
 #: compared to Chroma's HTTP timeouts because LogiLedInit can briefly block while G HUB
 #: itself is still starting up.
 _CALL_TIMEOUT = 3.0
+#: `set_color` does two pump turns (paint + 1% commit). Each G HUB IPC can take
+#: hundreds of milliseconds; 8 s is enough for both without returning mid-paint.
+_COLOR_TIMEOUT = 8.0
+#: Win32 message-pump window on the SDK thread between the real RGB and the 1%
+#: nudge. G HUB shows colour N-1 until the *next* lighting call on a later turn.
+_FLUSH_GAP = 0.3
+
+#: Shown in G HUB's integrations list. `LogiLedInit()` alone registers the process as
+#: `python.exe`, which G HUB typically leaves disabled for lighting, so Init succeeds
+#: and every later SetLighting is a silent no-op.
+_APP_NAME = b"TintaView"
+
+#: Official LED SDK samples sleep a full second after init before any other call;
+#: without a pause, the first SetLighting lands on a still-starting SDK and the mouse
+#: stays dark until the *next* colour. Skipped when a test injects a fake DLL.
+_INIT_SETTLE = 1.0
+
+#: `LogiLed::DeviceType` values for `LogiLedSetLightingForTargetZone`. Mice are zoned:
+#: `SetLighting` can return true while leaving them dark (G102/G502 Lightsync). Zone 1
+#: is the Lightsync sample's mouse slot; 0 is the logo on most G mice. Headset zones
+#: were dropped from the hot path — each extra IPC sits in G HUB's queue for seconds
+#: and the mouse shows the *previous* colour until that queue drains.
+_ZONE_MOUSE = 0x3
+_ZONE_PAINT = ((_ZONE_MOUSE, (0, 1)),)
+
+#: Probe success does not mean G HUB will paint — new integrations default to off,
+#: onboard memory ignores the SDK, and Windows Dynamic Lighting fights for the same
+#: LEDs. Printed whenever the user pins this engine, not only when a probe fails.
+GHUB_TURN_ON = (
+    "G HUB itself — leave it running (do not close it)",
+    "Settings > Allow games and applications to control illumination "
+    '("Game lighting control")',
+    "Integrations (or Games) > TintaView — enable lighting. Older builds list "
+    "python.exe / pythonw.exe; the Add game screen is the wrong place",
+    "Each Logitech device on a G HUB (automatic) profile, not onboard memory",
+)
+GHUB_TURN_OFF = (
+    "Onboard memory mode on the mouse or keyboard — it ignores the SDK",
+    "Windows 11 Dynamic Lighting (Settings > Personalization > Dynamic lighting)",
+    "OpenRGB, if it is installed — it fights G HUB for the same LEDs",
+)
+
+
+def format_setup_notes(indent: str = "") -> str:
+    """ON/OFF checklist for G HUB, one block the wizard, doctor and logs can share."""
+    on = "\n".join(f"{indent}- {item}" for item in GHUB_TURN_ON)
+    off = "\n".join(f"{indent}- {item}" for item in GHUB_TURN_OFF)
+    return (
+        f"{indent}In Logitech G HUB, turn these ON:\n{on}\n"
+        f"{indent}Turn these OFF:\n{off}"
+    )
 
 
 def _device_mask(names: list[str]) -> int:
@@ -91,11 +148,12 @@ def discover_dll_path(cfg: GHubConfig) -> Path | None:
     """Locate the LED Illumination SDK DLL, or None if it can't be found anywhere.
 
     Checked in order: an explicit `cfg.dll_path` override, G HUB's current install
-    location, the registry CLSID some installers register for games that look it up
-    that way, the older Logitech Gaming Software path (pre-G-HUB installs), and finally
-    a bare `LogitechLed.dll` on PATH. Exposed at module level — not just used inside the
-    engine — so `doctor` and the wizard can report the exact path, or its absence,
-    without instantiating (and thereby initialising) an engine.
+    location (`LGHUB\\sdks\\` first, then the older `LGHUB\\` root), the registry CLSID
+    some installers register for games that look it up that way, the older Logitech
+    Gaming Software path (pre-G-HUB installs), and finally a bare `LogitechLed.dll` on
+    PATH. Exposed at module level — not just used inside the engine — so `doctor` and
+    the wizard can report the exact path, or its absence, without instantiating (and
+    thereby initialising) an engine.
     """
     if cfg.dll_path:
         path = expand(cfg.dll_path)
@@ -111,9 +169,15 @@ def discover_dll_path(cfg: GHubConfig) -> Path | None:
     ]
 
     for base in program_dirs:
-        candidate = Path(base) / "LGHUB" / f"sdk_legacy_led_{bitness}.dll"
-        if candidate.is_file():
-            return candidate
+        lghub = Path(base) / "LGHUB"
+        # Current G HUB ships the DLL under sdks\; older installs put it in the LGHUB
+        # root. sdks first, so a leftover root copy from a previous version doesn't win.
+        for candidate in (
+            lghub / "sdks" / f"sdk_legacy_led_{bitness}.dll",
+            lghub / f"sdk_legacy_led_{bitness}.dll",
+        ):
+            if candidate.is_file():
+                return candidate
 
     registry_path = _dll_path_from_registry()
     if registry_path is not None and registry_path.is_file():
@@ -128,6 +192,94 @@ def discover_dll_path(cfg: GHubConfig) -> Path | None:
 
     found = shutil.which("LogitechLed.dll")
     return Path(found) if found else None
+
+
+def _bind_signatures(dll) -> None:
+    """Pin restype/argtypes so ctypes doesn't read a C++ bool as a 4-byte c_int.
+
+    A leftover high byte in EAX makes a failed `LogiLedInit` look like success, which
+    is exactly "session opened, lights never move".
+    """
+
+    def _bool(name: str, argtypes: tuple[type, ...] = ()) -> None:
+        func = getattr(dll, name, None)
+        if func is None:
+            return
+        func.restype = ctypes.c_bool
+        if argtypes:
+            func.argtypes = list(argtypes)
+
+    _bool("LogiLedInit")
+    _bool("LogiLedInitWithName", (ctypes.c_char_p,))
+    _bool("LogiLedSetTargetDevice", (ctypes.c_int,))
+    _bool("LogiLedSaveCurrentLighting")
+    _bool("LogiLedRestoreLighting")
+    _bool("LogiLedSetLighting", (ctypes.c_int, ctypes.c_int, ctypes.c_int))
+    _bool(
+        "LogiLedSetLightingForTargetZone",
+        (ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int),
+    )
+    shutdown = getattr(dll, "LogiLedShutdown", None)
+    if shutdown is not None:
+        shutdown.restype = None  # void in the header; a bool restype would be a lie
+
+
+def _nudge_pct(pct: tuple[int, int, int]) -> tuple[int, int, int]:
+    """1% off `pct` — invisible on a mouse, different enough to be a new lighting call."""
+    r, g, b = pct
+    if r:
+        return (r - 1, g, b)
+    if g:
+        return (r, g - 1, b)
+    if b:
+        return (r, g, b - 1)
+    return (1, 0, 0)
+
+
+def _drain_windows_messages(seconds: float) -> None:
+    """Run the calling thread's Win32 queue. The LED SDK delivers on this thread.
+
+    `time.sleep` does not pump messages, so G HUB would sit on the previous colour
+    until the next `set_color` entered the DLL — exactly the one-behind mouse.
+    """
+    if sys.platform != "win32":
+        return
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.PeekMessageW.argtypes = [
+        ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+        wintypes.UINT, wintypes.UINT, wintypes.UINT,
+    ]
+    user32.PeekMessageW.restype = wintypes.BOOL
+    user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    msg = wintypes.MSG()
+    pm_remove = 0x0001
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, pm_remove):
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        time.sleep(0.01)
+
+
+def _paint(dll, pct: tuple[int, int, int]) -> bool:
+    """One SetLighting plus mouse zones. No flush — the caller does a second turn."""
+    ok = bool(dll.LogiLedSetLighting(*pct))
+    paint = getattr(dll, "LogiLedSetLightingForTargetZone", None)
+    if paint is not None:
+        for device_type, zones in _ZONE_PAINT:
+            for zone in zones:
+                paint(device_type, zone, *pct)
+    return ok
+
+
+def _commit_paint(dll, pct: tuple[int, int, int]) -> bool:
+    """Second pump-thread turn: message-pump, then 1% nudge so G HUB commits `pct`."""
+    if isinstance(dll, ctypes.CDLL):
+        _drain_windows_messages(_FLUSH_GAP)
+    return _paint(dll, _nudge_pct(pct))
 
 
 class _Call:
@@ -191,7 +343,7 @@ class GHubEngine(BaseEngine):
 
     Percentage colour scale (0-100, not 0-255) — see the module docstring. `dll` is a
     test-injection point (mirrors `ChromaEngine`'s `url=` parameter): when set, discovery
-    and `ctypes.WinDLL` loading are skipped entirely and every call goes straight to the
+    and `ctypes.CDLL` loading are skipped entirely and every call goes straight to the
     given object, so the full lifecycle is exercisable on Linux/macOS CI with no real
     G HUB installed.
     """
@@ -212,6 +364,10 @@ class GHubEngine(BaseEngine):
         # True once LogiLedSaveCurrentLighting has succeeded and needs a matching
         # restore; doubles as "are we in control" for `active`.
         self._saved = False
+        # First SetLighting failure is worth an INFO line; the blink loop would
+        # otherwise repeat it twice a second.
+        self._logged_set_failure = False
+        self._logged_setup_notes = False
 
     @property
     def active(self) -> bool:
@@ -231,15 +387,19 @@ class GHubEngine(BaseEngine):
         if path is None:
             return None
         try:
-            self._dll = ctypes.WinDLL(str(path))
+            # cdecl, matching Logitech's own logiPy and Aurora. WinDLL (stdcall) is the
+            # same ABI on x64, so a 64-bit machine wouldn't show the bug — a 32-bit
+            # Python would silently mis-call every function with arguments.
+            self._dll = ctypes.CDLL(str(path))
         except OSError as e:
             log.debug("ghub: failed to load %s: %r", path, e)
             return None
+        _bind_signatures(self._dll)
         self._resolved_path = path
         return self._dll
 
     def _ensure_initialized(self) -> bool:
-        """Call `LogiLedInit` exactly once for the life of this process.
+        """Call `LogiLedInitWithName` (falling back to `LogiLedInit`) once per process.
 
         Never re-initialises after a `close()` — see the module docstring's re-init
         hazard. `atexit` registers the real `LogiLedShutdown` on the first successful
@@ -250,10 +410,28 @@ class GHubEngine(BaseEngine):
         dll = self._ensure_dll()
         if dll is None:
             return False
-        ok = bool(self._pump.call(lambda: dll.LogiLedInit()))
+        ok = bool(self._pump.call(self._init_on_pump, timeout=_CALL_TIMEOUT + _INIT_SETTLE))
         if ok:
             self._initialized = True
             atexit.register(self._shutdown_at_exit)
+        return ok
+
+    def _init_on_pump(self) -> bool:
+        """Must run on the pump thread — see the per-thread-init hazard.
+
+        Prefers `LogiLedInitWithName("TintaView")` so G HUB's integrations list shows
+        a recognizable entry rather than `python.exe`. Older DLLs without that export
+        fall back to `LogiLedInit`.
+        """
+        dll = self._dll
+        init_with_name = getattr(dll, "LogiLedInitWithName", None)
+        if callable(init_with_name):
+            ok = bool(init_with_name(_APP_NAME))
+        else:
+            ok = bool(dll.LogiLedInit())
+        if ok and self._dll_override is None:
+            time.sleep(_INIT_SETTLE)
+            _drain_windows_messages(_FLUSH_GAP)
         return ok
 
     def _shutdown_at_exit(self) -> None:
@@ -291,6 +469,9 @@ class GHubEngine(BaseEngine):
         self._saved = True
         self.clear_cooldown()
         log.info("G HUB session opened (%s)", self._resolved_path or "injected DLL")
+        if self._dll_override is None and not self._logged_setup_notes:
+            self._logged_setup_notes = True
+            log.info("G HUB lighting checklist:\n%s", format_setup_notes())
         return True
 
     def set_color(self, r: int, g: int, b: int) -> None:
@@ -300,9 +481,20 @@ class GHubEngine(BaseEngine):
         dll = self._dll
         pct = tuple(round(v * 100 / 255) for v in (r, g, b))
         try:
-            self._pump.call(lambda: dll.LogiLedSetLighting(*pct))
-            # DEBUG, not INFO: the blink loop alone calls this twice a second.
-            log.debug("ghub set_color %s -> pct=%s", (r, g, b), pct)
+            painted = self._pump.call(lambda: _paint(dll, pct), timeout=_COLOR_TIMEOUT)
+            # Second turn of the pump thread: G HUB shows colour N-1 until a later
+            # lighting call on a later turn. A 1% nudge commits `pct`. Win32 messages
+            # are pumped on that job — sleep without PeekMessage does not.
+            self._pump.call(lambda: _commit_paint(dll, pct), timeout=_COLOR_TIMEOUT)
+            ok = bool(painted)
+            log.debug("ghub set_color %s -> pct=%s ok=%s", (r, g, b), pct, ok)
+            if not ok and not self._logged_set_failure:
+                self._logged_set_failure = True
+                log.info(
+                    "G HUB SetLighting returned false — enable Settings > Game lighting "
+                    "control, allow TintaView under Integrations, and take the device "
+                    "off onboard memory mode"
+                )
         except Exception as e:
             log.debug("ghub set_color FAILED: %r", e)
 
