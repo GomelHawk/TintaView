@@ -12,6 +12,7 @@ import logging
 from ..core.config import Config
 from .base import LightingEngine
 from .chroma import ChromaEngine
+from .ghub import GHubEngine
 from .null import NullEngine
 from .openrgb import OpenRGBEngine
 
@@ -20,7 +21,7 @@ log = logging.getLogger(__name__)
 #: Every engine the wizard/`` auto`` mode knows about, in the order `available_engines`
 #: reports them — independent of `cfg.engine.order`, so the wizard always shows the full
 #: picture (detected/not-running/unsupported) regardless of what's configured.
-_KNOWN_ENGINES = ("chroma", "openrgb", "none")
+_KNOWN_ENGINES = ("chroma", "ghub", "openrgb", "none")
 
 
 def _build(name: str, cfg: Config) -> LightingEngine | None:
@@ -28,6 +29,8 @@ def _build(name: str, cfg: Config) -> LightingEngine | None:
     a config written by a newer TintaView must not crash an older one)."""
     if name == "chroma":
         return ChromaEngine(cfg.engine.chroma)
+    if name == "ghub":
+        return GHubEngine(cfg.engine.ghub)
     if name == "openrgb":
         return OpenRGBEngine(cfg.engine.openrgb)
     if name == "none":
@@ -58,6 +61,8 @@ def make_engine(cfg: Config) -> LightingEngine:
     mode = cfg.engine.mode
     if mode == "chroma":
         return ChromaEngine(cfg.engine.chroma)
+    if mode == "ghub":
+        return GHubEngine(cfg.engine.ghub)
     if mode == "openrgb":
         return OpenRGBEngine(cfg.engine.openrgb)
     if mode == "none":

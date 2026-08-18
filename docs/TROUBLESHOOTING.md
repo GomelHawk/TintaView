@@ -22,6 +22,7 @@ session. Every `WARN`/`FAIL` line names the exact next command or file to fix, n
      probed. If Synapse is closed, SDK calls silently succeed but nothing lights up.
      Also confirm the device is set to app/Chroma-controlled lighting in Chroma Studio;
      a fixed onboard effect overrides the SDK.
+   - **G HUB**: see [G HUB lights don't change](#g-hub-lights-dont-change) below.
    - **OpenRGB**: open OpenRGB, enable **Settings → SDK Server → Server**, and leave
      OpenRGB running. `doctor` reports the exact host:port it tried
      (`engine.openrgb.host`/`.port`, default `127.0.0.1:6742`).
@@ -136,6 +137,29 @@ firing on long-running builds that aren't actually waiting on you, raise it. The
 setting that makes this perfectly accurate — it's a heuristic over an agent that gives no
 real signal, so some false positives/negatives are inherent, not a configuration bug.
 
+## G HUB lights don't change
+
+`tintaview doctor` names one of three distinct causes on the `ENGINE` line:
+
+- **"the Logitech LED Illumination SDK is Windows-only"** — the `ghub` engine only runs
+  on Windows (including a WSL-split install, where the daemon itself is on the Windows
+  side). Nothing to fix on Linux/macOS other than picking a different engine.
+- **"the SDK DLL wasn't found"** — G HUB isn't installed on this machine at all; the DLL
+  ships inside G HUB itself. Install it from
+  [logitechg.com](https://www.logitechg.com/en-us/innovation/g-hub.html) (the wizard
+  offers to do this with `winget` when it's available) and re-run `tintaview doctor`.
+- **"found the SDK ... but it refused to initialise"** — the DLL is there but G HUB
+  either isn't running yet, has "Game lighting control" turned off in its settings, or
+  — the sneaky one — **was started *after* TintaView already gave up and backed off**
+  for a while (`BaseEngine`'s failure cooldown). Enable Game lighting control, make sure
+  G HUB is fully started, and if you started G HUB after TintaView, restart TintaView so
+  it tries again immediately instead of waiting out the cooldown.
+
+Unlike OpenRGB, **G HUB does not need to be closed** — TintaView drives lighting through
+the same SDK G HUB itself uses, so the two coexist. The SDK also has no way to address a
+single device (mouse vs. keyboard): `set_color` lands on every device matching
+`engine.ghub.device_types` at once.
+
 ## OpenRGB fights Synapse / G HUB
 
 OpenRGB and Razer Synapse (or Logitech G HUB) both try to drive the same hardware
@@ -144,7 +168,10 @@ them fight over it — flickering, one program's colour winning intermittently, 
 device getting stuck. The wizard warns about this explicitly when you pick OpenRGB as
 the engine. **Only run one at a time**: close Synapse/G HUB if you want OpenRGB to drive
 those devices, or set `engine.mode = "chroma"` (or run Synapse) if you'd rather let
-Synapse own them.
+Synapse own them. If your devices are Logitech, there's a better option than closing
+G HUB: set `engine.mode = "ghub"` and let TintaView's own `ghub` engine drive them
+through the same SDK G HUB uses — see [G HUB lights don't
+change](#g-hub-lights-dont-change) above.
 
 ## OpenRGB on Linux needs udev rules / i2c-dev
 

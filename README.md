@@ -9,10 +9,10 @@ agent is doing, in the TintaView mark's own colours: **blue** when no agent is r
 **green** when one is open but idle, **yellow** while it's working, and **red, blinking**
 when it needs you to act. Click the tray icon for a usage panel (5-hour /
 weekly limits, credits, or token totals, depending on the agent). Works with
-**Claude Code**, **Codex CLI** and **Cursor**; drives **Razer Chroma** or **OpenRGB**
-devices; runs on **Windows, WSL, Linux and macOS**. The usage panel also has cards for
-**JetBrains AI Assistant** and **GitHub Copilot CLI** — neither lights up (see below),
-but their usage shows up alongside the others.
+**Claude Code**, **Codex CLI** and **Cursor**; drives **Razer Chroma**, **Logitech G
+HUB** or **OpenRGB** devices; runs on **Windows, WSL, Linux and macOS**. The usage panel
+also has cards for **JetBrains AI Assistant** and **GitHub Copilot CLI** — neither lights
+up (see below), but their usage shows up alongside the others.
 
 ## What works where
 
@@ -37,11 +37,15 @@ embedders, not a documented external shell-command hook the other three expose.
 | Engine | Windows | Windows + WSL | Linux | macOS |
 | --- | --- | --- | --- | --- |
 | **Chroma** (Razer) | Default | Default (daemon runs on the Windows side) | Not available (Windows-only SDK) | Not available (Synapse was discontinued on macOS) |
+| **G HUB** (Logitech) | Supported — G HUB can keep running | Supported (daemon runs on the Windows side) | Not available (Windows-only SDK) | Not available (Windows-only SDK) |
 | **OpenRGB** (Razer, Logitech, Corsair, ASUS, …) | Supported | Supported | Supported — best device coverage | Very limited device support |
 | **Status-only** | Always available | Always available | Always available | Always available |
 
 In practice: **macOS gets status and usage stats only, no physical lighting.**
-Chroma is Windows-only, and OpenRGB's macOS device support is too thin to rely on.
+Chroma and G HUB are both Windows-only SDKs, and OpenRGB's macOS device support is too
+thin to rely on. If your devices are Logitech, prefer **G HUB** over OpenRGB — it's the
+one engine that doesn't need you to quit the vendor app first (see
+[Troubleshooting](docs/TROUBLESHOOTING.md#openrgb-fights-synapse--g-hub)).
 
 ## Install
 
@@ -156,10 +160,10 @@ by `install.sh`, or by hand:
    override it if detection guessed wrong.
 2. **Agents** — probes `~/.claude`, `~/.codex`, `~/.cursor` and `PATH`, pre-ticks
    whatever it finds, and asks which you want TintaView to watch (at least one).
-3. **Lighting engine** — probes Chroma and OpenRGB and shows each as detected / not
-   running / unsupported here; warns that OpenRGB and Razer Synapse / Logitech G HUB
-   fight over the same hardware, and that Linux OpenRGB usually needs udev rules and
-   the `i2c-dev` kernel module.
+3. **Lighting engine** — probes Chroma, G HUB and OpenRGB and shows each as detected /
+   not running / unsupported here; warns that OpenRGB and Razer Synapse / Logitech G HUB
+   fight over the same hardware (G HUB itself doesn't — it can keep running), and that
+   Linux OpenRGB usually needs udev rules and the `i2c-dev` kernel module.
 4. **Install location** — where the program files go (separate from your settings,
    which always live under `~/.tintaview` or `%LOCALAPPDATA%\TintaView`).
 5. **Autostart** — a per-user `Run` registry entry (Windows), a systemd `--user` unit plus
@@ -214,9 +218,12 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `server.host` | `127.0.0.1` | Where the status broker listens. |
 | `server.port` | `8777` | Port for the status broker (hooks and the tray both talk to this). |
 | `server.watchdog_timeout` | `600` | Seconds of hook silence before the lights are force-released (crash safety). |
-| `engine.mode` | `auto` | `auto` \| `chroma` \| `openrgb` \| `none`. `auto` probes `engine.order` and uses the first that responds. |
-| `engine.order` | `["chroma", "openrgb"]` | Probe order for `auto` mode. |
+| `engine.mode` | `auto` | `auto` \| `chroma` \| `ghub` \| `openrgb` \| `none`. `auto` probes `engine.order` and uses the first that responds. |
+| `engine.order` | `["chroma", "ghub", "openrgb"]` | Probe order for `auto` mode. |
 | `engine.chroma.devices` | `["mouse", "headset"]` | Chroma device endpoints to drive. |
+| `engine.ghub.dll_path` | *(auto-detected)* | Path to the Logitech LED Illumination SDK DLL; empty searches G HUB's install directory, the registry, then `PATH`. |
+| `engine.ghub.device_types` | `["monochrome", "rgb", "perkey"]` | Which SDK device *classes* to drive — a capability bitmask, not per-device targeting like OpenRGB's `device_types`; there's no way to address "just the mouse". |
+| `engine.ghub.restore_on_release` | `true` | Save the current lighting on open, restore it on close. |
 | `engine.openrgb.host` / `.port` | `127.0.0.1` / `6742` | Where the OpenRGB SDK server is listening. |
 | `engine.openrgb.device_types` | `["mouse", "keyboard", "headset"]` | Which OpenRGB devices to drive. Peripherals only by default — motherboard, RAM, GPU and case lighting is ambient decoration, and driving it makes the whole room flash on every tool call. Set to `[]` for every detected device, or add any `openrgb.utils.DeviceType` name (e.g. `"mousemat"`). |
 | `engine.openrgb.restore_on_release` | `true` | Snapshot each device's mode/colors on open, restore them on close. |

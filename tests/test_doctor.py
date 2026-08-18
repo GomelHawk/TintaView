@@ -53,7 +53,10 @@ def _no_real_engines(monkeypatch):
     slow, flaky, and irrelevant to what these tests check."""
     from tintaview.engines import factory as factory_mod
 
-    monkeypatch.setattr(factory_mod, "available_engines", lambda cfg: [("chroma", False), ("openrgb", False)])
+    monkeypatch.setattr(
+        factory_mod, "available_engines",
+        lambda cfg: [("chroma", False), ("ghub", False), ("openrgb", False)],
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -294,6 +297,44 @@ def test_no_credential_value_ever_appears_in_output(monkeypatch, capsys):
     out = capsys.readouterr().out
 
     assert fake_token not in out
+
+
+# --------------------------------------------------------------------------- engine reasons
+
+
+def test_ghub_unavailable_reason_names_the_platform_when_not_windows():
+    from tintaview.install.detect import Environment
+
+    env = Environment(platform="linux", mode="native")
+    reason = D._engine_unavailable_reason("ghub", env, Config())
+    assert "Windows-only" in reason
+    assert "platform=linux" in reason
+
+
+def test_ghub_unavailable_reason_points_at_g_hub_download_when_dll_missing(monkeypatch):
+    from tintaview.engines import ghub as ghub_engine
+    from tintaview.install.detect import Environment
+
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    env = Environment(platform="windows", mode="native")
+
+    reason = D._engine_unavailable_reason("ghub", env, Config())
+    assert "wasn't found" in reason
+    assert "logitechg.com" in reason
+
+
+def test_ghub_unavailable_reason_explains_start_order_when_dll_found_but_refuses(monkeypatch):
+    from pathlib import Path
+
+    from tintaview.engines import ghub as ghub_engine
+    from tintaview.install.detect import Environment
+
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"))
+    env = Environment(platform="windows", mode="native")
+
+    reason = D._engine_unavailable_reason("ghub", env, Config())
+    assert "Game lighting control" in reason
+    assert "before TintaView" in reason
 
 
 # --------------------------------------------------------------------------- config

@@ -624,6 +624,105 @@ def test_openrgb_ready_says_so_and_asks_nothing(monkeypatch, capsys):
     assert "SDK Server" not in out  # nothing left to explain
 
 
+def test_ghub_missing_dll_offers_winget_install(monkeypatch, capsys):
+    """A missing SDK DLL is a definite "G HUB isn't installed" signal on its own — unlike
+    OpenRGB's library-vs-app-vs-server ambiguity — so this should always say so and, when
+    winget can act on it, offer to install G HUB itself."""
+    from tintaview.core.config import Config
+    from tintaview.engines import ghub as ghub_engine
+    from tintaview.install import components
+
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    calls: list[str] = []
+    monkeypatch.setattr(components, "winget_available", lambda: True)
+    monkeypatch.setattr(components, "winget_package_installed", lambda pkg: False)
+    monkeypatch.setattr(
+        components, "winget_install",
+        lambda pkg: (calls.append(pkg), (True, "installed"))[1],
+    )
+    _feed(monkeypatch, ["y"])
+
+    wizard._ensure_ghub_ready(Config(), assume_yes=False)
+
+    assert calls == [components.GHUB_WINGET_ID]
+    out = capsys.readouterr().out
+    assert "wasn't found" in out
+    assert "G HUB" in out
+
+
+def test_ghub_declining_the_winget_install_is_respected(monkeypatch, capsys):
+    from tintaview.core.config import Config
+    from tintaview.engines import ghub as ghub_engine
+    from tintaview.install import components
+
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    monkeypatch.setattr(components, "winget_available", lambda: True)
+    monkeypatch.setattr(components, "winget_package_installed", lambda pkg: False)
+    monkeypatch.setattr(
+        components, "winget_install",
+        lambda pkg: pytest.fail("installed despite the user declining"),
+    )
+    _feed(monkeypatch, ["n"])
+
+    wizard._ensure_ghub_ready(Config(), assume_yes=False)
+    assert "skipped" in capsys.readouterr().out.lower()
+
+
+def test_ghub_missing_dll_without_winget_points_at_manual_download(monkeypatch, capsys):
+    """No winget (e.g. Linux, or macOS): no prompt, just a direct link."""
+    from tintaview.core.config import Config
+    from tintaview.engines import ghub as ghub_engine
+    from tintaview.install import components
+
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    monkeypatch.setattr(components, "winget_available", lambda: False)
+
+    wizard._ensure_ghub_ready(Config(), assume_yes=False)
+
+    out = capsys.readouterr().out
+    assert "logitechg.com" in out
+    assert "winget" not in out.lower()
+
+
+def test_ghub_dll_found_but_unresponsive_explains_start_order(monkeypatch, capsys):
+    from tintaview.core.config import Config
+    from tintaview.engines import ghub as ghub_engine
+
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"))
+    monkeypatch.setattr(ghub_engine.GHubEngine, "probe", lambda self: False)
+
+    wizard._ensure_ghub_ready(Config(), assume_yes=False)
+
+    out = capsys.readouterr().out
+    assert "Game lighting control" in out
+    assert "before TintaView" in out
+
+
+def test_ghub_ready_says_so_and_asks_nothing(monkeypatch, capsys):
+    from tintaview.core.config import Config
+    from tintaview.engines import ghub as ghub_engine
+
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"))
+    monkeypatch.setattr(ghub_engine.GHubEngine, "probe", lambda self: True)
+
+    wizard._ensure_ghub_ready(Config(), assume_yes=False)
+
+    out = capsys.readouterr().out
+    assert "you're set" in out.lower()
+    assert "Game lighting control" not in out  # nothing left to explain
+
+
+def test_engine_step_can_pick_ghub(monkeypatch, capsys, _isolated):
+    home, tv_home = _isolated
+    _feed(monkeypatch, ["", "", "ghub", "", "n", "y", "n"])  # typed by key, not position
+
+    assert wizard.run_wizard() == 0
+
+    assert config_mod.load(tv_home / "config.toml").engine.mode == "ghub"
+    out = capsys.readouterr().out
+    assert "G HUB can keep running" in out
+
+
 def test_engine_step_offers_auto_and_defaults_to_it(monkeypatch, capsys, _isolated):
     """Auto-detect must be offered, not just be an undocumented config value.
 
@@ -669,7 +768,9 @@ def test_unavailable_options_are_marked_but_still_selectable(monkeypatch, capsys
     monkeypatch.setattr(factory, "available_engines", lambda cfg: [("chroma", False), ("openrgb", False), ("none", True)])
     monkeypatch.setattr(wizard, "available_engines", lambda cfg: [("chroma", False), ("openrgb", False), ("none", True)])
 
-    _feed(monkeypatch, ["", "", "3", "", "n", "y", "n"])  # 3 = OpenRGB, unavailable
+    # Typed by key, not position — inserting new engines must not silently renumber
+    # what an existing test (or a copied instruction) types.
+    _feed(monkeypatch, ["", "", "openrgb", "", "n", "y", "n"])
     assert wizard.run_wizard() == 0
 
     out = capsys.readouterr().out
