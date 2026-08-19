@@ -5,10 +5,9 @@
 ![TintaView](tintaview/assets/generated/logo_full.png)
 
 Your keyboard, mouse and headset lighting — plus a tray icon — mirror what your coding
-agent is doing, in the TintaView mark's own colours: **green** when a session is open and
-idle, **yellow** while it's working, and **red, blinking** when it needs you to act. When
-no agent session is running, devices return to their previous lighting and the tray shows
-the plain TintaView logo. Click the tray icon for a usage panel (5-hour /
+agent is doing, in the TintaView mark's own colours: **blue** when no agent is running,
+**green** when one is open but idle, **yellow** while it's working, and **red, blinking**
+when it needs you to act. Click the tray icon for a usage panel (5-hour /
 weekly limits, credits, or token totals, depending on the agent). Works with
 **Claude Code**, **Codex CLI** and **Cursor**; drives **Razer Chroma**, **Logitech G
 HUB** or **OpenRGB** devices; runs on **Windows, WSL, Linux and macOS**. The usage panel
@@ -232,9 +231,9 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `engine.openrgb.device_types` | `["mouse", "keyboard", "headset"]` | Which OpenRGB devices to drive. Peripherals only by default — motherboard, RAM, GPU and case lighting is ambient decoration, and driving it makes the whole room flash on every tool call. Set to `[]` for every detected device, or add any `openrgb.utils.DeviceType` name (e.g. `"mousemat"`). |
 | `engine.openrgb.restore_on_release` | `true` | Snapshot each device's mode/colors on open, restore them on close. |
 | `engine.openrgb.direct_mode_only` | `true` | Only drive devices that expose a Direct mode, to avoid flash wear from blinking. |
-| `colors.idle` | `#56D155` | Green — a session is open and the agent is waiting on you. |
-| `colors.working` | `#F0B30C` | Yellow — the agent is busy. |
-| `colors.confirm` | `#F42D3C` | Red, blinking — the agent needs you to act. |
+| `colors.idle` | `#30EA2F` | Green — a session is open and the agent is waiting on you. |
+| `colors.working` | `#FFBB00` | Yellow — the agent is busy. |
+| `colors.confirm` | `#FF0013` | Red, blinking — the agent needs you to act. |
 | `colors.none` | `#0080F7` | Unused by the running app — no session never paints a colour, it just releases devices back to their prior state and shows the plain logo in the tray. Kept only as a fallback default. |
 | `colors.blink_ms` | `400` | Blink interval for the `confirm` state, in milliseconds. |
 | `stats.poll_seconds` | `300` | How often usage providers are polled. |
