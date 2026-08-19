@@ -138,26 +138,36 @@ class DeviceColorsConfig:
 
     So hardware gets fully saturated primaries: unmistakable at a glance, across the room,
     on any diffuser. Set any of these to ``""`` to fall back to the icon's brand colour.
+
+    ``none`` is never actually sent to a device — ``Controller.apply()`` closes the engine
+    and restores whatever the device showed before TintaView touched it instead. The field
+    exists only as ``ColorsConfig.rgb()``'s fallback default; don't describe it elsewhere
+    as a visible "no session" colour.
     """
 
     idle: str = "#00FF00"  # green
     working: str = "#FFC800"  # amber — pure #FFFF00 skews green on most RGB LEDs
     confirm: str = "#FF0000"  # red
-    none: str = "#0080F7"  # the brand blue: no session, so nothing to signal
+    none: str = "#0080F7"  # unused — see class docstring
 
 
 @dataclass
 class ColorsConfig:
     """Status colours, sampled from the TintaView mark's own gradient.
 
-    The mark runs blue -> teal -> green -> yellow -> orange, and three of the four states
+    The mark runs blue -> teal -> green -> yellow -> orange, and the three real states
     map straight onto it, so the tray icon always looks like the logo in one of its own
     hues rather than an arbitrary traffic light:
 
-        none    no agent session at all        blue    #0084FF  (the mark's blue rays)
         idle    session open, waiting on you   green   #30EA2F  (the mark's green rays)
         working the agent is busy              amber   #FFBB00  (the mark's yellow rays)
         confirm the agent needs you to act     red     #FF0013  (see below)
+
+    ``none`` (no agent session at all) is *not* a fourth visible state: `_icon_for_status`
+    in `ui/tray.py` treats it the same as `idle` and just shows the static multicolour
+    brand logo (which happens to include blue among its rays, alongside green/yellow, as
+    plain decoration — not a status signal), and `Controller.apply()` never paints
+    hardware with it at all. `none` below exists only as `rgb()`'s fallback default.
 
     Red is the one colour the logo doesn't contain — its warm end stops at orange
     (#FA8B07), which is too close to the working yellow to read as "stop and look" at
@@ -174,7 +184,7 @@ class ColorsConfig:
     idle: str = "#30EA2F"
     working: str = "#FFBB00"
     confirm: str = "#FF0013"
-    none: str = "#0084FF"
+    none: str = "#0084FF"  # unused — see class docstring
     blink_ms: int = 400
     device: DeviceColorsConfig = field(default_factory=lambda: DeviceColorsConfig())
 
