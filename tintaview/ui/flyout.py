@@ -493,11 +493,13 @@ class Flyout(QtWidgets.QWidget):
         # --- title bar: logo, "TintaView", settings, close --------------------
         logo_size = 24.0
         logo_y = (TOP_BAR_H - logo_size) / 2
-        p.drawPixmap(
-            QRectF(x, logo_y, logo_size, logo_size),
-            icons.brand_icon(int(logo_size)).pixmap(int(logo_size), int(logo_size)),
-            QRectF(0, 0, logo_size, logo_size),
-        )
+        # A HiDPI screen's QIcon.pixmap() comes back bigger, in physical pixels, than
+        # the (logical) size requested — a hardcoded QRectF(0, 0, logo_size, logo_size)
+        # source rect then only samples that pixmap's top-left corner instead of the
+        # whole mark. Use its actual .rect() so any device pixel ratio still maps the
+        # entire pixmap onto the target square.
+        logo_pixmap = icons.brand_icon(int(logo_size)).pixmap(int(logo_size), int(logo_size))
+        p.drawPixmap(QRectF(x, logo_y, logo_size, logo_size), logo_pixmap, QRectF(logo_pixmap.rect()))
 
         gear_rect, close_rect = self._top_bar_rects()
         title_font = QtGui.QFont(f)
@@ -563,9 +565,10 @@ class Flyout(QtWidgets.QWidget):
             if dot_color is not None:
                 text_w = QtGui.QFontMetrics(f).horizontalAdvance(name)
                 dot_r = 3.5
+                dot_gap = 12
                 p.setPen(Qt.NoPen)
                 p.setBrush(dot_color)
-                p.drawEllipse(QtCore.QPointF(name_x + text_w + 8, header.center().y()), dot_r, dot_r)
+                p.drawEllipse(QtCore.QPointF(name_x + text_w + dot_gap, header.center().y()), dot_r, dot_r)
 
             if section.collapsible:
                 _draw_chevron(p, header, section.collapsed)
