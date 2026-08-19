@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/GomelHawk/TintaView/actions/workflows/ci.yml/badge.svg)
 
-![TintaView](tintaview/assets/generated/logo_full.png)
+![TintaView](assets/promo.png)
 
 Your keyboard, mouse and headset lighting — plus a tray icon — mirror what your coding
 agent is doing, in the TintaView mark's own colours: **blue** when no agent is running,
@@ -181,7 +181,14 @@ Answer every question with its default and skip the prompts entirely with
 
 ## Usage stats
 
-Click the tray icon to open the usage panel. What you see depends on the agent:
+Click the tray icon to open the usage panel. Its header bar has the TintaView logo, a
+settings (⚙) button that opens the same setup wizard as the tray menu's "Settings…", and
+a close (✕) button — both also close the panel, same as clicking the tray icon again or
+clicking outside it. Each agent's section header shows a small coloured dot next to its
+name — the same **green/idle · yellow/working · red/confirm** colours as the tray icon
+and lighting (see above), reflecting that specific agent's current session, or no dot at
+all when that agent has no session open. What the rows below it show depends on the
+agent:
 
 - **Claude Code** — the same official 5-hour / weekly / usage-credit percentages Claude
   Code's own `/usage` command shows, read from `https://api.anthropic.com/api/oauth/usage`

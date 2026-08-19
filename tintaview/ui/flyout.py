@@ -24,6 +24,9 @@ from typing import TYPE_CHECKING
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QRectF, Qt
 
+from tintaview.core.config import Config
+from tintaview.ui import icons
+
 if TYPE_CHECKING:  # pragma: no cover - types only, no runtime import of the stats layer
     from tintaview.stats.model import UsageResult, UsageRow
 
@@ -46,6 +49,19 @@ SECTION_GAP = 14  # extra vertical space between one agent's block and the next
 HEADER_H = 24  # height of the badge+title header line, per section
 CHEVRON_W = 16  # right-edge width reserved for the collapse affordance
 
+# --------------------------------------------------------------------------- title bar
+
+TOP_BAR_H = 40  # logo + "TintaView" + settings/close row, above the separator
+TOP_BAR_BTN = 20.0  # settings/close hit-box side (also the icon's own bounding box)
+TOP_BAR_BTN_GAP = 8.0  # gap between the settings and close hit-boxes
+CONTENT_TOP = TOP_BAR_H + SECTION_GAP  # y where the first agent section begins
+
+#: Effective session status (see `core.events`/`core.state.StateStore`) -> the
+#: `ColorsConfig` attribute driving that status's colour. `"none"` (no session open
+#: for that agent) deliberately has no entry: `_status_dot_color` returns None for it,
+#: which `paintEvent` reads as "draw no dot at all" rather than some default colour.
+_STATUS_DOT_KEYS = {"idle": "idle", "working": "working", "confirm": "confirm"}
+
 
 def _severity_color(sev: str) -> QtGui.QColor:
     return {"warning": WARN, "critical": CRIT}.get(sev, FILL)
@@ -66,6 +82,37 @@ def _draw_chevron(p: QtGui.QPainter, header_rect: QRectF, collapsed: bool) -> No
     p.setPen(Qt.NoPen)
     p.setBrush(SUBTLE)
     p.drawPolygon(QtGui.QPolygonF(pts))
+
+
+def _draw_gear_icon(p: QtGui.QPainter, rect: QRectF) -> None:
+    """A generic 8-tooth cog (star silhouette, punched with a background-colour
+    hole) for the settings button — no trademarked icon set involved."""
+    cx, cy = rect.center().x(), rect.center().y()
+    r_out, r_in = rect.width() * 0.5, rect.width() * 0.32
+    teeth = 8
+    pts = [
+        QtCore.QPointF(
+            cx + (r_out if i % 2 == 0 else r_in) * math.cos(math.radians(i * (360 / (teeth * 2)))),
+            cy + (r_out if i % 2 == 0 else r_in) * math.sin(math.radians(i * (360 / (teeth * 2)))),
+        )
+        for i in range(teeth * 2)
+    ]
+    p.setPen(Qt.NoPen)
+    p.setBrush(TEXT)
+    p.drawPolygon(QtGui.QPolygonF(pts))
+    p.setBrush(CARD_BG)
+    p.drawEllipse(QtCore.QPointF(cx, cy), rect.width() * 0.19, rect.width() * 0.19)
+
+
+def _draw_close_icon(p: QtGui.QPainter, rect: QRectF) -> None:
+    """A plain X for the close button."""
+    inset = rect.adjusted(rect.width() * 0.24, rect.height() * 0.24,
+                           -rect.width() * 0.24, -rect.height() * 0.24)
+    pen = QtGui.QPen(TEXT, max(1.4, rect.width() * 0.09))
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.drawLine(inset.topLeft(), inset.bottomRight())
+    p.drawLine(inset.topRight(), inset.bottomLeft())
 
 
 def _row_layout(rows: list[UsageRow]) -> list[tuple[UsageRow, float, float]]:
@@ -261,11 +308,16 @@ class Flyout(QtWidgets.QWidget):
         self,
         collapsed: Iterable[str] | None = None,
         on_toggle: Callable[[str, bool], None] | None = None,
+        cfg: Config | None = None,
+        on_settings: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)  # needed to get mouseMoveEvent without a button held
+        self._cfg = cfg or Config()
+        self._on_settings = on_settings
         self._results: dict[str, UsageResult] = {}
+        self._status: dict[str, str] = {}  # agent key -> effective session status
         self._collapsed: set[str] = set(collapsed or ())
         self._on_toggle = on_toggle
         self.hidden_at = 0.0
@@ -321,6 +373,18 @@ class Flyout(QtWidgets.QWidget):
         self._resize_to_content()
         self.update()
 
+    def set_status(self, status: dict[str, str]) -> None:
+        """`status`: dict[str, str] of agent key -> effective session status, from
+        `StateStore.snapshot()`'s `agents[key]["effective"]` (or absent entirely for
+        an agent with no open session). Drives each section's status dot — no resize
+        needed, since the dot doesn't change a section's height."""
+        self._status = dict(status or {})
+        self.update()
+
+    def _status_dot_color(self, agent: str) -> QtGui.QColor | None:
+        key = _STATUS_DOT_KEYS.get(self._status.get(agent, "none"))
+        return QtGui.QColor(*self._cfg.colors.rgb(key)) if key else None
+
     # --- layout ------------------------------------------------------------------
 
     def _layout(self) -> tuple[list[_SectionLayout], float]:
@@ -328,7 +392,7 @@ class Flyout(QtWidgets.QWidget):
         and mouse hit-testing (see `_SectionLayout`). Cheap enough to redo on every
         paint/mouse-move: a handful of agents, no QPainter calls involved."""
         x, w = float(PAD), float(CARD_W - 2 * PAD)
-        y = float(PAD)
+        y = float(CONTENT_TOP)
         sections: list[_SectionLayout] = []
         for i, result in enumerate(self._results.values()):
             if i:
@@ -351,13 +415,22 @@ class Flyout(QtWidgets.QWidget):
 
     def _resize_to_content(self) -> None:
         if not self._results:
-            h = PAD + 20 + 8 + PAD  # "no agents enabled" message
+            h = CONTENT_TOP + 20 + 8 + PAD  # "no agents enabled" message
         else:
             _sections, y = self._layout()
             h = y + PAD
         self.setFixedSize(CARD_W, max(80, int(h)))
         if self._anchor is not None and self.isVisible():
             self.move(self._clamped_position(self._anchor))
+
+    def _top_bar_rects(self) -> tuple[QRectF, QRectF]:
+        """(settings hit-box, close hit-box) — shared by paint and mouse handling,
+        same reasoning as `_SectionLayout`. Independent of `_results`/`_layout()`:
+        the title bar is always in the same place regardless of section content."""
+        row_y = (TOP_BAR_H - TOP_BAR_BTN) / 2
+        close = QRectF(self.width() - PAD - TOP_BAR_BTN, row_y, TOP_BAR_BTN, TOP_BAR_BTN)
+        gear = QRectF(close.x() - TOP_BAR_BTN - TOP_BAR_BTN_GAP, row_y, TOP_BAR_BTN, TOP_BAR_BTN)
+        return gear, close
 
     def _toggle(self, key: str) -> None:
         if key in self._collapsed:
@@ -372,16 +445,30 @@ class Flyout(QtWidgets.QWidget):
     # --- mouse -------------------------------------------------------------------
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        sections, _ = self._layout()
         pos = event.position()
-        hovering = any(s.collapsible and s.header_rect.contains(pos) for s in sections)
+        gear_rect, close_rect = self._top_bar_rects()
+        hovering = gear_rect.contains(pos) or close_rect.contains(pos)
+        if not hovering:
+            sections, _ = self._layout()
+            hovering = any(s.collapsible and s.header_rect.contains(pos) for s in sections)
         self.setCursor(Qt.PointingHandCursor if hovering else Qt.ArrowCursor)
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
-            sections, _ = self._layout()
             pos = event.position()
+            gear_rect, close_rect = self._top_bar_rects()
+            if close_rect.contains(pos):
+                self.hide()
+                return
+            if gear_rect.contains(pos):
+                # Hide first: settings either opens a modal wizard or spawns a
+                # console, and leaving the card pinned open behind either looks wrong.
+                self.hide()
+                if self._on_settings is not None:
+                    self._on_settings()
+                return
+            sections, _ = self._layout()
             for s in sections:
                 if s.collapsible and s.header_rect.contains(pos):
                     self._toggle(s.key)
@@ -403,12 +490,37 @@ class Flyout(QtWidgets.QWidget):
         x, w = float(PAD), float(self.width() - 2 * PAD)
         f = p.font()
 
+        # --- title bar: logo, "TintaView", settings, close --------------------
+        logo_size = 24.0
+        logo_y = (TOP_BAR_H - logo_size) / 2
+        p.drawPixmap(
+            QRectF(x, logo_y, logo_size, logo_size),
+            icons.brand_icon(int(logo_size)).pixmap(int(logo_size), int(logo_size)),
+            QRectF(0, 0, logo_size, logo_size),
+        )
+
+        gear_rect, close_rect = self._top_bar_rects()
+        title_font = QtGui.QFont(f)
+        title_font.setPointSize(13)
+        p.setFont(title_font)
+        p.setPen(TEXT)
+        title_x = x + logo_size + 8
+        p.drawText(
+            QRectF(title_x, 0, gear_rect.x() - 8 - title_x, TOP_BAR_H),
+            Qt.AlignLeft | Qt.AlignVCenter, "TintaView",
+        )
+        _draw_gear_icon(p, gear_rect)
+        _draw_close_icon(p, close_rect)
+
+        p.setPen(QtGui.QPen(BORDER))
+        p.drawLine(QtCore.QPointF(x, TOP_BAR_H), QtCore.QPointF(x + w, TOP_BAR_H))
+
         if not self._results:
             f.setPointSize(10)
             p.setFont(f)
             p.setPen(SUBTLE)
             p.drawText(
-                QRectF(x, PAD, w, self.height() - PAD - PAD),
+                QRectF(x, CONTENT_TOP, w, self.height() - CONTENT_TOP - PAD),
                 Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
                 "No agents enabled.",
             )
@@ -438,8 +550,22 @@ class Flyout(QtWidgets.QWidget):
             # belongs to matters more than the tier blurb the old single-agent
             # flyout led with.
             name_w = header.width() - badge_size - badge_gap - (CHEVRON_W if section.collapsible else 0)
-            p.drawText(QRectF(header.x() + badge_size + badge_gap, header.y(), name_w, 20),
-                       Qt.AlignLeft | Qt.AlignVCenter, _display_name(result.agent))
+            name = _display_name(result.agent)
+            name_x = header.x() + badge_size + badge_gap
+            p.drawText(QRectF(name_x, header.y(), name_w, 20),
+                       Qt.AlignLeft | Qt.AlignVCenter, name)
+
+            # Session status dot: green/idle, yellow/working, red/confirm, or no dot
+            # at all when this agent has no session open right now (see
+            # `_status_dot_color`) — the same colours the tray icon and hardware
+            # lighting use, read from `cfg.colors` rather than hardcoded here.
+            dot_color = self._status_dot_color(result.agent)
+            if dot_color is not None:
+                text_w = QtGui.QFontMetrics(f).horizontalAdvance(name)
+                dot_r = 3.5
+                p.setPen(Qt.NoPen)
+                p.setBrush(dot_color)
+                p.drawEllipse(QtCore.QPointF(name_x + text_w + 8, header.center().y()), dot_r, dot_r)
 
             if section.collapsible:
                 _draw_chevron(p, header, section.collapsed)

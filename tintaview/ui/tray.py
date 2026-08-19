@@ -215,7 +215,12 @@ class TrayApp(QtCore.QObject):
         self._update_worker = UpdateCheckWorker()
         self._update_worker.update_available.connect(self._on_update_available)
 
-        self.flyout = Flyout(collapsed=cfg.ui.collapsed_agents, on_toggle=self._on_flyout_toggle)
+        self.flyout = Flyout(
+            collapsed=cfg.ui.collapsed_agents,
+            on_toggle=self._on_flyout_toggle,
+            cfg=cfg,
+            on_settings=self._open_settings,
+        )
 
         self.tray = QtWidgets.QSystemTrayIcon(icons.brand_icon(ICON_SIZE))
         self.tray.setToolTip("TintaView: connecting…")
@@ -453,6 +458,9 @@ class TrayApp(QtCore.QObject):
         self._state_worker.fetch()
 
     def _apply_state(self, payload: dict) -> None:
+        agents_payload = payload.get("agents", {})
+        self.flyout.set_status({k: v.get("effective", "none") for k, v in agents_payload.items()})
+
         effective = payload.get("effective", "none")
 
         if effective == "confirm":
