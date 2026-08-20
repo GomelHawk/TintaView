@@ -52,7 +52,7 @@ optional at runtime.
 | Decision | Choice and why |
 | --- | --- |
 | Process model | **One process**: tray UI + status broker in-process (`tintaview run [--headless]`). A background service plus a separate tray process means two autostart entries, two logs and two update paths — the biggest source of install pain. |
-| Packaging | **A pure-Python wheel installed into a private venv, on every platform.** No compiled bundle, no `.exe` installer. This is a hard requirement of Windows Smart App Control, not a preference — see [Packaging](#packaging-no-compiled-bundle-ever). |
+| Packaging | **A pure-Python wheel installed into a private venv, on every platform.** No compiled bundle, no `.exe` installer. This is a hard requirement of Windows Smart App Control, not a preference — see [Packaging](#packaging-no-compiled-bundle-ever). On Windows the tray launches as **`pythonw.exe -m tintaview`**. G HUB's LED SDK silently no-ops under pythonw (measured); `GHubEngine` then paints via a short-lived **`python.exe` sidecar** (`engines/ghub_sidecar.py`). Chroma/OpenRGB stay in-process. |
 | Autostart | **One per-user entry per platform, never a Scheduled Task**: HKCU `…\CurrentVersion\Run` value on Windows (*not* a Startup-folder shortcut — Windows 11 blocks those), a systemd `--user` unit plus an XDG autostart entry on Linux, a launchd agent on macOS. No admin rights, ever. |
 | Hook install | **Auto-merge with a per-agent before/after diff and explicit confirmation.** A copy-paste snippet stays available as a fallback for locked-down environments. |
 | Engines | **Chroma, G HUB and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → ghub → openrgb → status-only`. |
@@ -181,10 +181,17 @@ Configuration table — keep that table in sync when adding one.
   6. **`probe()` must not call `LogiLedInit`.** Reachability is "DLL on disk and G HUB
      not known-stopped" (`engines/ghub_env.py`); init happens only in `open()`. Probing
      used to register TintaView in Integrations even when `auto` then picked Chroma.
-  Environmental facts (process list, Dynamic Lighting registry, read-only
-  `settings.db`) live in `ghub_env.py` so `doctor`/wizard can print measured blockers
-  without loading the SDK. The Integrations toggle field name is unconfirmed — report
-  `"unknown"`/`"absent"`, never guess `"on"`/`"off"`.
+     Environmental facts (process list, Dynamic Lighting registry, read-only
+     `settings.db`) live in `ghub_env.py` so `doctor`/wizard can print measured blockers
+     without loading the SDK. The Integrations toggle field name is unconfirmed — report
+     `"unknown"`/`"absent"`, never guess `"on"`/`"off"`.
+  7. **Under `pythonw.exe` the SDK is a silent no-op** (returns success, mouse stays on
+     G HUB's profile — measured on G102 Lightsync). The tray **always** runs as
+     `pythonw`; only this engine paints through a `python.exe` sidecar
+     (`engines/ghub_sidecar.py` / `ghub_worker`). Never switch the whole tray/autostart
+     to `python.exe` for this. In-process LED calls are used only inside the worker,
+     under console `python.exe` tools (`doctor --paint`, smoke scripts), or with an
+     injected DLL in tests.
   Unlike OpenRGB, G HUB does not need to be closed — it is designed to be driven while
   it runs — and the capability bitmask (`engine.ghub.device_types`) still has no
   mouse-vs-keyboard instance targeting, so a solid colour lands on every matching
@@ -399,8 +406,12 @@ different answers:
 Installing a wheel into a venv satisfies both with no certificate: the only executables involved
 are the signed interpreter and widely-mirrored PyPI wheels. This is also why the app is launched as
 `python -m tintaview` rather than through a `console_scripts` shim (a small unsigned `.exe` of its
-own). **Do not reintroduce a frozen bundle or an `.exe` installer without a code-signing
-certificate to go with it** — `tests/test_packaging.py` guards this.
+own). On Windows the login/tray entry is **`pythonw.exe -m tintaview`**. G HUB's legacy LED SDK
+was measured to return success from `SetLighting` under `pythonw` while leaving the mouse on G HUB's
+own profile; the tray therefore keeps `pythonw` and, only for the `ghub` engine, spawns a
+`python.exe -m tintaview.engines.ghub_worker` sidecar that owns the DLL. **Do not reintroduce a
+frozen bundle or an `.exe` installer without a code-signing certificate to go with it** —
+`tests/test_packaging.py` guards this.
 
 Two Windows-specific traps `install.ps1` encodes:
 
@@ -471,7 +482,7 @@ the release — see `.gitattributes`.
 | JetBrains `CREDIT_SCALE` | Reverse-engineered from one live widget reading, not documented. Only affects display formatting, never severity |
 | Copilot CLI live quota | Not implemented — would need OS-credential-store access plus an undocumented two-step OAuth exchange with unverified field names. Local token totals only |
 | Cursor confirm heuristic | Tune `stall_seconds` against real sessions; ship conservative; allow disabling |
-| G HUB legacy LED SDK + start order | Undocumented/unofficial by Logitech's own admission; `RestoreLighting` does not hand mice back — `close()` must `LogiLedShutdown` and the next `open()` re-inits. If G HUB restarts under us the session is orphaned — surface a status_note and restart TintaView |
+| G HUB legacy LED SDK + start order | Undocumented/unofficial by Logitech's own admission; `RestoreLighting` does not hand mice back — `close()` must `LogiLedShutdown` and the next `open()` re-inits. If G HUB restarts under us the session is orphaned — surface a status_note and restart TintaView. **`pythonw.exe` silent no-op:** SetLighting returns true but does not paint — tray stays on `pythonw`, paint goes through a `python.exe` sidecar only for this engine |
 | OpenRGB SDK version drift | Pin to v5 behaviour, feature-detect, fail soft |
 | Unsigned build (accepted) | Ship via the install scripts so no MOTW tag ever reaches anything. If a Defender *heuristic* ever bites, submit to Microsoft's false-positive portal and consider free OSS signing (SignPath) or Azure Trusted Signing |
 | PySide6 size (~60 MB) | Accepted for the usage-card quality; revisit `pystray` only if it becomes a real problem |

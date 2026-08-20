@@ -104,6 +104,10 @@ def _executable_command() -> list[str]:
       cloud-reputable, so routing the login entry point through the signed interpreter
       keeps autostart working on machines where SAC is enforcing (see `__main__.py`).
 
+    G HUB's LED SDK silently no-ops under ``pythonw`` (measured); the tray still launches
+    as ``pythonw``, and ``GHubEngine`` spawns a ``python.exe`` sidecar only for that
+    engine (see ``engines/ghub_sidecar.py``).
+
     Elsewhere, prefer the `tintaview` console script `install.sh` puts on PATH, resolved
     fresh each time so autostart keeps working even if the venv is later reinstalled at
     the same prefix. `python -m tintaview` is the fallback everywhere, and is what a

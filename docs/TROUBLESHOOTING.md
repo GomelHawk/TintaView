@@ -160,10 +160,20 @@ actually apply. Typical `ENGINE` lines:
 
 If `doctor` says the G HUB engine is available but the lights still don't move:
 
+- Confirm the tray is **`pythonw.exe -m tintaview`** (autostart / Start Menu), **not**
+  a manual `python.exe -m tintaview` for day-to-day use. While an agent session is
+  active, Task Manager should also show a child **`python.exe`** running
+  `-m tintaview.engines.ghub_worker` — that sidecar is the only process that may load
+  the LED SDK for painting. Under `pythonw` the SDK returns success but does not
+  paint. If no child appears, check the log for `G HUB sidecar` errors and that
+  `python.exe` sits next to `pythonw.exe` in the venv. (`tintaview doctor --paint`
+  deliberately uses console `python.exe` in-process; that is fine for the self-test
+  and is not how the tray runs.)
 - In G HUB, **Settings → Allow games and applications to control illumination** (the
   wording drifts; look for "Game lighting control"). Then under **Integrations** (or
   the Games list), find **TintaView** — or `python.exe` / `pythonw.exe` on an older
-  build — and enable lighting for it. New entries are often off by default.
+  build — and enable lighting for it. New entries are often off by default. Some G HUB
+  builds have no Integrations UI; the sidecar still matters.
 - Take the device **off onboard memory mode**. Onboard profiles ignore the SDK
   entirely; switch the device to a G HUB (automatic) profile.
 - If the tray balloon / tooltip says **"G HUB restarted; restart TintaView to reclaim

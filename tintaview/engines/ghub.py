@@ -286,6 +286,26 @@ def _drain_windows_messages(seconds: float) -> None:
         time.sleep(0.01)
 
 
+def _ensure_thread_message_queue() -> None:
+    """Create a Win32 message queue on the *calling* thread if it has none yet.
+
+    The LED SDK initialises per-thread and delivers on that thread's queue. The G HUB
+    pump worker is a bare ``threading.Thread`` — under ``pythonw.exe`` it has never
+    called User32, so it has no queue and ``LogiLedInitWithName`` hangs (or the
+    process dies) before any paint. A console ``python.exe`` often appears to work
+    without this because the process already touched User32. ``PeekMessage`` with
+    ``PM_NOREMOVE`` is the usual force-create; it does not dispatch.
+    """
+    if sys.platform != "win32":
+        return
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    msg = wintypes.MSG()
+    pm_noremove = 0x0000
+    user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, pm_noremove)
+
+
 def _paint(dll, pct: tuple[int, int, int]) -> bool:
     """One SetLighting plus mouse zones. No flush — the caller does a second turn."""
     ok = bool(dll.LogiLedSetLighting(*pct))
@@ -527,6 +547,11 @@ class GHubEngine(BaseEngine):
         # Surfaced via LightController.engine_status() → /state → tray. If G HUB
         # restarts under us the in-process session is orphaned — restart TintaView.
         self.status_note: str | None = None
+        # Under pythonw the LED SDK silently no-ops; paint via a python.exe child.
+        from .ghub_sidecar import should_use_ghub_sidecar
+
+        self._use_sidecar = should_use_ghub_sidecar(dll_override=dll)
+        self._sidecar = None
 
     @property
     def active(self) -> bool:
@@ -595,6 +620,9 @@ class GHubEngine(BaseEngine):
         a recognizable entry rather than `python.exe`. Older DLLs without that export
         fall back to `LogiLedInit`.
         """
+        # Before any LogiLed* call: this worker thread needs a message queue under
+        # pythonw or Init never returns (see `_ensure_thread_message_queue`).
+        _ensure_thread_message_queue()
         dll = self._dll
         init_with_name = getattr(dll, "LogiLedInitWithName", None)
         if callable(init_with_name):
@@ -642,6 +670,8 @@ class GHubEngine(BaseEngine):
     def open(self) -> bool:
         if self.in_cooldown():
             return False
+        if self._use_sidecar:
+            return self._open_sidecar()
         if not self._ensure_initialized():
             self.note_failure("Logitech LED SDK unavailable (G HUB not installed, or not running?)")
             return False
@@ -661,9 +691,50 @@ class GHubEngine(BaseEngine):
             log.info("G HUB lighting checklist:\n%s", format_setup_notes())
         return True
 
+    def _open_sidecar(self) -> bool:
+        from .ghub_sidecar import GHubSidecar
+
+        try:
+            if self._sidecar is None:
+                self._sidecar = GHubSidecar(self._cfg)
+                if not self._atexit_registered:
+                    atexit.register(self._stop_sidecar_at_exit)
+                    self._atexit_registered = True
+            ok = self._sidecar.open()
+        except Exception as e:
+            log.info("G HUB sidecar open failed: %r", e)
+            self.note_failure(f"G HUB sidecar unavailable ({e!r})")
+            return False
+        if not ok:
+            self.note_failure("Logitech LED SDK unavailable (G HUB not installed, or not running?)")
+            return False
+        self._saved = True
+        self._set_failures = 0
+        self.status_note = None
+        self.clear_cooldown()
+        log.info("G HUB session opened via python.exe sidecar")
+        if not self._logged_setup_notes:
+            self._logged_setup_notes = True
+            log.info("G HUB lighting checklist:\n%s", format_setup_notes())
+        return True
+
+    def _stop_sidecar_at_exit(self) -> None:
+        sc = self._sidecar
+        self._sidecar = None
+        if sc is not None:
+            try:
+                sc.stop()
+            except Exception as e:
+                log.debug("ghub sidecar atexit stop failed: %r", e)
+
     def set_color(self, r: int, g: int, b: int) -> None:
         """Set every targeted device to one solid colour. Never raises."""
-        if not self._saved or self._dll is None:
+        if not self._saved:
+            return
+        if self._use_sidecar:
+            self._set_color_sidecar(r, g, b)
+            return
+        if self._dll is None:
             return
         dll = self._dll
         pct = tuple(round(v * 100 / 255) for v in (r, g, b))
@@ -681,6 +752,18 @@ class GHubEngine(BaseEngine):
             self._note_paint_result(ok)
         except Exception as e:
             log.debug("ghub set_color FAILED: %r", e)
+            self._note_paint_result(False)
+
+    def _set_color_sidecar(self, r: int, g: int, b: int) -> None:
+        sc = self._sidecar
+        if sc is None:
+            return
+        try:
+            ok = sc.set_color(r, g, b)
+            self._note_paint_result(ok)
+        except Exception as e:
+            log.debug("ghub sidecar set_color FAILED: %r", e)
+            self.status_note = "G HUB sidecar failed — restart TintaView"
             self._note_paint_result(False)
 
     def _note_paint_result(self, ok: bool) -> None:
@@ -741,6 +824,15 @@ class GHubEngine(BaseEngine):
         if not self._saved:
             return
         self._saved = False
+        if self._use_sidecar:
+            sc = self._sidecar
+            if sc is not None:
+                try:
+                    sc.close()
+                    log.info("G HUB session closed via sidecar (Shutdown — control returned to G HUB)")
+                except Exception as e:
+                    log.info("G HUB: sidecar close failed: %r", e)
+            return
         if self._dll is None:
             return
         dll = self._dll

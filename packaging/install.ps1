@@ -355,7 +355,8 @@ function New-AppShortcut {
     param([string] $Path)
     # pythonw.exe, not the tintaview.exe console shim: the windowed interpreter shows no
     # console window, and it keeps the PSF Authenticode signature that Smart App Control
-    # wants to see. This mirrors autostart._executable_command() exactly.
+    # wants to see. G HUB painting uses a python.exe sidecar from the tray (see
+    # tintaview.engines.ghub_sidecar). Mirrors autostart._executable_command().
     New-Shortcut -Path $Path -Target $VenvPythonW -Arguments '-m tintaview' `
         -WorkingDirectory $Prefix -IconLocation (Get-AppIconPath)
 }

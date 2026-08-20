@@ -110,6 +110,7 @@ def test_windows_launches_through_the_signed_interpreter(ps1: str):
 
     The shortcut must therefore target pythonw.exe with `-m tintaview`, never the
     pip-generated `tintaview.exe` shim, which is an unsigned executable of its own.
+    G HUB lighting uses a python.exe sidecar from inside the tray process.
     """
     assert re.search(r"\$VenvPythonW\s*=\s*Join-Path \$VenvScripts 'pythonw\.exe'", ps1)
     assert re.search(r"-Target \$VenvPythonW\s+-Arguments '-m tintaview'", ps1)

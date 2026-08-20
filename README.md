@@ -48,6 +48,12 @@ thin to rely on. If your devices are Logitech, prefer **G HUB** over OpenRGB —
 one engine that doesn't need you to quit the vendor app first (see
 [Troubleshooting](docs/TROUBLESHOOTING.md#openrgb-fights-synapse--g-hub)).
 
+On Windows the tray itself always starts as **`pythonw.exe`** (no console window). Only
+the **G HUB** engine additionally spawns a short-lived **`python.exe`** child to talk to
+Logitech's LED SDK — that SDK returns success under `pythonw` but does not actually
+change the lights (see [Troubleshooting](docs/TROUBLESHOOTING.md#g-hub-lights-dont-change)).
+Chroma and OpenRGB stay in the tray process.
+
 ## Install
 
 ### Windows

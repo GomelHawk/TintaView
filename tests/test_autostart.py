@@ -226,8 +226,8 @@ def test_windows_enable_writes_the_run_key_not_a_startup_shortcut(
 
     assert fake_winreg.opened[0][1] == r"Software\Microsoft\Windows\CurrentVersion\Run"
     value = fake_winreg.values["TintaView"]
-    # The windowed, PSF-signed interpreter — not the unsigned pip console shim, and not
-    # python.exe, which would leave a console window open for the whole session.
+    # The windowed, PSF-signed interpreter — not the unsigned pip console shim.
+    # G HUB paints via a python.exe sidecar spawned from the tray.
     assert "pythonw.exe" in value
     assert value.endswith("-m tintaview")
     # The install prefix here contains a space, which is the normal case under

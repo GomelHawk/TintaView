@@ -35,6 +35,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     set_language(cfg.ui.language)
 
+    if not args.headless and sys.platform == "win32":
+        # Optional: if someone launches the tray via python.exe, hide the console.
+        # Autostart uses pythonw; G HUB painting goes through a python.exe sidecar.
+        from .install.win_console import hide_console_if_python_exe
+
+        hide_console_if_python_exe()
+
     from .core.server import StatusServer
 
     server = StatusServer(cfg)
