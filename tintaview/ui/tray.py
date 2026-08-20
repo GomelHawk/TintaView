@@ -252,6 +252,9 @@ class TrayApp(QtCore.QObject):
         self._sound_action: QtGui.QAction | None = None  # set by _build_menu below
         self._usage_results: dict[str, UsageResult] = {}
         self._last_usage_fetch = 0.0
+        # Last engine note we ballooned about — so a sticky "G HUB restarted" doesn't
+        # re-fire a notification on every state poll.
+        self._engine_note_shown: str | None = None
 
         # If `server` doesn't expose `state_payload` (some other object standing in
         # for a real StatusServer), fall back to polling its `/state` HTTP endpoint.
@@ -604,7 +607,30 @@ class TrayApp(QtCore.QObject):
             self._chime()
         self._prev_effective = effective
 
+        self._surface_engine_note(payload)
         self.tray.setToolTip(self._tooltip_for(payload))
+
+    def _surface_engine_note(self, payload: dict) -> None:
+        """Balloon once when the lighting engine reports a new problem note.
+
+        Same channel as the update-available balloon: unattended, never modal. Clearing
+        the note (paints succeeding again) resets the latch so a later failure can
+        notify again.
+        """
+        engine = payload.get("engine") or {}
+        note = engine.get("note") if isinstance(engine, dict) else None
+        if not note:
+            self._engine_note_shown = None
+            return
+        if note == self._engine_note_shown:
+            return
+        self._engine_note_shown = note
+        self.tray.showMessage(
+            t("tray.engine.balloon_title"),
+            note,
+            QtWidgets.QSystemTrayIcon.Warning,
+            10000,
+        )
 
     def _icon_for_status(self, status: str) -> QtGui.QIcon:
         # "No session" and "idle" both show the mark in the logo's own colours, static —
@@ -656,7 +682,12 @@ class TrayApp(QtCore.QObject):
         # were enabled, so a status could end up split across two lines with the agent
         # name stranded on the first — the exact thing a glanceable tooltip must not do.
         # Windows' tray tooltip honours "\n" and sizes itself to the longest line.
-        return "\n".join(parts) if parts else "TintaView"
+        text = "\n".join(parts) if parts else "TintaView"
+        engine = payload.get("engine") or {}
+        note = engine.get("note") if isinstance(engine, dict) else None
+        if note:
+            text = f"{text}\n{note}"
+        return text
 
     def _agent_display_name(self, key: str) -> str:
         try:

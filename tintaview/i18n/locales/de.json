@@ -29,6 +29,7 @@
 
   "tray.update.balloon_title": "TintaView-Update verfügbar",
   "tray.update.balloon_body": "Version {latest} ist verfügbar – du hast {current}. Über „Nach Updates suchen“ im Infobereich-Menü lässt sie sich installieren.",
+  "tray.engine.balloon_title": "TintaView-Beleuchtung",
   "tray.update.unsupported": "Diese Version kann nicht nach Updates suchen.",
   "tray.update.check_failed": "Die Update-Suche war gerade nicht möglich: kein Netz, ein Anfragelimit oder noch keine Veröffentlichung. Versuche es später erneut.",
   "tray.update.up_to_date": "Du bist auf dem neuesten Stand (Version {version}).",

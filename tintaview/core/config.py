@@ -94,6 +94,9 @@ class GHubConfig:
     """
 
     dll_path: str = ""  # empty = auto-discover (LGHUB\sdks, LGHUB root, registry, PATH)
+    # empty = %LOCALAPPDATA%\LGHUB\settings.db — read-only by ghub_env for the
+    # Integrations list; never written. Override only for tests or a non-default install.
+    settings_db: str = ""
     # SDK capability bitmask names (LOGI_DEVICETYPE_*), not device instances like
     # OpenRGB's device_types — the legacy LED SDK has no way to address "the mouse" vs
     # "the keyboard", only "every monochrome/RGB/per-key-RGB device". All three by

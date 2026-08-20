@@ -29,6 +29,7 @@
 
   "tray.update.balloon_title": "È disponibile un aggiornamento di TintaView",
   "tray.update.balloon_body": "La versione {latest} è disponibile — la tua è la {current}. Usa «Cerca aggiornamenti» nel menu dell'area di notifica per installarla.",
+  "tray.engine.balloon_title": "Illuminazione di TintaView",
   "tray.update.unsupported": "Questa build non può cercare aggiornamenti.",
   "tray.update.check_failed": "Per il momento non è stato possibile cercare aggiornamenti: rete assente, limite di richieste raggiunto o nessuna versione ancora pubblicata. Riprova più tardi.",
   "tray.update.up_to_date": "Sei aggiornato (versione {version}).",

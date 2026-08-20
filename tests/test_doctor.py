@@ -313,9 +313,17 @@ def test_ghub_unavailable_reason_names_the_platform_when_not_windows():
 
 def test_ghub_unavailable_reason_points_at_g_hub_download_when_dll_missing(monkeypatch):
     from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
     from tintaview.install.detect import Environment
 
     monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    monkeypatch.setattr(
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=None, running=None, dynamic_lighting=None,
+            foreground_only=None, integration="unknown",
+        ),
+    )
     env = Environment(platform="windows", mode="native")
 
     reason = D._engine_unavailable_reason("ghub", env, Config())
@@ -323,33 +331,48 @@ def test_ghub_unavailable_reason_points_at_g_hub_download_when_dll_missing(monke
     assert "logitechg.com" in reason
 
 
-def test_ghub_unavailable_reason_explains_start_order_when_dll_found_but_refuses(monkeypatch):
+def test_ghub_unavailable_reason_when_ghub_not_running(monkeypatch):
     from pathlib import Path
 
     from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
     from tintaview.install.detect import Environment
 
-    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"))
+    path = Path("C:/fake/LogitechLed.dll")
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: path)
+    monkeypatch.setattr(
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=path, running=False, dynamic_lighting=None,
+            foreground_only=None, integration="unknown",
+        ),
+    )
     env = Environment(platform="windows", mode="native")
 
     reason = D._engine_unavailable_reason("ghub", env, Config())
-    assert "Game lighting control" in reason
-    assert "before TintaView" in reason
+    assert "not running" in reason
 
 
-def test_pinned_ghub_prints_on_off_checklist(monkeypatch, capsys):
+def test_pinned_ghub_prints_measured_blockers(monkeypatch, capsys):
     from pathlib import Path
 
     from tintaview.engines import factory as factory_mod
     from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
     from tintaview.install.detect import Environment
 
+    path = Path("C:/fake/LogitechLed.dll")
     monkeypatch.setattr(
         factory_mod, "available_engines",
         lambda cfg: [("chroma", False), ("ghub", True), ("openrgb", False)],
     )
+    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: path)
     monkeypatch.setattr(
-        ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"),
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=path, running=True, dynamic_lighting=True,
+            foreground_only=None, integration="unknown",
+        ),
     )
     cfg = Config()
     cfg.engine.mode = "ghub"
@@ -357,10 +380,8 @@ def test_pinned_ghub_prints_on_off_checklist(monkeypatch, capsys):
         D._Reporter(verbose=False), cfg, Environment(platform="windows", mode="native"),
     )
     out = capsys.readouterr().out
-    assert "turn these ON" in out
-    assert "Turn these OFF" in out
-    assert "Game lighting control" in out
     assert "Dynamic Lighting" in out
+    assert "turn these ON" not in out  # measured blockers replace the full checklist
 
 
 def test_auto_mode_does_not_print_ghub_checklist(monkeypatch, capsys):
@@ -378,6 +399,94 @@ def test_auto_mode_does_not_print_ghub_checklist(monkeypatch, capsys):
     )
     out = capsys.readouterr().out
     assert "turn these ON" not in out
+
+
+# --------------------------------------------------------------------------- paint self-test
+
+
+def test_paint_selftest_ok_when_user_confirms(monkeypatch, capsys):
+    """`tintaview doctor --paint` drives the configured engine and asks the user —
+    SDK success alone is not enough (G HUB silent no-ops)."""
+    from tintaview.engines import factory as factory_mod
+    from tintaview.engines.base import LightingEngine
+
+    class _PaintEngine(LightingEngine):
+        name = "fake"
+        display_name = "Fake Paint"
+
+        def __init__(self) -> None:
+            self.colors: list[tuple[int, int, int]] = []
+            self.opened = False
+            self.closed = False
+
+        def probe(self) -> bool:
+            return True
+
+        def open(self) -> bool:
+            self.opened = True
+            return True
+
+        def set_color(self, r: int, g: int, b: int) -> None:
+            self.colors.append((r, g, b))
+
+        def close(self) -> None:
+            self.closed = True
+
+        @property
+        def active(self) -> bool:
+            return self.opened and not self.closed
+
+    engine = _PaintEngine()
+    monkeypatch.setattr(factory_mod, "make_engine", lambda cfg: engine)
+    monkeypatch.setattr(D.time, "sleep", lambda s: None)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    reporter = D._Reporter(verbose=False)
+    D._paint_selftest(reporter, Config())
+
+    out = capsys.readouterr().out
+    assert engine.opened and engine.closed
+    assert len(engine.colors) == 3
+    assert reporter.fails == 0
+    assert "PAINT" in out
+    assert "user confirmed" in out
+
+
+def test_paint_selftest_fails_when_engine_cannot_open(monkeypatch, capsys):
+    from tintaview.engines import factory as factory_mod
+    from tintaview.engines.base import LightingEngine
+
+    class _DeadEngine(LightingEngine):
+        name = "fake"
+        display_name = "Dead Paint"
+
+        def probe(self) -> bool:
+            return False
+
+        def open(self) -> bool:
+            return False
+
+        def set_color(self, r: int, g: int, b: int) -> None:
+            raise AssertionError("must not paint when open failed")
+
+        def close(self) -> None:
+            pass
+
+        @property
+        def active(self) -> bool:
+            return False
+
+    monkeypatch.setattr(factory_mod, "make_engine", lambda cfg: _DeadEngine())
+    monkeypatch.setattr(D.time, "sleep", lambda s: None)
+
+    reporter = D._Reporter(verbose=False)
+    D._paint_selftest(reporter, Config())
+
+    out = capsys.readouterr().out
+    assert reporter.fails == 1
+    assert "PAINT" in out
+    assert "could not open" in out
+    assert "[FAIL" in out
 
 
 # --------------------------------------------------------------------------- config

@@ -589,12 +589,16 @@ def _ensure_ghub_ready(cfg: config_mod.Config, assume_yes: bool) -> None:
     lighting control enabled. A missing DLL is a definite "G HUB isn't installed" signal
     on its own, unlike OpenRGB's library-vs-app-vs-server ambiguity, so this always says
     so before deciding whether winget can offer to fix it.
+
+    Uses `ghub_env.inspect` rather than `GHubEngine.probe`: probe no longer initialises
+    the SDK, and the measured blockers (not running, Dynamic Lighting, …) are the
+    actionable lines — not a wall of checklist text.
     """
-    from ..engines.ghub import GHubEngine, discover_dll_path
+    from ..engines.ghub_env import blockers, inspect
     from ..install import components
 
-    path = discover_dll_path(cfg.engine.ghub)
-    if path is None:
+    info = inspect(cfg.engine.ghub)
+    if info.dll_path is None:
         print(
             "\n  The Logitech LED Illumination SDK DLL wasn't found — it ships inside "
             "Logitech G HUB itself, and G HUB doesn't appear to be installed here."
@@ -614,20 +618,15 @@ def _ensure_ghub_ready(cfg: config_mod.Config, assume_yes: bool) -> None:
         print("  Then re-run `tintaview setup` (or `tintaview doctor`) to confirm.")
         return
 
-    try:
-        reachable = GHubEngine(cfg.engine.ghub).probe()
-    except Exception:
-        reachable = False
-    if reachable:
-        print(f"  Found the SDK at {path} and it responded — you're set.")
+    problems = [p for p in blockers(info) if "wasn't found" not in p]
+    if not problems:
+        print(f"  Found the SDK at {info.dll_path} and no blockers measured — you're set.")
         return
 
-    print(
-        f"\n  Found the SDK at {path}, but it didn't respond just now. Make sure G HUB "
-        'is running with "Game lighting control" enabled in its settings, and that G '
-        "HUB was started before TintaView — start G HUB first, then restart TintaView, "
-        "and re-run `tintaview doctor` to confirm."
-    )
+    print(f"\n  Found the SDK at {info.dll_path}, but:")
+    for line in problems:
+        print(f"  - {line}")
+    print("  Re-run `tintaview doctor` after fixing the above to confirm.")
 
 
 # --------------------------------------------------------------------------- step 5: install path

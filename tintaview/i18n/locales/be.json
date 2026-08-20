@@ -30,6 +30,7 @@
 
   "tray.update.balloon_title": "Даступнае абнаўленне TintaView",
   "tray.update.balloon_body": "Даступная версія {latest} — у вас {current}. Каб яе ўстанавіць, выберыце «Праверыць абнаўленні» ў меню трэя.",
+  "tray.engine.balloon_title": "Падсветка TintaView",
   "tray.update.unsupported": "Гэта зборка не ўмее правяраць абнаўленні.",
   "tray.update.check_failed": "Зараз праверыць абнаўленні не ўдалося: няма сеткі, спрацавала абмежаванне запытаў ці яшчэ няма ні аднаго выпуску. Паспрабуйце пазней.",
   "tray.update.up_to_date": "У вас найноўшая версія ({version}).",

@@ -370,6 +370,44 @@ def test_tray_shows_a_balloon_when_an_update_is_found(tray, monkeypatch):
     assert "1.0.0" in message
 
 
+def test_tray_balloons_once_when_engine_note_appears(tray, monkeypatch):
+    """Silent G HUB refusals surface via /state's engine.note — balloon once per note."""
+    app_instance, server = tray
+    balloons = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage",
+        lambda self, title, message, *a, **k: balloons.append((title, message)),
+    )
+
+    note = "G HUB is ignoring lighting commands — check Integrations"
+    payload = {
+        "effective": "idle",
+        "agents": {"claude": {"effective": "idle", "count": 1},
+                   "codex": {"effective": "none", "count": 0}},
+        "count": 1,
+        "engine": {"name": "ghub", "active": True, "note": note},
+    }
+    server.set(payload)
+    app_instance._poll_state()
+    assert len(balloons) == 1
+    assert note in balloons[0][1]
+    assert note in app_instance.tray.toolTip()
+
+    # Same note again must not re-balloon; clearing it resets the latch.
+    app_instance._poll_state()
+    assert len(balloons) == 1
+
+    cleared = dict(payload)
+    cleared["engine"] = {"name": "ghub", "active": True, "note": None}
+    server.set(cleared)
+    app_instance._poll_state()
+    assert note not in app_instance.tray.toolTip()
+
+    server.set(payload)
+    app_instance._poll_state()
+    assert len(balloons) == 2
+
+
 def test_mark_is_bold_but_keeps_its_shape(qapp):
     """The icon must read at tray sizes without losing the logo's proportions.
 
@@ -474,7 +512,7 @@ class _FakeController:
         self.applied.append(status)
 
     def engine_status(self) -> dict:
-        return {"name": "none", "active": False}
+        return {"name": "none", "active": False, "note": None}
 
 
 class _FakeState:

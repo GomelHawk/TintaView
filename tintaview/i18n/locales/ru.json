@@ -30,6 +30,7 @@
 
   "tray.update.balloon_title": "Доступно обновление TintaView",
   "tray.update.balloon_body": "Доступна версия {latest} — у вас {current}. Чтобы установить её, выберите «Проверить обновления» в меню трея.",
+  "tray.engine.balloon_title": "Подсветка TintaView",
   "tray.update.unsupported": "Эта сборка не умеет проверять обновления.",
   "tray.update.check_failed": "Сейчас проверить обновления не удалось: нет сети, сработало ограничение запросов или ещё нет ни одного выпуска. Попробуйте позже.",
   "tray.update.up_to_date": "У вас последняя версия ({version}).",

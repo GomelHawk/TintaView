@@ -139,7 +139,10 @@ real signal, so some false positives/negatives are inherent, not a configuration
 
 ## G HUB lights don't change
 
-`tintaview doctor` names one of three distinct causes on the `ENGINE` line:
+`tintaview doctor` measures the G HUB environment (DLL on disk, whether
+`lghub_agent.exe` is running, Windows Dynamic Lighting, and — when readable — whether
+TintaView appears in G HUB's Integrations list) and prints only the blockers that
+actually apply. Typical `ENGINE` lines:
 
 - **"the Logitech LED Illumination SDK is Windows-only"** — the `ghub` engine only runs
   on Windows (including a WSL-split install, where the daemon itself is on the Windows
@@ -148,12 +151,12 @@ real signal, so some false positives/negatives are inherent, not a configuration
   ships inside G HUB itself. Install it from
   [logitechg.com](https://www.logitechg.com/en-us/innovation/g-hub.html) (the wizard
   offers to do this with `winget` when it's available) and re-run `tintaview doctor`.
-- **"found the SDK ... but it refused to initialise"** — the DLL is there but G HUB
-  either isn't running yet, has "Game lighting control" turned off in its settings, or
-  — the sneaky one — **was started *after* TintaView already gave up and backed off**
-  for a while (`BaseEngine`'s failure cooldown). Enable Game lighting control, make sure
-  G HUB is fully started, and if you started G HUB after TintaView, restart TintaView so
-  it tries again immediately instead of waiting out the cooldown.
+- **"Logitech G HUB is not running"** — start G HUB and leave it running. TintaView's
+  `probe()` no longer calls `LogiLedInit` just to ask this question.
+- **"Windows 11 Dynamic Lighting is on"** — turn it off in Settings → Personalization →
+  Dynamic lighting. It fights G HUB for the same LEDs.
+- **"TintaView is not in G HUB's Integrations list yet"** — open one agent session so
+  `LogiLedInitWithName("TintaView")` registers the entry, then enable lighting for it.
 
 If `doctor` says the G HUB engine is available but the lights still don't move:
 
@@ -163,10 +166,13 @@ If `doctor` says the G HUB engine is available but the lights still don't move:
   build — and enable lighting for it. New entries are often off by default.
 - Take the device **off onboard memory mode**. Onboard profiles ignore the SDK
   entirely; switch the device to a G HUB (automatic) profile.
-- Turn off **Windows 11 Dynamic Lighting** (Settings → Personalization → Dynamic
-  lighting). It fights G HUB for the same LEDs.
-- Restart TintaView after changing any of the above — the SDK's `LogiLedInit` is a
-  one-way door for the process, so a failed first attempt stays failed until restart.
+- If the tray balloon / tooltip says **"G HUB restarted; restart TintaView to reclaim
+  lighting"** — do that. After G HUB auto-updates under a live tray the SDK session is
+  orphaned; a normal session end already calls `LogiLedShutdown` and re-inits on the
+  next open, but a G HUB process restart mid-hold still needs a TintaView relaunch.
+- Run `tintaview doctor --paint` to cycle red/yellow/green through the configured
+  engine and confirm with your eyes. SDK "success" and visible light are not the same
+  thing on G HUB.
 
 TintaView registers with the SDK as **TintaView** (`LogiLedInitWithName`), not as
 `python.exe`. After the first successful session it should appear under that name.

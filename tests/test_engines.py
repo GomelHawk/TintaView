@@ -364,6 +364,10 @@ class _FakeGHubDll:
         self._record("LogiLedSaveCurrentLighting")
         return True
 
+    def LogiLedSaveLightingForTargetZone(self, device_type: int, zone: int) -> bool:  # noqa: N802
+        self._record("LogiLedSaveLightingForTargetZone", device_type, zone)
+        return True
+
     def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
         self._record("LogiLedSetLighting", r, g, b)
         return True
@@ -378,6 +382,10 @@ class _FakeGHubDll:
         self._record("LogiLedRestoreLighting")
         return True
 
+    def LogiLedRestoreLightingForTargetZone(self, device_type: int, zone: int) -> bool:  # noqa: N802
+        self._record("LogiLedRestoreLightingForTargetZone", device_type, zone)
+        return True
+
     def LogiLedShutdown(self) -> bool:  # noqa: N802
         self._record("LogiLedShutdown")
         return True
@@ -389,11 +397,44 @@ def test_ghub_open_sets_target_device_then_saves_lighting():
 
     assert engine.open() is True
     assert engine.active is True
-    assert dll.names() == [
-        "LogiLedInitWithName", "LogiLedSetTargetDevice", "LogiLedSaveCurrentLighting",
-    ]
+    assert dll.names()[0] == "LogiLedInitWithName"
     assert dll.calls[0][1] == (b"TintaView",)
+    assert dll.names()[1] == "LogiLedSetTargetDevice"
     assert dll.calls[1][1] == (1 << 1,)  # "rgb" alone -> LOGI_DEVICETYPE_RGB
+    assert dll.names()[2] == "LogiLedSaveCurrentLighting"
+    # Mouse zones 0–1 are snapshotted too — SetLightingForTargetZone paint needs a
+    # matching zone restore or the mouse stays on our colour until Shutdown.
+    assert dll.names()[3:5] == [
+        "LogiLedSaveLightingForTargetZone", "LogiLedSaveLightingForTargetZone",
+    ]
+    assert {(c[1][0], c[1][1]) for c in dll.calls[3:5]} == {(0x3, 0), (0x3, 1)}
+
+
+def test_ghub_close_restores_zones_then_shuts_down():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+    dll.calls.clear()
+    engine.close()
+
+    names = dll.names()
+    assert "LogiLedRestoreLightingForTargetZone" in names
+    assert names.index("LogiLedRestoreLightingForTargetZone") < names.index(
+        "LogiLedRestoreLighting"
+    )
+    # Measured: only Shutdown hands the mouse back to G HUB.
+    assert names[-1] == "LogiLedShutdown"
+    assert engine._initialized is False
+
+
+def test_ghub_close_always_shuts_down_even_when_restore_disabled():
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(restore_on_release=False), dll=dll)
+    engine.open()
+    dll.calls.clear()
+    engine.close()
+    assert "LogiLedRestoreLighting" not in dll.names()
+    assert dll.names()[-1] == "LogiLedShutdown"
 
 
 def test_ghub_set_color_converts_0_255_scale_to_0_100_percent():
@@ -403,25 +444,46 @@ def test_ghub_set_color_converts_0_255_scale_to_0_100_percent():
     dll.calls.clear()
 
     engine.set_color(255, 128, 0)
+    assert engine._pump.wait_idle(2.0)
     lighting = [c[1] for c in dll.calls if c[0] == "LogiLedSetLighting"]
     # Real colour first, then the 1% nudge on a second pump turn — G HUB shows N-1.
     assert lighting == [(100, 50, 0), (99, 50, 0)]
 
 
-def test_ghub_close_restores_but_never_shuts_down():
-    dll = _FakeGHubDll()
+def test_ghub_close_drops_pending_commit_before_restore():
+    """A posted 1% nudge must not paint after RestoreLighting/Shutdown."""
+    gate = threading.Event()
+    released = threading.Event()
+
+    class _Dll(_FakeGHubDll):
+        def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
+            if not released.is_set() and (r, g, b) == (100, 0, 0):
+                gate.set()
+                released.wait(2.0)
+            return super().LogiLedSetLighting(r, g, b)
+
+    dll = _Dll()
     engine = GHubEngine(GHubConfig(), dll=dll)
     engine.open()
+    dll.calls.clear()
 
+    t = threading.Thread(target=lambda: engine.set_color(255, 0, 0), daemon=True)
+    t.start()
+    assert gate.wait(2.0)
+    released.set()
+    t.join(2.0)
     engine.close()
-    assert engine.active is False
-    assert dll.names()[-1] == "LogiLedRestoreLighting"
-    # The regression test for the module's re-init hazard: LogiLedShutdown must be
-    # deferred to process exit, never called from close().
-    assert "LogiLedShutdown" not in dll.names()
+    assert engine._pump.wait_idle(2.0)
+
+    names = dll.names()
+    assert "LogiLedShutdown" in names
+    shutdown_at = names.index("LogiLedShutdown")
+    assert "LogiLedSetLighting" not in names[shutdown_at + 1 :]
+    assert "LogiLedSetLightingForTargetZone" not in names[shutdown_at + 1 :]
 
 
-def test_ghub_reopen_after_close_does_not_reinitialize():
+def test_ghub_reopen_after_close_reinitializes():
+    """close() Shuts down so the next open() must Init again on the same pump thread."""
     dll = _FakeGHubDll()
     engine = GHubEngine(GHubConfig(), dll=dll)
 
@@ -429,8 +491,9 @@ def test_ghub_reopen_after_close_does_not_reinitialize():
     engine.close()
     engine.open()
 
-    assert dll.names().count("LogiLedInitWithName") == 1
-    assert "LogiLedInit" not in dll.names()
+    assert dll.names().count("LogiLedInitWithName") == 2
+    assert dll.names().count("LogiLedShutdown") >= 1
+    assert engine.active is True
 
 
 def test_ghub_restore_disabled_skips_restore():
@@ -440,6 +503,7 @@ def test_ghub_restore_disabled_skips_restore():
 
     engine.close()
     assert "LogiLedRestoreLighting" not in dll.names()
+    assert "LogiLedShutdown" in dll.names()
 
 
 def test_ghub_every_sdk_call_runs_on_one_dedicated_thread():
@@ -448,6 +512,7 @@ def test_ghub_every_sdk_call_runs_on_one_dedicated_thread():
 
     engine.open()
     engine.set_color(1, 2, 3)
+    assert engine._pump.wait_idle(2.0)
     engine.close()
 
     thread_ids = {call[2] for call in dll.calls}
@@ -455,13 +520,50 @@ def test_ghub_every_sdk_call_runs_on_one_dedicated_thread():
     assert threading.get_ident() not in thread_ids  # never the thread calling the engine
 
 
+def test_ghub_discover_dll_path_prefers_explicit_override(tmp_path):
+    from tintaview.engines.ghub import discover_dll_path
+
+    fake_dll = tmp_path / "LogitechLed.dll"
+    fake_dll.write_bytes(b"")
+
+    assert discover_dll_path(GHubConfig(dll_path=str(fake_dll))) == fake_dll
+
+
+def test_ghub_discover_dll_path_explicit_override_must_exist(tmp_path):
+    from tintaview.engines.ghub import discover_dll_path
+
+    missing = tmp_path / "does-not-exist.dll"
+    assert discover_dll_path(GHubConfig(dll_path=str(missing))) is None
+
+
+def test_ghub_falls_back_to_init_when_init_with_name_missing():
+    dll = _FakeGHubDll()
+    dll.LogiLedInitWithName = None  # pre-9.00 LGS has no such export
+    engine = GHubEngine(GHubConfig(), dll=dll)
+
+    assert engine.open() is True
+    assert dll.names()[0] == "LogiLedInit"
+    assert "LogiLedInitWithName" not in dll.names()
+
+
+def test_ghub_nudge_pct_is_one_percent_off():
+    from tintaview.engines.ghub import _nudge_pct
+
+    assert _nudge_pct((100, 0, 0)) == (99, 0, 0)
+    assert _nudge_pct((0, 50, 0)) == (0, 49, 0)
+    assert _nudge_pct((0, 0, 80)) == (0, 0, 79)
+    assert _nudge_pct((0, 0, 0)) == (1, 0, 0)  # off-half of the confirm blink
+
+
 def test_ghub_probe_never_takes_control():
+    """probe() must not call LogiLedInit — that used to register us in Integrations
+    during auto-mode scans and burn the one-shot init door."""
     dll = _FakeGHubDll()
     engine = GHubEngine(GHubConfig(), dll=dll)
 
     assert engine.probe() is True
-    assert engine.active is False  # probe() must never take control
-    assert dll.names() == ["LogiLedInitWithName"]
+    assert engine.active is False
+    assert dll.names() == []
 
 
 def test_ghub_init_failure_sets_cooldown():
@@ -499,30 +601,16 @@ def test_ghub_missing_dll_is_quiet(monkeypatch):
     engine.close()
 
 
-def test_ghub_discover_dll_path_prefers_explicit_override(tmp_path):
-    from tintaview.engines.ghub import discover_dll_path
+def test_ghub_probe_false_when_ghub_not_running(monkeypatch, tmp_path):
+    import tintaview.engines.ghub as ghub_mod
+    import tintaview.engines.ghub_env as ghub_env
 
-    fake_dll = tmp_path / "LogitechLed.dll"
-    fake_dll.write_bytes(b"")
+    fake = tmp_path / "sdk_legacy_led_x64.dll"
+    fake.write_bytes(b"")
+    monkeypatch.setattr(ghub_mod, "discover_dll_path", lambda cfg: fake)
+    monkeypatch.setattr(ghub_env, "ghub_running", lambda: False)
 
-    assert discover_dll_path(GHubConfig(dll_path=str(fake_dll))) == fake_dll
-
-
-def test_ghub_discover_dll_path_explicit_override_must_exist(tmp_path):
-    from tintaview.engines.ghub import discover_dll_path
-
-    missing = tmp_path / "does-not-exist.dll"
-    assert discover_dll_path(GHubConfig(dll_path=str(missing))) is None
-
-
-def test_ghub_falls_back_to_init_when_init_with_name_missing():
-    dll = _FakeGHubDll()
-    dll.LogiLedInitWithName = None  # pre-9.00 LGS has no such export
-    engine = GHubEngine(GHubConfig(), dll=dll)
-
-    assert engine.open() is True
-    assert dll.names()[0] == "LogiLedInit"
-    assert "LogiLedInitWithName" not in dll.names()
+    assert GHubEngine(GHubConfig()).probe() is False
 
 
 def test_ghub_set_color_paints_mouse_zones_then_nudges():
@@ -531,6 +619,7 @@ def test_ghub_set_color_paints_mouse_zones_then_nudges():
     engine.open()
     dll.calls.clear()
     engine.set_color(255, 0, 0)
+    assert engine._pump.wait_idle(2.0)
 
     # One paint of the real colour (keyboard SetLighting + mouse zones 0–1), then the
     # same burst with a 1% nudge. Chroma/OpenRGB must not grow a matching second write.
@@ -548,13 +637,117 @@ def test_ghub_set_color_paints_mouse_zones_then_nudges():
     assert {(c[1][0], c[1][1], c[1][2]) for c in dll.calls[4:6]} == {(0x3, 0, 99), (0x3, 1, 99)}
 
 
-def test_ghub_nudge_pct_is_one_percent_off():
-    from tintaview.engines.ghub import _nudge_pct
+def test_ghub_pump_supersedes_stale_colors():
+    """A newer colour must drop not-yet-started paints so the device never lags."""
+    gate = threading.Event()
+    released = threading.Event()
 
-    assert _nudge_pct((100, 0, 0)) == (99, 0, 0)
-    assert _nudge_pct((0, 50, 0)) == (0, 49, 0)
-    assert _nudge_pct((0, 0, 80)) == (0, 0, 79)
-    assert _nudge_pct((0, 0, 0)) == (1, 0, 0)  # off-half of the confirm blink
+    class _BlockingDll(_FakeGHubDll):
+        def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
+            # First paint blocks until the test has queued several more colours.
+            if not released.is_set():
+                gate.set()
+                released.wait(2.0)
+            return super().LogiLedSetLighting(r, g, b)
+
+    dll = _BlockingDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+    dll.calls.clear()
+
+    # Concurrent set_color calls: each call() waits, so they must run on their own
+    # threads or the second one would block the test before it can queue a third.
+    threads = [
+        threading.Thread(target=lambda: engine.set_color(255, 0, 0), daemon=True),
+    ]
+    threads[0].start()
+    assert gate.wait(2.0)
+    for rgb in ((0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)):
+        t = threading.Thread(target=lambda c=rgb: engine.set_color(*c), daemon=True)
+        threads.append(t)
+        t.start()
+    released.set()
+    for t in threads:
+        t.join(2.0)
+    assert engine._pump.wait_idle(2.0)
+
+    lighting = [c[1] for c in dll.calls if c[0] == "LogiLedSetLighting"]
+    # First paint (100,0,0) plus last colour (0,100,100) and its 1% nudge — middle
+    # colours superseded. Commits for superseded paints are never posted.
+    assert lighting[0] == (100, 0, 0)
+    assert (0, 100, 100) in lighting
+    assert (0, 255, 0) not in lighting  # would be pct of green if not superseded
+    assert (0, 0, 100) not in lighting
+    assert (100, 100, 0) not in lighting
+    assert (100, 0, 100) not in lighting
+
+
+def test_ghub_set_color_failure_sets_status_note():
+    """Injected fakes skip the ghub_running check → Integrations/checklist wording."""
+
+    class _FailingDll(_FakeGHubDll):
+        def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
+            self._record("LogiLedSetLighting", r, g, b)
+            return False
+
+    dll = _FailingDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+    for _ in range(3):
+        engine.set_color(255, 0, 0)
+        engine._pump.wait_idle(2.0)
+    assert engine.status_note is not None
+    assert "ignoring" in engine.status_note.lower()
+    assert "Integrations" in engine.status_note
+    assert engine.in_cooldown() is True
+
+
+def test_ghub_paint_failure_when_ghub_running_suggests_restart(monkeypatch):
+    """G HUB still in the process list while paints fail → orphaned session after restart."""
+    import tintaview.engines.ghub_env as ghub_env
+
+    class _FailingDll(_FakeGHubDll):
+        def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
+            self._record("LogiLedSetLighting", r, g, b)
+            return False
+
+    dll = _FailingDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+    # open() with an injected DLL skips the running check; clear the override so the
+    # failure path exercises the real ghub_running() branch without loading a host DLL.
+    engine._dll_override = None
+    monkeypatch.setattr(ghub_env, "ghub_running", lambda: True)
+
+    for _ in range(3):
+        engine.set_color(255, 0, 0)
+        engine._pump.wait_idle(2.0)
+    assert engine.status_note is not None
+    assert "restart" in engine.status_note.lower()
+
+
+def test_ghub_successful_paint_clears_status_note():
+    class _FlakyDll(_FakeGHubDll):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+
+        def LogiLedSetLighting(self, r: int, g: int, b: int) -> bool:  # noqa: N802
+            self._record("LogiLedSetLighting", r, g, b)
+            return not self.fail
+
+    dll = _FlakyDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    engine.open()
+    for _ in range(3):
+        engine.set_color(255, 0, 0)
+        engine._pump.wait_idle(2.0)
+    assert engine.status_note is not None
+
+    dll.fail = False
+    engine.set_color(0, 255, 0)
+    engine._pump.wait_idle(2.0)
+    assert engine.status_note is None
 
 
 def test_ghub_fake_dll_does_not_pump_win32_messages(monkeypatch):
@@ -567,6 +760,7 @@ def test_ghub_fake_dll_does_not_pump_win32_messages(monkeypatch):
     engine = GHubEngine(GHubConfig(), dll=dll)
     engine.open()
     engine.set_color(255, 0, 0)
+    assert engine._pump.wait_idle(2.0)
     assert drained == []
 
 

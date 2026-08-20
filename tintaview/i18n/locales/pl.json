@@ -30,6 +30,7 @@
 
   "tray.update.balloon_title": "Dostępna aktualizacja TintaView",
   "tray.update.balloon_body": "Wersja {latest} jest już dostępna — masz {current}. Użyj „Sprawdź aktualizacje” w menu zasobnika, aby ją zainstalować.",
+  "tray.engine.balloon_title": "Podświetlenie TintaView",
   "tray.update.unsupported": "Ta kompilacja nie potrafi sprawdzać aktualizacji.",
   "tray.update.check_failed": "Nie udało się teraz sprawdzić aktualizacji: brak sieci, limit zapytań albo nie opublikowano jeszcze żadnego wydania. Spróbuj później.",
   "tray.update.up_to_date": "Masz najnowszą wersję ({version}).",

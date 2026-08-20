@@ -200,16 +200,19 @@ class LightController:
             self._engine = None
 
     def engine_status(self) -> dict:
-        """``{"name", "active"}`` for the ``/state`` payload."""
+        """``{"name", "active", "note"}`` for the ``/state`` payload."""
         with self._lock:
             engine = self._engine
         if engine is None:
-            return {"name": "none", "active": False}
+            return {"name": "none", "active": False, "note": None}
         try:
             active = bool(engine.active)
         except Exception:
             active = False
-        return {"name": engine.name, "active": active}
+        note = getattr(engine, "status_note", None)
+        if note is not None and not isinstance(note, str):
+            note = None
+        return {"name": engine.name, "active": active, "note": note}
 
     def shutdown(self) -> None:
         """Stop background threads and release the lights.

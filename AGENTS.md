@@ -28,7 +28,7 @@ change (what changed, in one or two sentences) — even if the change isn't actu
 ```
 tintaview/
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
-  engines/   base.py  chroma.py  ghub.py  openrgb.py  null.py  factory.py
+  engines/   base.py  chroma.py  ghub.py  ghub_env.py  openrgb.py  null.py  factory.py
   agents/    base.py  claude.py  codex.py  cursor.py     # hook manifest + paths per agent
   stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py
              cache.py  model.py  service.py  format.py   # format.py = shared row wording
@@ -158,11 +158,12 @@ Configuration table — keep that table in sync when adding one.
   `LGHUB\sdks\`; older installs keep it in the `LGHUB` root. Things about the legacy LED
   Illumination SDK that must keep being handled:
   1. **Colour is 0-100 percent, not 0-255** — every `set_color` call converts.
-  2. **`LogiLedInit` after `LogiLedShutdown` is unreliable.**
-     `LightController` opens/closes an engine on every session start/end, so `close()`
-     only ever calls `LogiLedRestoreLighting`; the one real `LogiLedShutdown` is deferred
-     to process exit via `atexit`. Do not "simplify" this into calling `Shutdown` from
-     `close()` — that is the one thing this module exists to avoid.
+  2. **`LogiLedShutdown` on every `close()` — measured.** `RestoreLighting` (and
+     per-zone restore) leave the mouse on our last colour; only `Shutdown` returns
+     G HUB's profile. `LightController` opens/closes per session, so `close()` must
+     Shutdown and the next `open()` re-`InitWithName` (with settle + retries) on the
+     same SDK thread. Do not "simplify" back to restore-only until atexit — that
+     stuck devices until the tray quit.
   3. **The SDK initialises per calling thread**, so every call — from hook handler
      threads, the blink thread, the heartbeat thread — is funnelled through one
      dedicated worker thread owned by the engine, never called ad hoc from whichever
@@ -175,6 +176,15 @@ Configuration table — keep that table in sync when adding one.
      call on a later turn of the SDK thread* — `SetTargetDevice` in the same burst and a
      sleep after `set_color` returns do not commit it. `set_color` therefore paints, then
      on a second pump job pumps Win32 messages and paints a 1% nudge so `pct` becomes N-1.
+     Colour jobs share a coalesce key on the pump; the commit is posted (not waited on)
+     so a blink storm drops stale colours instead of queuing them.
+  6. **`probe()` must not call `LogiLedInit`.** Reachability is "DLL on disk and G HUB
+     not known-stopped" (`engines/ghub_env.py`); init happens only in `open()`. Probing
+     used to register TintaView in Integrations even when `auto` then picked Chroma.
+  Environmental facts (process list, Dynamic Lighting registry, read-only
+  `settings.db`) live in `ghub_env.py` so `doctor`/wizard can print measured blockers
+  without loading the SDK. The Integrations toggle field name is unconfirmed — report
+  `"unknown"`/`"absent"`, never guess `"on"`/`"off"`.
   Unlike OpenRGB, G HUB does not need to be closed — it is designed to be driven while
   it runs — and the capability bitmask (`engine.ghub.device_types`) still has no
   mouse-vs-keyboard instance targeting, so a solid colour lands on every matching
@@ -461,7 +471,7 @@ the release — see `.gitattributes`.
 | JetBrains `CREDIT_SCALE` | Reverse-engineered from one live widget reading, not documented. Only affects display formatting, never severity |
 | Copilot CLI live quota | Not implemented — would need OS-credential-store access plus an undocumented two-step OAuth exchange with unverified field names. Local token totals only |
 | Cursor confirm heuristic | Tune `stall_seconds` against real sessions; ship conservative; allow disabling |
-| G HUB legacy LED SDK + start order | Undocumented/unofficial by Logitech's own admission; "DLL found but refused to init" almost always means G HUB started *after* TintaView backed off — `doctor` says so, restarting TintaView is the fix |
+| G HUB legacy LED SDK + start order | Undocumented/unofficial by Logitech's own admission; `RestoreLighting` does not hand mice back — `close()` must `LogiLedShutdown` and the next `open()` re-inits. If G HUB restarts under us the session is orphaned — surface a status_note and restart TintaView |
 | OpenRGB SDK version drift | Pin to v5 behaviour, feature-detect, fail soft |
 | Unsigned build (accepted) | Ship via the install scripts so no MOTW tag ever reaches anything. If a Defender *heuristic* ever bites, submit to Microsoft's false-positive portal and consider free OSS signing (SignPath) or Azure Trusted Signing |
 | PySide6 size (~60 MB) | Accepted for the usage-card quality; revisit `pystray` only if it becomes a real problem |

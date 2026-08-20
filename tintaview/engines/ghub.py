@@ -7,15 +7,15 @@ itself onto the OpenRGB path (see engines/openrgb.py) simply doesn't apply here.
 the DLL with ctypes needs no new dependency and no bundled binary — it already sits on
 the machine, put there by G HUB's own installer.
 
-Two hazards from the vendor SDK drive this module's shape:
+Hazards from the vendor SDK that drive this module's shape:
 
-1. **Re-initialising after shutdown is unreliable.** Calling `LogiLedInit` again after a
-   prior `LogiLedShutdown`, in the same process, is documented in the wild to misbehave —
-   Logitech's own SDK guidance is to not shut down until you are completely finished with
-   the hardware. But `LightController` opens and closes an engine on every session
-   start/end, potentially many times over one process's lifetime. So `close()` here only
-   ever restores the saved lighting; the one real `LogiLedShutdown` call is deferred to
-   process exit via `atexit`.
+1. **`RestoreLighting` does not hand the mouse back.** Measured on live G HUB with the
+   checkout verify: paint works; `LogiLedRestoreLighting` (and per-zone restore) leave
+   the device on our last colour; only `LogiLedShutdown` returns control to G HUB's own
+   profile. `LightController` opens/closes an engine on every session start/end, so
+   `close()` must `Shutdown`, and the next `open()` must `Init` again (`InitWithName` +
+   settle + retries). Deferring Shutdown to process exit left devices stuck until the
+   tray quit.
 2. **The SDK initialises per calling thread**, not per process ("initializes the sdk for
    the current thread", per Logitech's own docs). Our calls would otherwise arrive from
    whichever `ThreadingHTTPServer` handler thread served the hook, plus the independent
@@ -27,7 +27,12 @@ Two hazards from the vendor SDK drive this module's shape:
    thread.** A sleep after `set_color` returns does nothing, and a second `SetLighting`
    in the same burst is coalesced. `set_color` therefore paints, then on a second pump
    job pumps Win32 messages (`PeekMessage`) and paints a 1% nudge so `pct` becomes N-1
-   and the mouse matches the status now, not on the next event.
+   and the mouse matches the status now, not on the next event. The commit is posted
+   (not waited on) and shares a coalesce key with paints, so a blink storm drops stale
+   colours instead of queuing them.
+4. **`probe()` must not call `LogiLedInit`.** Init registers us in G HUB's Integrations
+   list; probing from `auto` mode used to pay that cost even when Chroma won.
+   Reachability is "DLL on disk and G HUB not known-stopped".
 
 The SDK also has no concept of addressing a single device (mouse vs. keyboard) — only a
 capability bitmask (`LOGI_DEVICETYPE_*`), so unlike OpenRGB's `device_types` this targets
@@ -41,7 +46,6 @@ import atexit
 import ctypes
 import logging
 import os
-import queue
 import shutil
 import sys
 import threading
@@ -67,12 +71,23 @@ _DEVICE_TYPE_ALL = sum(_DEVICE_TYPE_BITS.values())
 #: compared to Chroma's HTTP timeouts because LogiLedInit can briefly block while G HUB
 #: itself is still starting up.
 _CALL_TIMEOUT = 3.0
-#: `set_color` does two pump turns (paint + 1% commit). Each G HUB IPC can take
-#: hundreds of milliseconds; 8 s is enough for both without returning mid-paint.
+#: `set_color` waits only for the real paint; the 1% commit is posted and may be
+#: superseded by a newer colour. Each G HUB IPC can take hundreds of milliseconds.
 _COLOR_TIMEOUT = 8.0
 #: Win32 message-pump window on the SDK thread between the real RGB and the 1%
 #: nudge. G HUB shows colour N-1 until the *next* lighting call on a later turn.
 _FLUSH_GAP = 0.3
+#: Coalesce key for colour paints on the pump. Lifecycle calls (init/save/restore/
+#: shutdown) intentionally omit a key so a blink storm can never drop a restore.
+_COLOR_KEY = "color"
+#: Commit (1% nudge) jobs. A new *paint* drops pending commits; a new commit must
+#: **not** drop a pending paint — otherwise a colour that arrived while we were still
+#: painting gets cancelled by our own commit of the previous colour.
+_COMMIT_KEY = "color_commit"
+#: Consecutive `LogiLedSetLighting` failures before we surface a status_note. One
+#: false is noise (G HUB briefly busy); three in a row from the blink loop is a real
+#: "integration off / onboard memory / SDK dead" signal.
+_SET_FAILURE_LIMIT = 3
 
 #: Shown in G HUB's integrations list. `LogiLedInit()` alone registers the process as
 #: `python.exe`, which G HUB typically leaves disabled for lighting, so Init succeeds
@@ -83,6 +98,11 @@ _APP_NAME = b"TintaView"
 #: without a pause, the first SetLighting lands on a still-starting SDK and the mouse
 #: stays dark until the *next* colour. Skipped when a test injects a fake DLL.
 _INIT_SETTLE = 1.0
+#: How many times to retry `LogiLedInitWithName` after a `close()`/`Shutdown`. Re-init
+#: after Shutdown is the cost of handing the mouse back (see module docstring); a single
+#: failure must not leave the next agent session dark for the whole cooldown.
+_INIT_ATTEMPTS = 3
+_INIT_RETRY_SLEEP = 0.5
 
 #: `LogiLed::DeviceType` values for `LogiLedSetLightingForTargetZone`. Mice are zoned:
 #: `SetLighting` can return true while leaving them dark (G102/G502 Lightsync). Zone 1
@@ -214,6 +234,8 @@ def _bind_signatures(dll) -> None:
     _bool("LogiLedSetTargetDevice", (ctypes.c_int,))
     _bool("LogiLedSaveCurrentLighting")
     _bool("LogiLedRestoreLighting")
+    _bool("LogiLedSaveLightingForTargetZone", (ctypes.c_int, ctypes.c_int))
+    _bool("LogiLedRestoreLightingForTargetZone", (ctypes.c_int, ctypes.c_int))
     _bool("LogiLedSetLighting", (ctypes.c_int, ctypes.c_int, ctypes.c_int))
     _bool(
         "LogiLedSetLightingForTargetZone",
@@ -285,13 +307,16 @@ def _commit_paint(dll, pct: tuple[int, int, int]) -> bool:
 class _Call:
     """One queued SDK call: the pump thread runs `fn` and reports back through `done`."""
 
-    __slots__ = ("done", "error", "fn", "result")
+    __slots__ = ("done", "error", "fn", "key", "result", "started", "superseded")
 
-    def __init__(self, fn) -> None:
+    def __init__(self, fn, key: str | None = None) -> None:
         self.fn = fn
+        self.key = key
         self.done = threading.Event()
         self.result = None
         self.error: Exception | None = None
+        self.started = False
+        self.superseded = False
 
 
 class _CallPump:
@@ -301,10 +326,18 @@ class _CallPump:
     all — without it, `LogiLedInit` and a later `LogiLedSetLighting` could easily land
     on two different threads and the SDK would treat the second as never having
     initialised.
+
+    Colour jobs share `_COLOR_KEY`: a newer paint drops any not-yet-started paint or
+    commit with the same key, so a slow G HUB IPC under a blink storm shows the *current*
+    status rather than a colour from several seconds ago. Lifecycle calls omit the key
+    and are never dropped — collapsing a `RestoreLighting` into a blink would leave the
+    user's profile unrestored on session end.
     """
 
     def __init__(self) -> None:
-        self._queue: queue.Queue[_Call] = queue.Queue()
+        self._cond = threading.Condition()
+        self._pending: list[_Call] = []
+        self._in_flight = False
         self._thread: threading.Thread | None = None
 
     def _ensure_started(self) -> None:
@@ -314,28 +347,150 @@ class _CallPump:
 
     def _run(self) -> None:
         while True:
-            call = self._queue.get()
+            with self._cond:
+                while not self._pending:
+                    self._cond.wait()
+                call = self._pending.pop(0)
+                call.started = True
+                self._in_flight = True
             try:
-                call.result = call.fn()
-            except Exception as e:  # noqa: BLE001 - reported back to the caller, not swallowed
-                call.error = e
-            call.done.set()
+                if call.superseded:
+                    call.done.set()
+                    continue
+                try:
+                    call.result = call.fn()
+                except Exception as e:  # noqa: BLE001 - reported back to the caller
+                    call.error = e
+                call.done.set()
+            finally:
+                with self._cond:
+                    self._in_flight = False
+                    self._cond.notify_all()
 
-    def call(self, fn, timeout: float = _CALL_TIMEOUT):
-        """Run `fn` on the pump thread and return its result, or None on timeout.
+    def wait_idle(self, timeout: float = _COLOR_TIMEOUT) -> bool:
+        """Block until the queue is empty and no call is running. Used by tests."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._pending or self._in_flight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
+    def drop_pending(self, keys: set[str]) -> None:
+        """Supersede not-yet-started jobs whose key is in `keys`.
+
+        `close()` uses this so a posted 1% commit cannot paint *after*
+        `LogiLedRestoreLighting` and leave the mouse on our last status colour until
+        process exit (when `atexit` finally calls `LogiLedShutdown`).
+        """
+        with self._cond:
+            survivors: list[_Call] = []
+            for old in self._pending:
+                if old.key in keys and not old.started:
+                    old.superseded = True
+                    old.done.set()
+                else:
+                    survivors.append(old)
+            self._pending = survivors
+            self._cond.notify_all()
+
+    def _enqueue(self, call: _Call) -> None:
+        self._ensure_started()
+        with self._cond:
+            if call.key is not None:
+                # A new paint drops stale paints *and* stale commits; a new commit only
+                # drops other commits — see `_COMMIT_KEY`.
+                drop = (
+                    {_COLOR_KEY, _COMMIT_KEY} if call.key == _COLOR_KEY else {call.key}
+                )
+                survivors: list[_Call] = []
+                for old in self._pending:
+                    if old.key in drop and not old.started:
+                        old.superseded = True
+                        old.done.set()
+                    else:
+                        survivors.append(old)
+                self._pending = survivors
+            self._pending.append(call)
+            self._cond.notify()
+
+    def post(self, fn, key: str | None = None) -> None:
+        """Queue `fn` on the pump thread and return immediately.
+
+        Used for the 1% commit pass whose result nobody waits on — and which a newer
+        colour is free to supersede.
+        """
+        self._enqueue(_Call(fn, key=key))
+
+    def call(self, fn, timeout: float = _CALL_TIMEOUT, key: str | None = None):
+        """Run `fn` on the pump thread and return its result, or None on timeout/supersede.
 
         Re-raises whatever `fn` raised, on the calling thread, so callers keep their
         normal try/except shape instead of having to know the pump exists at all.
         """
-        self._ensure_started()
-        call = _Call(fn)
-        self._queue.put(call)
+        call = _Call(fn, key=key)
+        self._enqueue(call)
         if not call.done.wait(timeout):
             log.debug("ghub: SDK call timed out after %.1fs", timeout)
+            return None
+        if call.superseded:
             return None
         if call.error is not None:
             raise call.error
         return call.result
+
+
+def _save_lighting(dll) -> bool:
+    """Snapshot global + mouse-zone lighting before we take over.
+
+    We paint mice with `SetLightingForTargetZone`; a bare `SaveCurrentLighting` does
+    not reliably cover those zones, so `RestoreLighting` alone leaves the mouse on our
+    last colour until `LogiLedShutdown` at process exit.
+    """
+    ok = bool(dll.LogiLedSaveCurrentLighting())
+    save_z = getattr(dll, "LogiLedSaveLightingForTargetZone", None)
+    if callable(save_z):
+        for device_type, zones in _ZONE_PAINT:
+            for zone in zones:
+                save_z(device_type, zone)
+    return ok
+
+
+def _restore_lighting(dll) -> bool:
+    """Best-effort snapshot restore before `LogiLedShutdown`.
+
+    Zone restores first, then global; message-pump + a second pass for the N-1 hazard.
+    Measured on live G HUB: this alone does **not** return the mouse to G HUB's profile —
+    `close()` must still `Shutdown`. Kept because it is cheap and may help keyboards.
+    """
+    restore_z = getattr(dll, "LogiLedRestoreLightingForTargetZone", None)
+
+    def _zones() -> None:
+        if not callable(restore_z):
+            return
+        for device_type, zones in _ZONE_PAINT:
+            for zone in zones:
+                restore_z(device_type, zone)
+
+    _zones()
+    ok = bool(dll.LogiLedRestoreLighting())
+    if isinstance(dll, ctypes.CDLL):
+        _drain_windows_messages(_FLUSH_GAP)
+        _zones()
+        dll.LogiLedRestoreLighting()
+        _drain_windows_messages(_FLUSH_GAP)
+    return ok
+
+
+def _shutdown_sdk(dll) -> None:
+    """Release SDK control so G HUB's own profile can drive the device again."""
+    shutdown = getattr(dll, "LogiLedShutdown", None)
+    if callable(shutdown):
+        shutdown()
+    if isinstance(dll, ctypes.CDLL):
+        _drain_windows_messages(_FLUSH_GAP)
 
 
 class GHubEngine(BaseEngine):
@@ -359,15 +514,19 @@ class GHubEngine(BaseEngine):
         self._resolved_path: Path | None = None
         self._pump = _CallPump()
         self._device_mask = _device_mask(self._cfg.device_types)
-        # LogiLedInit is a one-way door for this process — see the module docstring.
+        # True between a successful Init and the matching Shutdown (close or atexit).
         self._initialized = False
-        # True once LogiLedSaveCurrentLighting has succeeded and needs a matching
-        # restore; doubles as "are we in control" for `active`.
+        self._atexit_registered = False
+        # True once open() has taken control; cleared in close(). Feeds `active`.
         self._saved = False
         # First SetLighting failure is worth an INFO line; the blink loop would
         # otherwise repeat it twice a second.
         self._logged_set_failure = False
         self._logged_setup_notes = False
+        self._set_failures = 0
+        # Surfaced via LightController.engine_status() → /state → tray. If G HUB
+        # restarts under us the in-process session is orphaned — restart TintaView.
+        self.status_note: str | None = None
 
     @property
     def active(self) -> bool:
@@ -399,21 +558,34 @@ class GHubEngine(BaseEngine):
         return self._dll
 
     def _ensure_initialized(self) -> bool:
-        """Call `LogiLedInitWithName` (falling back to `LogiLedInit`) once per process.
+        """`LogiLedInitWithName` on the pump thread; allowed again after `close()`.
 
-        Never re-initialises after a `close()` — see the module docstring's re-init
-        hazard. `atexit` registers the real `LogiLedShutdown` on the first successful
-        init, so the SDK still gets released cleanly when the process actually exits.
+        `close()` must `Shutdown` to hand the mouse back (measured), so every later
+        `open()` re-inits. Retries absorb the flaky post-Shutdown Init the old design
+        tried to avoid by never shutting down mid-process.
         """
         if self._initialized:
             return True
         dll = self._ensure_dll()
         if dll is None:
             return False
-        ok = bool(self._pump.call(self._init_on_pump, timeout=_CALL_TIMEOUT + _INIT_SETTLE))
+        attempts = 1 if self._dll_override is not None else _INIT_ATTEMPTS
+        ok = False
+        for attempt in range(attempts):
+            ok = bool(
+                self._pump.call(
+                    self._init_on_pump, timeout=_CALL_TIMEOUT + _INIT_SETTLE,
+                )
+            )
+            if ok:
+                break
+            if attempt + 1 < attempts:
+                time.sleep(_INIT_RETRY_SLEEP)
         if ok:
             self._initialized = True
-            atexit.register(self._shutdown_at_exit)
+            if not self._atexit_registered:
+                atexit.register(self._shutdown_at_exit)
+                self._atexit_registered = True
         return ok
 
     def _init_on_pump(self) -> bool:
@@ -435,24 +607,37 @@ class GHubEngine(BaseEngine):
         return ok
 
     def _shutdown_at_exit(self) -> None:
-        dll = self._dll
-        if dll is None:
+        """Last-resort release if the process exits while a session is still open."""
+        if not self._initialized or self._dll is None:
             return
         try:
-            self._pump.call(lambda: dll.LogiLedShutdown(), timeout=1.0)
+            self._pump.drop_pending({_COLOR_KEY, _COMMIT_KEY})
+            self._pump.call(lambda: _shutdown_sdk(self._dll), timeout=1.0)
+            self._initialized = False
         except Exception as e:
             log.debug("ghub: shutdown at exit failed: %r", e)
 
     # --- LightingEngine --------------------------------------------------------
 
     def probe(self) -> bool:
-        """Reachability check that never releases anything — see the module docstring
-        for why `LogiLedInit` itself can't be un-done, only never attempted again once
-        it fails within this process's cooldown window.
+        """Reachability without taking control or touching the SDK.
+
+        Used to call `LogiLedInitWithName`, which registered TintaView in G HUB's
+        Integrations list even when `auto` mode then picked Chroma, and burned the
+        one-shot init door on a probe that was never going to paint. Now: DLL on disk
+        plus G HUB not known-stopped. Init moves entirely into `open()`.
         """
         if self.in_cooldown():
             return False
-        return self._ensure_initialized()
+        if self._dll_override is not None:
+            # Injected fakes have no process to look for; presence of the override is
+            # itself the reachability signal tests rely on.
+            return True
+        if discover_dll_path(self._cfg) is None:
+            return False
+        from .ghub_env import ghub_running
+
+        return ghub_running() is not False
 
     def open(self) -> bool:
         if self.in_cooldown():
@@ -463,10 +648,12 @@ class GHubEngine(BaseEngine):
 
         dll = self._dll
         self._pump.call(lambda: dll.LogiLedSetTargetDevice(self._device_mask))
-        saved = bool(self._pump.call(lambda: dll.LogiLedSaveCurrentLighting()))
+        saved = bool(self._pump.call(lambda: _save_lighting(dll)))
         if not saved:
             log.info("G HUB: could not save current lighting before taking over")
         self._saved = True
+        self._set_failures = 0
+        self.status_note = None
         self.clear_cooldown()
         log.info("G HUB session opened (%s)", self._resolved_path or "injected DLL")
         if self._dll_override is None and not self._logged_setup_notes:
@@ -481,40 +668,93 @@ class GHubEngine(BaseEngine):
         dll = self._dll
         pct = tuple(round(v * 100 / 255) for v in (r, g, b))
         try:
-            painted = self._pump.call(lambda: _paint(dll, pct), timeout=_COLOR_TIMEOUT)
-            # Second turn of the pump thread: G HUB shows colour N-1 until a later
-            # lighting call on a later turn. A 1% nudge commits `pct`. Win32 messages
-            # are pumped on that job — sleep without PeekMessage does not.
-            self._pump.call(lambda: _commit_paint(dll, pct), timeout=_COLOR_TIMEOUT)
+            painted = self._pump.call(
+                lambda: _paint(dll, pct), timeout=_COLOR_TIMEOUT, key=_COLOR_KEY,
+            )
+            # Only commit a colour that actually painted. A superseded/timed-out paint
+            # must not post a nudge, and must not count as a SetLighting refusal.
+            if painted is None:
+                return
+            self._pump.post(lambda: _commit_paint(dll, pct), key=_COMMIT_KEY)
             ok = bool(painted)
             log.debug("ghub set_color %s -> pct=%s ok=%s", (r, g, b), pct, ok)
-            if not ok and not self._logged_set_failure:
-                self._logged_set_failure = True
-                log.info(
-                    "G HUB SetLighting returned false — enable Settings > Game lighting "
-                    "control, allow TintaView under Integrations, and take the device "
-                    "off onboard memory mode"
-                )
+            self._note_paint_result(ok)
         except Exception as e:
             log.debug("ghub set_color FAILED: %r", e)
+            self._note_paint_result(False)
+
+    def _note_paint_result(self, ok: bool) -> None:
+        """Accumulate silent SetLighting failures into a tray-visible status_note.
+
+        Do **not** respond to a dead SDK by calling `LogiLedInit` again — that is the
+        re-init hazard this module exists to avoid. If G HUB restarted under us the only
+        honest recovery is restarting TintaView.
+        """
+        if ok:
+            self._set_failures = 0
+            if self.status_note is not None:
+                self.status_note = None
+            return
+        self._set_failures += 1
+        if not self._logged_set_failure:
+            self._logged_set_failure = True
+            log.info(
+                "G HUB SetLighting returned false — enable Settings > Game lighting "
+                "control, allow TintaView under Integrations, and take the device "
+                "off onboard memory mode"
+            )
+        if self._set_failures < _SET_FAILURE_LIMIT:
+            return
+        if self.status_note is not None:
+            return  # already surfaced; don't re-extend the cooldown every blink tick
+        # G HUB still in the process list while paints fail usually means the agent
+        # restarted under us and our in-process SDK session is permanently orphaned.
+        restarted = False
+        if self._dll_override is None:
+            try:
+                from .ghub_env import ghub_running
+
+                restarted = ghub_running() is True
+            except Exception as e:
+                log.debug("ghub: running check after paint failure failed: %r", e)
+        if restarted:
+            self.status_note = (
+                "G HUB restarted; restart TintaView to reclaim lighting"
+            )
+        else:
+            self.status_note = (
+                "G HUB is ignoring lighting commands — check Integrations and "
+                "Game lighting control"
+            )
+        self.note_failure(self.status_note)
 
     def close(self) -> None:
-        """Restore the lighting G HUB had before `open()`.
+        """Hand lighting back to G HUB and tear down the SDK session.
 
-        Deliberately does **not** call `LogiLedShutdown` — see the module docstring's
-        re-init hazard. The SDK stays initialised for the rest of the process, so the
-        next `open()` costs a save/restore round trip, not a re-init.
+        Measured: `RestoreLighting` (even per-zone) leaves the mouse on our last colour;
+        only `LogiLedShutdown` returns G HUB's profile. So we restore best-effort, then
+        always Shutdown, and clear `_initialized` so the next `open()` re-inits on the
+        same pump thread.
+
+        Drops pending colour commits first so a posted 1% nudge cannot run after restore.
         """
         if not self._saved:
             return
         self._saved = False
-        if self._dll is None or not self._cfg.restore_on_release:
+        if self._dll is None:
             return
         dll = self._dll
         try:
-            self._pump.call(lambda: dll.LogiLedRestoreLighting())
-            log.info("G HUB lighting restored")
+            self._pump.drop_pending({_COLOR_KEY, _COMMIT_KEY})
+            self._pump.wait_idle(timeout=_COLOR_TIMEOUT)
+            if self._cfg.restore_on_release:
+                try:
+                    self._pump.call(lambda: _restore_lighting(dll), timeout=_COLOR_TIMEOUT)
+                except Exception as e:
+                    log.info("G HUB: restore before shutdown failed: %r", e)
+            self._pump.call(lambda: _shutdown_sdk(dll), timeout=_CALL_TIMEOUT)
+            self._initialized = False
+            log.info("G HUB session closed (Shutdown — control returned to G HUB)")
         except Exception as e:
-            # Best-effort by contract: a restore that fails must not stop the rest of
-            # teardown from happening.
-            log.info("G HUB: restore failed: %r", e)
+            self._initialized = False
+            log.info("G HUB: close failed: %r", e)

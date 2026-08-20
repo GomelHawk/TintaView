@@ -20,6 +20,7 @@ def test_ghub_config_round_trips_through_dumps_and_load(tmp_path):
     path = tmp_path / "config.toml"
     cfg = Config(engine=EngineConfig())
     cfg.engine.ghub.dll_path = r"C:\Custom\LogitechLed.dll"
+    cfg.engine.ghub.settings_db = r"C:\Custom\settings.db"
     cfg.engine.ghub.device_types = ["rgb"]
     cfg.engine.ghub.restore_on_release = False
 
@@ -27,6 +28,7 @@ def test_ghub_config_round_trips_through_dumps_and_load(tmp_path):
     loaded = config_mod.load(path)
 
     assert loaded.engine.ghub.dll_path == r"C:\Custom\LogitechLed.dll"
+    assert loaded.engine.ghub.settings_db == r"C:\Custom\settings.db"
     assert loaded.engine.ghub.device_types == ["rgb"]
     assert loaded.engine.ghub.restore_on_release is False
     assert "[engine.ghub]" in path.read_text(encoding="utf-8")

@@ -30,6 +30,7 @@
 
   "tray.update.balloon_title": "Доступне оновлення TintaView",
   "tray.update.balloon_body": "Доступна версія {latest} — у вас {current}. Щоб установити її, виберіть «Перевірити оновлення» в меню лотка.",
+  "tray.engine.balloon_title": "Підсвітка TintaView",
   "tray.update.unsupported": "Ця збірка не вміє перевіряти оновлення.",
   "tray.update.check_failed": "Зараз перевірити оновлення не вдалося: немає мережі, спрацювало обмеження запитів або ще немає жодного випуску. Спробуйте пізніше.",
   "tray.update.up_to_date": "У вас найновіша версія ({version}).",

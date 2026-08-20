@@ -661,10 +661,16 @@ def test_ghub_missing_dll_offers_winget_install(monkeypatch, capsys):
     OpenRGB's library-vs-app-vs-server ambiguity — so this should always say so and, when
     winget can act on it, offer to install G HUB itself."""
     from tintaview.core.config import Config
-    from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
     from tintaview.install import components
 
-    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    monkeypatch.setattr(
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=None, running=None, dynamic_lighting=None,
+            foreground_only=None, integration="unknown",
+        ),
+    )
     calls: list[str] = []
     monkeypatch.setattr(components, "winget_available", lambda: True)
     monkeypatch.setattr(components, "winget_package_installed", lambda pkg: False)
@@ -684,10 +690,16 @@ def test_ghub_missing_dll_offers_winget_install(monkeypatch, capsys):
 
 def test_ghub_declining_the_winget_install_is_respected(monkeypatch, capsys):
     from tintaview.core.config import Config
-    from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
     from tintaview.install import components
 
-    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    monkeypatch.setattr(
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=None, running=None, dynamic_lighting=None,
+            foreground_only=None, integration="unknown",
+        ),
+    )
     monkeypatch.setattr(components, "winget_available", lambda: True)
     monkeypatch.setattr(components, "winget_package_installed", lambda pkg: False)
     monkeypatch.setattr(
@@ -703,10 +715,16 @@ def test_ghub_declining_the_winget_install_is_respected(monkeypatch, capsys):
 def test_ghub_missing_dll_without_winget_points_at_manual_download(monkeypatch, capsys):
     """No winget (e.g. Linux, or macOS): no prompt, just a direct link."""
     from tintaview.core.config import Config
-    from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
     from tintaview.install import components
 
-    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: None)
+    monkeypatch.setattr(
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=None, running=None, dynamic_lighting=None,
+            foreground_only=None, integration="unknown",
+        ),
+    )
     monkeypatch.setattr(components, "winget_available", lambda: False)
 
     wizard._ensure_ghub_ready(Config(), assume_yes=False)
@@ -716,32 +734,43 @@ def test_ghub_missing_dll_without_winget_points_at_manual_download(monkeypatch, 
     assert "winget" not in out.lower()
 
 
-def test_ghub_dll_found_but_unresponsive_explains_start_order(monkeypatch, capsys):
+def test_ghub_dll_found_but_not_running_names_the_blocker(monkeypatch, capsys):
     from tintaview.core.config import Config
-    from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
 
-    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"))
-    monkeypatch.setattr(ghub_engine.GHubEngine, "probe", lambda self: False)
+    path = Path("C:/fake/LogitechLed.dll")
+    monkeypatch.setattr(
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=path, running=False, dynamic_lighting=None,
+            foreground_only=None, integration="unknown",
+        ),
+    )
 
     wizard._ensure_ghub_ready(Config(), assume_yes=False)
 
     out = capsys.readouterr().out
-    assert "Game lighting control" in out
-    assert "before TintaView" in out
+    assert "not running" in out
 
 
 def test_ghub_ready_says_so_and_asks_nothing(monkeypatch, capsys):
     from tintaview.core.config import Config
-    from tintaview.engines import ghub as ghub_engine
+    from tintaview.engines import ghub_env
 
-    monkeypatch.setattr(ghub_engine, "discover_dll_path", lambda cfg: Path("C:/fake/LogitechLed.dll"))
-    monkeypatch.setattr(ghub_engine.GHubEngine, "probe", lambda self: True)
+    path = Path("C:/fake/LogitechLed.dll")
+    monkeypatch.setattr(
+        ghub_env, "inspect",
+        lambda cfg: ghub_env.GHubEnvironment(
+            dll_path=path, running=True, dynamic_lighting=False,
+            foreground_only=None, integration="unknown",
+        ),
+    )
 
     wizard._ensure_ghub_ready(Config(), assume_yes=False)
 
     out = capsys.readouterr().out
     assert "you're set" in out.lower()
-    assert "Game lighting control" not in out  # nothing left to explain
+    assert "not running" not in out
 
 
 def test_engine_step_can_pick_ghub(monkeypatch, capsys, _isolated):

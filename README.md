@@ -268,6 +268,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `engine.order` | `["chroma", "ghub", "openrgb"]` | Probe order for `auto` mode. |
 | `engine.chroma.devices` | `["mouse", "headset"]` | Chroma device endpoints to drive. |
 | `engine.ghub.dll_path` | *(auto-detected)* | Path to the Logitech LED Illumination SDK DLL; empty searches `LGHUB\\sdks\\` then the G HUB install root, the registry, then `PATH`. |
+| `engine.ghub.settings_db` | *(auto-detected)* | Path to G HUB's `settings.db` (Integrations list); empty uses `%LOCALAPPDATA%\\LGHUB\\settings.db`. Read-only — never written. |
 | `engine.ghub.device_types` | `["monochrome", "rgb", "perkey"]` | Which SDK device *classes* to drive — a capability bitmask, not per-device targeting like OpenRGB's `device_types`; there's no way to address "just the mouse". |
 | `engine.ghub.restore_on_release` | `true` | Save the current lighting on open, restore it on close. |
 | `engine.openrgb.host` / `.port` | `127.0.0.1` / `6742` | Where the OpenRGB SDK server is listening. |
@@ -299,7 +300,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `tintaview` | Run the tray UI with the status broker in-process (the normal case). |
 | `tintaview run [--headless]` | Same as above; `--headless` runs the broker only, with no GUI. |
 | `tintaview setup [--platform P] [-y]` | Run the install/reconfigure wizard. `--platform` overrides platform detection; `-y` accepts every default. |
-| `tintaview doctor [-v]` | Diagnose an install — see [Troubleshooting](docs/TROUBLESHOOTING.md). `-v` also offers a live 30-second hook test. |
+| `tintaview doctor [-v] [--paint]` | Diagnose an install — see [Troubleshooting](docs/TROUBLESHOOTING.md). `-v` also offers a live 30-second hook test. `--paint` cycles the lighting engine through red/yellow/green and asks whether you saw it. |
 | `tintaview hooks {install,status,uninstall} [--agent A] [--scope user\|project] [--hook-bin PATH] [--all-agents] [-y]` | Manage one agent's (or all agents') hook configuration, with a diff-and-confirm flow. |
 | `tintaview update [--check-only]` | Check for, and install, a newer version. |
 | `tintaview --version` | Print the installed version. |

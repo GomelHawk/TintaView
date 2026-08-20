@@ -17,6 +17,7 @@ failure (bad config) doesn't get buried under a wall of downstream noise caused 
     6. AGENT HOOKS   — per-agent install status (+ Codex's feature flag)
     7. STATS         — can each agent's usage provider produce rows
     8. LIVE HOOK TEST (--verbose only) — an interactive, best-effort real-event check
+    9. PAINT (--paint only) — open the configured engine, cycle colours, ask "did you see it?"
 
 Nothing here ever prints a credential's *value* — only, where useful, the path to the
 file that holds one. Every network/subprocess call is wrapped so one flaky check can
@@ -246,26 +247,24 @@ def _engine_unavailable_reason(name: str, env: Environment, cfg: Config) -> str:
             return f"the Chroma REST SDK is Windows-only; this machine reports platform={env.platform}"
         return "Razer Synapse doesn't seem to be running (its Chroma Connect SDK is what's probed) — start Synapse"
     if name == "ghub":
-        # Two different failures wear the same "not available" label here too: the SDK
-        # DLL missing (G HUB isn't installed at all) is fixed by installing G HUB; the
-        # DLL present but refusing to init is almost always G HUB not running yet, or
-        # having started *after* TintaView already gave up and backed off.
+        # Prefer measured blockers (process list, Dynamic Lighting, Integrations) over
+        # the old guess that collapsed "DLL missing" and "init refused" into one label.
         if not env.supports_ghub:
             return (
                 "the Logitech LED Illumination SDK is Windows-only; this machine "
                 f"reports platform={env.platform}"
             )
-        from ..engines.ghub import discover_dll_path
+        from ..engines.ghub_env import blockers, inspect
 
-        path = discover_dll_path(cfg.engine.ghub)
-        if path is None:
-            return (
-                "the Logitech LED Illumination SDK DLL wasn't found (checked G HUB's "
-                "install directory, the registry, and PATH) — install Logitech G HUB "
-                "from https://www.logitechg.com/en-us/innovation/g-hub.html"
-            )
+        info = inspect(cfg.engine.ghub)
+        problems = blockers(info)
+        if problems:
+            return problems[0]
+        # DLL present, G HUB not known-stopped, nothing else measured — still not
+        # probing as available, so fall back to the start-order advice.
+        path = info.dll_path
         return (
-            f"found the SDK at {path}, but it refused to initialise — make sure G HUB "
+            f"found the SDK at {path}, but it isn't usable right now — make sure G HUB "
             'is running with "Game lighting control" enabled in its settings, and that '
             "G HUB was started before TintaView (restart TintaView if you started G HUB "
             "afterwards)"
@@ -339,9 +338,25 @@ def _check_engine(reporter: _Reporter, cfg: Config, env: Environment) -> None:
 
     if mode == "ghub":
         from ..engines.ghub import format_setup_notes
+        from ..engines.ghub_env import blockers, inspect
 
-        for line in format_setup_notes().splitlines():
-            reporter.ok("ENGINE", line)
+        info = inspect(cfg.engine.ghub)
+        problems = blockers(info)
+        if problems:
+            for line in problems:
+                reporter.warn("ENGINE", line, "see docs/TROUBLESHOOTING.md#g-hub-lights-dont-change")
+        else:
+            # Nothing measured as wrong — print the full checklist only when every
+            # signal came back unknown, so the user still has something actionable.
+            if (
+                info.running is None
+                and info.dynamic_lighting is None
+                and info.integration == "unknown"
+            ):
+                for line in format_setup_notes().splitlines():
+                    reporter.ok("ENGINE", line)
+            else:
+                reporter.ok("ENGINE", "no G HUB environmental blockers measured")
 
 
 # --------------------------------------------------------------------------- 5. hook script
@@ -578,10 +593,63 @@ def _live_hook_test(reporter: _Reporter, cfg: Config, daemon_ok: bool) -> None:
         )
 
 
+# --------------------------------------------------------------------------- 9. paint self-test
+
+
+def _paint_selftest(reporter: _Reporter, cfg: Config) -> None:
+    """Drive the configured engine through a short colour cycle and ask the user.
+
+    SDK success and "the user saw light" are not the same thing — G HUB in particular
+    can return true from SetLighting while the mouse stays dark (integration off,
+    Dynamic Lighting, onboard memory). This is the only check that closes that gap.
+    """
+    from ..engines.factory import make_engine
+
+    engine = make_engine(cfg)
+    print(
+        f"\nPaint self-test via {engine.display_name}. Quit any other TintaView tray "
+        "first — two clients fighting over the same SDK usually means init fails."
+    )
+    try:
+        if not engine.open():
+            reporter.fail(
+                "PAINT", f"could not open {engine.display_name}",
+                "fix the ENGINE lines above, then re-run `tintaview doctor --paint`",
+            )
+            return
+        hold = 2.0
+        for name, rgb in (
+            ("red", (255, 0, 0)),
+            ("yellow", (255, 200, 0)),
+            ("green", (0, 255, 0)),
+        ):
+            print(f"  → {name}…", flush=True)
+            engine.set_color(*rgb)
+            time.sleep(hold)
+    except Exception as e:
+        reporter.fail("PAINT", f"paint cycle raised: {e!r}", "see the log for details")
+        return
+    finally:
+        try:
+            engine.close()
+        except Exception as e:
+            log.debug("doctor paint: close failed: %r", e)
+
+    answer = input("  Did your lights change colour? [Y/n] ").strip().lower()
+    if answer in ("", "y", "yes"):
+        reporter.ok("PAINT", "user confirmed the lights moved")
+    else:
+        reporter.fail(
+            "PAINT", "user did not see the lights change",
+            "for G HUB: check Integrations, Game lighting control, onboard memory, "
+            "and Windows Dynamic Lighting — then restart TintaView and retry",
+        )
+
+
 # --------------------------------------------------------------------------- entry point
 
 
-def run_doctor(verbose: bool = False) -> int:
+def run_doctor(verbose: bool = False, paint: bool = False) -> int:
     """Run every check and print a report. 0 if everything essential is healthy, else 1."""
     reporter = _Reporter(verbose)
 
@@ -594,6 +662,8 @@ def run_doctor(verbose: bool = False) -> int:
     _check_stats(reporter, cfg)
     if verbose:
         _live_hook_test(reporter, cfg, daemon_ok)
+    if paint:
+        _paint_selftest(reporter, cfg)
 
     print()
     if reporter.fails:

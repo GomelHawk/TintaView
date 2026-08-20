@@ -150,7 +150,7 @@ def test_full_session_lifecycle(server_engine):
     assert _wait_until(lambda: _get_state(server)["effective"] == "idle")
     state = _get_state(server)
     assert state["agents"]["claude"]["sessions"] == {"s1": "idle"}
-    assert state["engine"] == {"name": "fake", "active": True}
+    assert state["engine"] == {"name": "fake", "active": True, "note": None}
     assert engine.opens == 1  # opened lazily on the first non-"none" status
 
     _event(server, "working", agent="claude", sid="s1")
@@ -175,7 +175,7 @@ def test_full_session_lifecycle(server_engine):
     _event(server, "session-end", agent="claude", sid="s1")
     assert _wait_until(lambda: _get_state(server)["effective"] == "none")
     state = _get_state(server)
-    assert state["engine"] == {"name": "fake", "active": False}
+    assert state["engine"] == {"name": "fake", "active": False, "note": None}
     assert engine.closes == 1
 
 
@@ -404,6 +404,30 @@ def test_controller_thread_safety_smoke():
     controller.shutdown()
 
 
+def test_engine_status_surfaces_status_note_on_state():
+    """G HUB paint failures land on the engine as `status_note`; /state must carry
+    them so the tray can balloon + append the tooltip without a second channel."""
+    cfg = make_cfg()
+    injected = FakeEngine()
+    injected.status_note = "G HUB is ignoring lighting commands"
+    controller = LightController(cfg, engine=injected)
+    controller.apply("idle")
+
+    assert controller.engine_status() == {
+        "name": "fake",
+        "active": True,
+        "note": "G HUB is ignoring lighting commands",
+    }
+
+    server = StatusServer(cfg, controller=controller)
+    assert server.start() is True
+    try:
+        state = _get_state(server)
+        assert state["engine"]["note"] == "G HUB is ignoring lighting commands"
+    finally:
+        server.stop()
+
+
 def test_reset_engine_rebuilds_from_current_config():
     """`reset_engine()` (added for the settings dialog's live engine-mode switch)
     must close whatever is open and drop the cached engine, so the *next* status
@@ -422,7 +446,7 @@ def test_reset_engine_rebuilds_from_current_config():
     controller.reset_engine()
 
     assert injected.closes == 1
-    assert controller.engine_status() == {"name": "none", "active": False}
+    assert controller.engine_status() == {"name": "none", "active": False, "note": None}
 
     controller.apply("working")
     # The old FakeEngine is never touched again — it was dropped, not reused. A real
