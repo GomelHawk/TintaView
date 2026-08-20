@@ -404,6 +404,100 @@ def test_controller_thread_safety_smoke():
     controller.shutdown()
 
 
+def test_reset_engine_rebuilds_from_current_config():
+    """`reset_engine()` (added for the settings dialog's live engine-mode switch)
+    must close whatever is open and drop the cached engine, so the *next* status
+    change rebuilds from `cfg.engine.mode` via the real factory rather than reusing
+    the stale instance.
+    """
+    cfg = make_cfg()
+    injected = FakeEngine()
+    controller = LightController(cfg, engine=injected)
+
+    controller.apply("working")
+    assert injected.opens == 1
+    assert injected.active is True
+
+    cfg.engine.mode = "none"  # what SettingsDialog._apply_settings would have set
+    controller.reset_engine()
+
+    assert injected.closes == 1
+    assert controller.engine_status() == {"name": "none", "active": False}
+
+    controller.apply("working")
+    # The old FakeEngine is never touched again — it was dropped, not reused. A real
+    # NullEngine got built in its place via the factory (not just left at None).
+    assert injected.opens == 1
+    assert controller._engine is not None
+    assert controller._engine is not injected
+    assert controller.engine_status()["name"] == "none"
+
+
+def test_reset_engine_cannot_run_during_a_blink_tick():
+    """`reset_engine()` is called from the GUI thread while a confirm blink may be
+    mid-tick, and the blink loop reaches the engine through `_get_engine()`. The two
+    have to be mutually exclusive: a tick running alongside a reset can rebuild the
+    engine the instant after it was dropped, leaving one that is never opened and never
+    closed.
+
+    Driven deterministically rather than by sleeps — the engine's `set_color` is gated
+    on an event, so the blink thread is provably inside a tick when the reset starts.
+    """
+    cfg = make_cfg()
+    cfg.engine.mode = "none"
+    injected = FakeEngine()
+    in_tick = threading.Event()
+    release_tick = threading.Event()
+    record_color = injected.set_color
+
+    def gated_set_color(r: int, g: int, b: int) -> None:
+        in_tick.set()
+        release_tick.wait(5.0)
+        record_color(r, g, b)
+
+    injected.set_color = gated_set_color
+    controller = LightController(cfg, engine=injected)
+
+    controller.apply("confirm")
+    assert in_tick.wait(5.0), "the blink thread never reached a tick"
+
+    resetter = threading.Thread(target=controller.reset_engine, name="test-resetter")
+    resetter.start()
+    time.sleep(0.1)
+    assert resetter.is_alive(), "reset_engine ran while a blink tick was in flight"
+
+    release_tick.set()
+    resetter.join(5.0)
+    assert not resetter.is_alive()
+
+    assert controller.blinking is False
+    assert injected.closes == 1
+    time.sleep(cfg.colors.blink_ms / 1000.0 * 3)  # a late tick would land in here
+    assert controller._engine is None, "a late blink tick rebuilt the dropped engine"
+    controller.shutdown()
+
+
+def test_blink_picks_up_a_confirm_colour_changed_mid_blink():
+    """A colour changed in Settings has to reach the hardware on the next tick:
+    `apply("confirm")` won't restart an already-running blink, so the loop must re-read
+    the colour rather than caching it before its first iteration.
+    """
+    cfg = make_cfg()
+    cfg.colors.device.confirm = "#FF0000"
+    injected = FakeEngine()
+    controller = LightController(cfg, engine=injected)
+
+    controller.apply("confirm")
+    time.sleep(cfg.colors.blink_ms / 1000.0 * 4)
+    assert (255, 0, 0) in injected.colors
+
+    cfg.colors.device.confirm = "#00FF00"  # what _apply_settings would have written
+    time.sleep(cfg.colors.blink_ms / 1000.0 * 6)
+
+    controller.shutdown()
+    assert (0, 255, 0) in injected.colors, "the blink kept sending the old colour"
+
+
 def test_disabled_agent_events_are_ignored():
     """Unticking an agent must stop it driving the lighting, not just stop hook management.
 

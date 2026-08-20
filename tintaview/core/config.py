@@ -397,9 +397,23 @@ def dumps(cfg: Config) -> str:
     out.append("[agents]")
     out.append(f"enabled = {_toml_value(cfg.enabled_agents)}")
     out.append("")
-    for key in cfg.enabled_agents:
+    # Every *configured* agent keeps its table, not just the enabled ones. Disabling an
+    # agent is a one-click, no-confirmation action in the tray's Settings popup, and
+    # `[agents.X]` holds values the user cannot re-derive by hand: a WSL-split `home` is
+    # a UNC path the wizard computed over `wsl.exe`, and `state_db`/`quota_path` may be
+    # hand-picked. Dropping the table meant unticking an agent and re-ticking it later
+    # silently reverted all of that to defaults. Enabled first, so the file still reads
+    # in tray order; `_agent_table_keys` is materialised before the loop because
+    # `cfg.agent()` inserts into `cfg.agents` as it goes.
+    for key in _agent_table_keys(cfg):
         out += _table(f"agents.{key}", cfg.agent(key))
     return "\n".join(out).rstrip() + "\n"
+
+
+def _agent_table_keys(cfg: Config) -> list[str]:
+    """Agent keys needing an `[agents.X]` table: enabled ones first, then any other
+    agent that already has stored settings."""
+    return [*cfg.enabled_agents, *(k for k in cfg.agents if k not in cfg.enabled_agents)]
 
 
 def save(cfg: Config, path: Path | None = None) -> Path:

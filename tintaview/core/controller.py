@@ -52,11 +52,18 @@ class LightController:
     # --- engine lifecycle ---------------------------------------------------
 
     def _get_engine(self):
-        if self._engine is None:
-            from tintaview.engines.factory import make_engine  # lazy: see class docstring
+        """The engine, built on first use. Takes ``self._lock`` (an RLock, so the
+        already-locked callers below re-enter it harmlessly) because the blink thread
+        calls this too: without it, a tick racing ``reset_engine()`` could rebuild an
+        engine straight after it was dropped, leaving one that is never opened and
+        never closed.
+        """
+        with self._lock:
+            if self._engine is None:
+                from tintaview.engines.factory import make_engine  # lazy: see class docstring
 
-            self._engine = make_engine(self._cfg)
-        return self._engine
+                self._engine = make_engine(self._cfg)
+            return self._engine
 
     def _ensure_open_locked(self) -> None:
         engine = self._get_engine()
@@ -101,7 +108,6 @@ class LightController:
 
     def _blink_loop(self) -> None:
         on = False
-        confirm_rgb = self._cfg.colors.device_rgb(STATUS_CONFIRM)
         # Floor is a safety net against a near-zero config spinning the engine, not a
         # UX minimum — the test suite relies on configuring a genuinely fast blink.
         interval = max(self._cfg.colors.blink_ms, 10) / 1000.0
@@ -110,11 +116,19 @@ class LightController:
         # current half-period — matters most for a fast confirm -> idle transition.
         while not self._blink_stop.is_set():
             on = not on
-            color = confirm_rgb if on else _OFF
-            try:
-                self._get_engine().set_color(*color)
-            except Exception:
-                log.exception("blink set_color() failed")
+            with self._lock:
+                # Re-checked under the lock so a `reset_engine()` that has already
+                # dropped the engine can't have it rebuilt by this tick.
+                if self._blink_stop.is_set():
+                    break
+                # Read per tick rather than cached before the loop: a confirm colour
+                # changed in Settings has to reach the device on the next tick, and
+                # `apply("confirm")` won't restart an already-running blink.
+                color = self._cfg.colors.device_rgb(STATUS_CONFIRM) if on else _OFF
+                try:
+                    self._get_engine().set_color(*color)
+                except Exception:
+                    log.exception("blink set_color() failed")
             self._blink_stop.wait(interval)
 
     @property
@@ -172,6 +186,18 @@ class LightController:
                     engine.heartbeat()
             except Exception:
                 log.exception("engine.heartbeat() failed")
+
+    def reset_engine(self) -> None:
+        """Drop the cached engine so the next status change rebuilds it from the
+        current config — lets a lighting-engine change made in Settings take effect
+        without restarting the tray. Safe mid-blink or mid-session: closes whatever is
+        open first, exactly as `shutdown()` does, but leaves the heartbeat thread
+        running (it already tolerates ``self._engine`` being briefly ``None``).
+        """
+        with self._lock:
+            self._stop_blink_locked()
+            self._close_locked()
+            self._engine = None
 
     def engine_status(self) -> dict:
         """``{"name", "active"}`` for the ``/state`` payload."""

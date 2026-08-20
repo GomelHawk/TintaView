@@ -87,6 +87,53 @@ def _console_command() -> list[str] | None:
     return [str(exe), "-m", "tintaview"]
 
 
+def run_console_setup() -> None:
+    """Open the full setup wizard — in a console of its own, not in this process.
+
+    The wizard is a deliberately text-mode `print`/`input` flow (see
+    `tintaview.ui.wizard`), and the tray runs windowed: at login it is launched by
+    `pythonw.exe`, which has no console at all. Calling `run_wizard()` in-process
+    therefore hits `input()` with no stdin, and the exception escapes the Qt slot and
+    takes the whole tray down — the menu item just made the app vanish. It would also
+    block the GUI thread for as long as the user took to answer.
+
+    So: run it from a terminal if this process has one (a dev run from a shell), and
+    otherwise spawn the *console* interpreter with a console of its own. Called by
+    `TrayApp._open_settings` once the settings dialog has closed asking for it — either
+    via its "Open Full Setup Wizard (Terminal)…" button or its "hooks aren't installed"
+    prompt (see `SettingsDialog.launch_wizard`).
+    """
+    try:
+        if _stdin_is_interactive():
+            from tintaview.ui.wizard import run_wizard
+
+            run_wizard()
+            return
+
+        command = _console_command()
+        if command is None:
+            QtWidgets.QMessageBox.information(
+                None, "TintaView",
+                "Run this in a terminal to change settings:\n\n    tintaview setup",
+            )
+            return
+
+        kwargs: dict[str, object] = {}
+        if sys.platform == "win32":
+            # Without this the child inherits "no console" from pythonw.exe and dies
+            # on its first prompt exactly as the in-process call did.
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        subprocess.Popen([*command, "setup"], **kwargs)  # type: ignore[arg-type]
+    except Exception:
+        # A failure to open the wizard must never kill the tray.
+        log.exception("could not open the setup wizard")
+        QtWidgets.QMessageBox.warning(
+            None, "TintaView",
+            "Could not open the setup wizard. Run `tintaview setup` in a terminal "
+            "instead; see the log for details.",
+        )
+
+
 class StatsWorker(QtCore.QObject):
     """Runs `StatsService.fetch_all()` off the GUI thread — it's real network/disk
     I/O (Claude/Codex JSONL scans, a Cursor RPC call) and must never block painting.
@@ -200,6 +247,7 @@ class TrayApp(QtCore.QObject):
 
         self._prev_effective = "none"
         self._blink_on = True
+        self._sound_action: QtGui.QAction | None = None  # set by _build_menu below
         self._usage_results: dict[str, UsageResult] = {}
         self._last_usage_fetch = 0.0
 
@@ -261,6 +309,10 @@ class TrayApp(QtCore.QObject):
         sound_action.setCheckable(True)
         sound_action.setChecked(self._cfg.ui.chime_on_confirm)
         sound_action.toggled.connect(self._set_sound)
+        # Kept as an attribute: the Settings dialog edits the same `chime_on_confirm`, so
+        # this check mark has to be re-synced after an accept or the menu starts
+        # contradicting the dialog.
+        self._sound_action = sound_action
         menu.addSeparator()
         menu.addAction("Settings…", self._open_settings)
         menu.addAction("Check for updates", self._check_updates)
@@ -297,48 +349,105 @@ class TrayApp(QtCore.QObject):
             log.exception("could not persist collapsed_agents")
 
     def _open_settings(self) -> None:
-        """Open the setup wizard — in a console of its own, not in this process.
+        """Open the native settings dialog, in-process.
 
-        The wizard is a deliberately text-mode `print`/`input` flow (see
-        `tintaview.ui.wizard`), and the tray runs windowed: at login it is launched by
-        `pythonw.exe`, which has no console at all. Calling `run_wizard()` in-process
-        therefore hits `input()` with no stdin, and the exception escapes the Qt slot and
-        takes the whole tray down — the menu item just made the app vanish. It would also
-        block the GUI thread for as long as the user took to answer.
+        Unlike the console wizard (see `run_console_setup` below), this needs no
+        subprocess: the tray already owns a running Qt event loop, so a `QDialog` is
+        just another window. Only the knobs `SettingsDialog` actually covers are
+        reachable here — hooks/autostart/engine-specific setup stay behind its "Open
+        Full Setup Wizard (Terminal)…" button, which raises `launch_wizard` for the
+        hand-off below.
 
-        So: run it from a terminal if this process has one (a dev run from a shell), and
-        otherwise spawn the *console* interpreter with a console of its own.
+        The wizard is started *after* the dialog has closed and its settings have been
+        applied: it re-reads the config from disk, so launching it from inside the
+        dialog would have it race the caller that is still applying the accepted copy.
         """
+        from tintaview.ui.settings_dialog import SettingsDialog
+
         try:
-            if _stdin_is_interactive():
-                from tintaview.ui.wizard import run_wizard
-
-                run_wizard()
-                return
-
-            command = _console_command()
-            if command is None:
-                QtWidgets.QMessageBox.information(
-                    None, "TintaView",
-                    "Run this in a terminal to change settings:\n\n    tintaview setup",
-                )
-                return
-
-            kwargs: dict[str, object] = {}
-            if sys.platform == "win32":
-                # Without this the child inherits "no console" from pythonw.exe and dies
-                # on its first prompt exactly as the in-process call did.
-                kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-            subprocess.Popen([*command, "setup"], **kwargs)  # type: ignore[arg-type]
+            dialog = SettingsDialog(self._cfg)
+            accepted = dialog.exec() == QtWidgets.QDialog.Accepted
+            if accepted:
+                self._apply_settings(dialog.result_cfg)
+            if dialog.launch_wizard:
+                run_console_setup()
         except Exception:
-            # A failure to open settings must never kill the tray, which is the entire
-            # bug being fixed here.
-            log.exception("could not open the setup wizard")
+            log.exception("could not open the settings dialog")
             QtWidgets.QMessageBox.warning(
                 None, "TintaView",
-                "Could not open the setup wizard. Run `tintaview setup` in a terminal "
+                "Could not open Settings. Run `tintaview setup` in a terminal "
                 "instead; see the log for details.",
             )
+
+    def _apply_settings(self, new_cfg: Config) -> None:
+        """Push a saved `SettingsDialog` result into the live config and refresh
+        whatever depends on it — `new_cfg` is a separate object (the dialog edits a
+        copy so Cancel changes nothing), so each field is copied across rather than
+        replacing `self._cfg` outright, which `StatusServer`/`LightController` also
+        hold a reference to.
+
+        Every field the dialog can write has to be mirrored here *and* have its live
+        consumer refreshed — a value that only lands in the config object is a setting
+        that appears to do nothing until the next restart, which is the whole failure
+        mode this dialog exists to avoid.
+        """
+        engine_changed = new_cfg.engine.mode != self._cfg.engine.mode
+
+        self._cfg.enabled_agents = list(new_cfg.enabled_agents)
+        self._cfg.agents = new_cfg.agents  # newly enabled agents' seeded defaults
+        self._cfg.ui.chime_on_confirm = new_cfg.ui.chime_on_confirm
+        self._cfg.stats.poll_seconds = new_cfg.stats.poll_seconds
+        self._cfg.update.check = new_cfg.update.check
+        self._cfg.engine.mode = new_cfg.engine.mode
+        for status in ("idle", "working", "confirm"):
+            setattr(self._cfg.colors, status, getattr(new_cfg.colors, status))
+            # The hardware palette is what `LightController` actually sends — copying
+            # only the icon colours would repaint the tray and leave the LEDs alone.
+            setattr(self._cfg.colors.device, status, getattr(new_cfg.colors.device, status))
+
+        self.usage_timer.setInterval(max(1000, int(self._cfg.stats.poll_seconds * 1000)))
+
+        # The context menu's own copy of chime_on_confirm. Signals blocked so setting the
+        # check mark doesn't re-enter `_set_sound` and save the config a second time.
+        if self._sound_action is not None:
+            self._sound_action.blockSignals(True)
+            self._sound_action.setChecked(self._cfg.ui.chime_on_confirm)
+            self._sound_action.blockSignals(False)
+
+        # A disabled agent's usage section would otherwise sit in the flyout until the
+        # next restart: `_apply_results` merges rather than replaces (deliberately — a
+        # partial fetch must not blank a section), so dropping it has to happen here.
+        for key in [k for k in self._usage_results if k not in self._cfg.enabled_agents]:
+            del self._usage_results[key]
+        self.flyout.set_results(self._usage_results)
+
+        if engine_changed:
+            controller = getattr(self._server, "controller", None)
+            if controller is not None:
+                try:
+                    controller.reset_engine()
+                except Exception:
+                    log.exception("could not reset lighting engine after a settings change")
+        # Unconditional, not just on an engine change: `reset_engine` only drops the old
+        # engine, and nothing else calls `apply()` until the *next* status transition, so
+        # a mid-session engine switch would leave the lights dark and a colour change
+        # wouldn't reach the hardware at all.
+        self._reapply_lighting()
+
+        self._stats_worker.fetch()
+        self._poll_state()
+
+    def _reapply_lighting(self) -> None:
+        """Re-send the current effective status to the controller, so a config change
+        takes effect on the hardware now rather than at the next status transition."""
+        controller = getattr(self._server, "controller", None)
+        state = getattr(self._server, "state", None)
+        if controller is None or state is None:
+            return
+        try:
+            controller.apply(state.effective())
+        except Exception:
+            log.exception("could not re-apply lighting after a settings change")
 
     def _show_about(self) -> None:
         from tintaview import __version__
@@ -532,14 +641,11 @@ class TrayApp(QtCore.QObject):
 
     def _agent_display_name(self, key: str) -> str:
         try:
-            from tintaview.agents.base import get as get_agent
+            from tintaview.agents import base as agents_base
 
-            adapter = get_agent(key)
-            if adapter is not None:
-                return adapter.display_name
+            return agents_base.display_name(key)
         except Exception:
-            pass
-        return key.title()
+            return key.title()
 
     def _chime(self) -> None:
         if not self._cfg.ui.chime_on_confirm:

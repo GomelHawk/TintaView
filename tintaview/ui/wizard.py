@@ -13,6 +13,12 @@ rules that matter more here than anywhere else in the codebase:
   installs;
 - re-running the wizard against an existing config shows *current* values as defaults,
   not fresh ones, so "reconfigure" doesn't mean "start over".
+
+IMPORTANT: `ui/settings_dialog.py` (the tray's "Settings…" popup) exposes a subset of
+this wizard's knobs — see AGENTS.md's "Two config UIs — touch both". Any `Config`
+field this wizard covers that the dialog *also* covers, adding one, renaming one, or
+changing its choices, needs the same change made there too, or the two surfaces
+silently drift apart.
 """
 
 from __future__ import annotations
@@ -25,7 +31,12 @@ from pathlib import Path
 
 from ..agents import base as agents_base
 from ..core import config as config_mod
-from ..engines.factory import available_engines
+from ..engines.factory import (
+    ENGINE_DISPLAY,
+    ENGINE_MODES,
+    available_engines,
+    engine_supported,
+)
 from ..install import codex_flag, detect
 from ..install import hooks as hooks_mod
 from ..install.detect import (
@@ -264,14 +275,18 @@ def _detect_agent(adapter, env: Environment) -> bool:
 
 
 #: Stats-only integrations: no hook layer at all, so they have no `AgentAdapter` and
-#: never go through `install.hooks`. Listed here (key, display label, detect
-#: callable) rather than forced into `AgentAdapter` with stub hook methods, which
-#: would make the wizard's hook-diff/confirmation step run for something that
-#: installs nothing.
+#: never go through `install.hooks`. Kept out of `AgentAdapter` rather than forced in
+#: with stub hook methods, which would make the wizard's hook-diff/confirmation step
+#: run for something that installs nothing.
 #:   - JetBrains AI Assistant is an IDE plugin with no scriptable event API at all.
 #:   - GitHub Copilot CLI has a real hook system, but it is dispatched over an
 #:     internal "SDK callback transport" for `@github/copilot-sdk` embedders, not a
 #:     documented external shell-command hook — see providers/copilot.py.
+#:
+#: Only the *detect callables* live here — they're needed nowhere but this interactive
+#: flow. The keys and display labels come from `agents_base.STATS_ONLY_AGENTS`, which is
+#: their single source: this list used to repeat both, and the settings dialog's copy
+#: then drifted out of step with it.
 def _jetbrains_detect() -> bool:
     from ..stats.providers import jetbrains as jetbrains_mod
 
@@ -290,9 +305,17 @@ def _copilot_detect() -> bool:
         return False
 
 
-_STATS_ONLY_AGENTS: tuple[tuple[str, str, Callable[[], bool]], ...] = (
-    ("jetbrains", "JetBrains AI Assistant", _jetbrains_detect),
-    ("copilot", "GitHub Copilot CLI", _copilot_detect),
+_STATS_ONLY_DETECT: dict[str, Callable[[], bool]] = {
+    "jetbrains": _jetbrains_detect,
+    "copilot": _copilot_detect,
+}
+
+#: `(key, display label, detect callable)`, assembled from the shared key/label list.
+#: A key added to `agents_base.STATS_ONLY_AGENTS` without a detect callable here shows
+#: up as "not found" rather than crashing the wizard.
+_STATS_ONLY_AGENTS: tuple[tuple[str, str, Callable[[], bool]], ...] = tuple(
+    (key, label, _STATS_ONLY_DETECT.get(key, lambda: False))
+    for key, label in agents_base.STATS_ONLY_AGENTS
 )
 
 
@@ -353,16 +376,13 @@ def _step_agents(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
 # --------------------------------------------------------------------------- step 4: engine
 
 
-_ENGINE_DISPLAY = {"chroma": "Razer Chroma", "ghub": "Logitech G HUB", "openrgb": "OpenRGB"}
+#: Engine names, labels and per-platform gating come from `engines.factory` — the tray's
+#: settings dialog reads the same tables, so neither config UI can rename or mis-gate an
+#: engine on its own. Only the wizard-specific prose lives here.
+_ENGINE_DISPLAY = ENGINE_DISPLAY
 
-#: `Environment.supports_*` to check per engine, and what to tell someone whose pick
-#: isn't answering yet — kept as one lookup rather than an `if`/`elif` ladder that grows
-#: another branch every time an engine is added.
-_ENGINE_SUPPORTED = {
-    "chroma": lambda env: env.supports_chroma,
-    "ghub": lambda env: env.supports_ghub,
-    "openrgb": lambda env: env.supports_openrgb,
-}
+#: What to tell someone whose pick isn't answering yet — one lookup rather than an
+#: `if`/`elif` ladder that grows another branch every time an engine is added.
 _ENGINE_NOT_RUNNING_HINT = {
     "chroma": "start Razer Synapse",
     "ghub": "start Logitech G HUB",
@@ -381,13 +401,12 @@ _MARK_UNSUPPORTED = "[unavailable here]"
 
 
 def _engine_label(name: str, env: Environment, probe_ok: bool) -> str:
-    if name == "auto":
-        return f"{_MARK_READY} Detect automatically (recommended) — use whichever is running"
-    if name == "none":
-        return f"{_MARK_READY} Status-only — no lights, just tracks activity"
     display = _ENGINE_DISPLAY.get(name, name)
-    supported = _ENGINE_SUPPORTED.get(name, lambda _env: True)(env)
-    if not supported:
+    if name == "auto":
+        return f"{_MARK_READY} {display} — use whichever is running"
+    if name == "none":
+        return f"{_MARK_READY} {display}, just tracks activity"
+    if not engine_supported(name, env):
         return f"{_MARK_UNSUPPORTED} {display} — not supported on {env.platform}"
     if probe_ok:
         return f"{_MARK_READY} {display} — running now"
@@ -407,11 +426,12 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
               "Logitech G HUB for G HUB, the OpenRGB app with its SDK server on for "
               "OpenRGB).")
 
-    # "auto" first and default. Pinning a single engine is what turns "the app I picked
-    # isn't running" into "no lighting at all, silently" — auto re-probes on every start
-    # and falls back on its own, so it survives Synapse being closed or OpenRGB being
-    # installed later. The explicit choices stay for anyone running both and wanting one.
-    order = ["auto", "chroma", "ghub", "openrgb", "none"]
+    # "auto" first and default (see `ENGINE_MODES`). Pinning a single engine is what
+    # turns "the app I picked isn't running" into "no lighting at all, silently" — auto
+    # re-probes on every start and falls back on its own, so it survives Synapse being
+    # closed or OpenRGB being installed later. The explicit choices stay for anyone
+    # running both and wanting one.
+    order = list(ENGINE_MODES)
     options = [(name, _engine_label(name, env, probes.get(name, False))) for name in order]
 
     current = cfg.engine.mode if cfg.engine.mode in order else None
@@ -426,8 +446,7 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
             + " each time it starts, and fall back to status-only if neither answers."
         )
     elif choice != "none":
-        supported = _ENGINE_SUPPORTED.get(choice, lambda _env: True)(env)
-        if not supported:
+        if not engine_supported(choice, env):
             print(
                 f"  Note: {choice} isn't supported on {env.platform} — TintaView will "
                 "fall back to status-only until you change this."

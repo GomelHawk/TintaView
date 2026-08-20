@@ -5,9 +5,10 @@
 ![TintaView](assets/promo.png)
 
 Your keyboard, mouse and headset lighting — plus a tray icon — mirror what your coding
-agent is doing, in the TintaView mark's own colours: **blue** when no agent is running,
-**green** when one is open but idle, **yellow** while it's working, and **red, blinking**
-when it needs you to act. Click the tray icon for a usage panel (5-hour /
+agent is doing, in the TintaView mark's own colours: **green** when a session is open and
+idle, **yellow** while it's working, and **red, blinking** when it needs you to act. When
+no agent session is running, devices return to their previous lighting and the tray shows
+the plain TintaView logo. Click the tray icon for a usage panel (5-hour /
 weekly limits, credits, or token totals, depending on the agent). Works with
 **Claude Code**, **Codex CLI** and **Cursor**; drives **Razer Chroma**, **Logitech G
 HUB** or **OpenRGB** devices; runs on **Windows, WSL, Linux and macOS**. The usage panel

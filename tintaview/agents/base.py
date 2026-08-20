@@ -99,6 +99,42 @@ def all_agents() -> list[AgentAdapter]:
     return [_REGISTRY[k] for k in sorted(_REGISTRY)]
 
 
+#: Stats-only integrations: usage-stats providers with no hook layer at all, so they
+#: have no `AgentAdapter` and never go through `install.hooks` — see
+#: `ui.wizard._STATS_ONLY_DETECT` for the fuller story.
+#:
+#: **This tuple is the single source of these keys and labels.** `ui.wizard` pairs it
+#: with its install-detection callables, `ui.settings_dialog` and `ui.flyout` render it
+#: through `display_name()` below, and `stats.service.DEFAULT_PROVIDERS` maps the same
+#: keys to provider classes. Adding a stats-only provider means: a row here, a detect
+#: callable in `ui.wizard._STATS_ONLY_DETECT`, and a provider in
+#: `stats.service.DEFAULT_PROVIDERS` — nowhere else, and no display name repeated.
+STATS_ONLY_AGENTS: tuple[tuple[str, str], ...] = (
+    ("jetbrains", "JetBrains AI Assistant"),
+    ("copilot", "GitHub Copilot CLI"),
+)
+
+#: Same pairs as a dict, for label lookups. Built from the tuple, not written twice.
+STATS_ONLY_NAMES: dict[str, str] = dict(STATS_ONLY_AGENTS)
+
+
+def display_name(key: str) -> str:
+    """Human label for any known agent/provider key, hook-backed or stats-only.
+
+    The one place a key becomes a label — the tray tooltip, the usage flyout's section
+    headers and the settings dialog's agent list all go through here, so a provider is
+    never spelled "JetBrains AI Assistant" in one surface and "Jetbrains" in another.
+    The last-resort `.title()` is for a key from a newer config than this build knows.
+    """
+    adapter = get(key)
+    if adapter is not None:
+        return adapter.display_name
+    label = STATS_ONLY_NAMES.get(key)
+    if label:
+        return label
+    return key.replace("_", " ").title() or key
+
+
 def _load_builtins() -> None:
     if _REGISTRY:
         return

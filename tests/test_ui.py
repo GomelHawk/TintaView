@@ -412,3 +412,158 @@ def test_brand_mark_shares_the_status_geometry_and_is_multicolour(qapp):
     assert icons.MARK_BRAND_DOT in hues, "the orange accent dot is missing"
     counts = {c: icons.MARK_BRAND_COLORS.count(c) for c in set(icons.MARK_BRAND_COLORS)}
     assert min(counts.values()) >= 2, f"a zone thinner than 2 spokes vanishes at 16px: {counts}"
+
+
+# --------------------------------------------------------------------------- settings apply
+
+
+class _FakeController:
+    """Only what `TrayApp._apply_settings` calls on a `LightController`."""
+
+    def __init__(self) -> None:
+        self.resets = 0
+        self.applied: list[str] = []
+        self.blinking = False
+
+    def reset_engine(self) -> None:
+        self.resets += 1
+
+    def apply(self, status: str) -> None:
+        self.applied.append(status)
+
+    def engine_status(self) -> dict:
+        return {"name": "none", "active": False}
+
+
+class _FakeState:
+    def __init__(self, effective: str = "idle") -> None:
+        self._effective = effective
+
+    def effective(self) -> str:
+        return self._effective
+
+
+@pytest.fixture
+def tray_with_controller(tray):
+    """The tray fixture's server, plus the controller/state `_apply_settings` refreshes."""
+    app_instance, server = tray
+    server.controller = _FakeController()
+    server.state = _FakeState("working")
+    return app_instance, server
+
+
+def _accepted_copy(app_instance, **changes) -> Config:
+    """A stand-in for what `SettingsDialog.result_cfg` hands back: a deep copy of the
+    live config with some fields changed."""
+    import copy
+
+    new_cfg = copy.deepcopy(app_instance._cfg)
+    for dotted, value in changes.items():
+        target = new_cfg
+        *path, leaf = dotted.split(".")
+        for part in path:
+            target = getattr(target, part)
+        setattr(target, leaf, value)
+    return new_cfg
+
+
+def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
+    """A field that only lands in the dialog's copy is a setting that appears to do
+    nothing until the next restart — the exact failure this dialog exists to avoid."""
+    app_instance, _server = tray_with_controller
+    new_cfg = _accepted_copy(
+        app_instance,
+        **{
+            "enabled_agents": ["codex"],
+            "ui.chime_on_confirm": True,
+            "stats.poll_seconds": 90,
+            "update.check": False,
+            "engine.mode": "openrgb",
+            "colors.idle": "#010203",
+            "colors.device.idle": "#040506",
+        },
+    )
+
+    app_instance._apply_settings(new_cfg)
+
+    cfg = app_instance._cfg
+    assert cfg.enabled_agents == ["codex"]
+    assert cfg.ui.chime_on_confirm is True
+    assert cfg.stats.poll_seconds == 90
+    assert cfg.update.check is False
+    assert cfg.engine.mode == "openrgb"
+    assert cfg.colors.idle == "#010203"
+    # The device palette is what the controller actually sends to the hardware.
+    assert cfg.colors.device.idle == "#040506"
+    assert app_instance.usage_timer.interval() == 90_000
+
+
+def test_apply_settings_resyncs_the_sound_menu_item(tray_with_controller):
+    """The context menu keeps its own check mark for `chime_on_confirm`; left alone it
+    starts contradicting the dialog that just changed it."""
+    app_instance, _server = tray_with_controller
+    assert app_instance._sound_action.isChecked() is False
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"ui.chime_on_confirm": True}))
+
+    assert app_instance._sound_action.isChecked() is True
+
+
+def test_apply_settings_resync_does_not_resave_config(tray_with_controller, monkeypatch):
+    """Setting the check mark must not re-enter `_set_sound` and write the file again."""
+    app_instance, _server = tray_with_controller
+    saves = []
+    monkeypatch.setattr("tintaview.core.config.save", lambda cfg, path=None: saves.append(cfg))
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"ui.chime_on_confirm": True}))
+
+    assert saves == []  # the dialog already saved; the tray must not save again
+
+
+def test_apply_settings_drops_a_disabled_agents_usage_section(tray_with_controller):
+    """`_apply_results` merges rather than replaces (a partial fetch must not blank a
+    section), so an unticked agent's flyout card has to be dropped here or it lingers
+    until the next restart."""
+    app_instance, _server = tray_with_controller
+    app_instance._apply_results({
+        "claude": UsageResult(agent="claude", rows=[UsageRow(label="5-hour", pct=10.0)]),
+        "codex": UsageResult(agent="codex", rows=[UsageRow(label="weekly", pct=20.0)]),
+    })
+    assert set(app_instance._usage_results) == {"claude", "codex"}
+
+    app_instance._apply_settings(_accepted_copy(app_instance, enabled_agents=["claude"]))
+
+    assert set(app_instance._usage_results) == {"claude"}
+
+
+def test_apply_settings_reapplies_lighting_after_an_engine_change(tray_with_controller):
+    """`reset_engine()` only drops the old engine. Without a re-apply, nothing calls
+    `apply()` until the *next* status transition, so a mid-session engine switch leaves
+    the lights dark."""
+    app_instance, server = tray_with_controller
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"engine.mode": "openrgb"}))
+
+    assert server.controller.resets == 1
+    assert server.controller.applied == ["working"]  # the live effective status
+
+
+def test_apply_settings_reapplies_lighting_after_a_colour_change(tray_with_controller):
+    """Same reason, without an engine change: a new colour has to reach the hardware
+    now, not at the next status transition."""
+    app_instance, server = tray_with_controller
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"colors.device.working": "#ABCDEF"}))
+
+    assert server.controller.resets == 0  # engine unchanged — nothing to rebuild
+    assert server.controller.applied == ["working"]
+
+
+def test_apply_settings_survives_a_server_without_a_controller(tray):
+    """`TrayApp` is documented as working against any object standing in for a real
+    StatusServer, so neither refresh may assume one is there."""
+    app_instance, _server = tray
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"engine.mode": "none"}))
+
+    assert app_instance._cfg.engine.mode == "none"

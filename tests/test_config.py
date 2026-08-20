@@ -85,3 +85,42 @@ order = ['chroma', 'openrgb']
 def test_fresh_default_config_already_includes_ghub():
     cfg = Config()
     assert cfg.engine.order == ["chroma", "ghub", "openrgb"]
+
+
+def test_disabling_an_agent_keeps_its_stored_settings(tmp_path):
+    """`dumps()` must write a table for every *configured* agent, not just the enabled
+    ones. Unticking an agent in the tray's Settings popup is one click with no diff, and
+    `[agents.X]` holds values the user can't re-derive by hand — a WSL-split `home` is a
+    UNC path the wizard computed over `wsl.exe`.
+    """
+    path = tmp_path / "config.toml"
+    cfg = Config()
+    cfg.path = path
+    cfg.enabled_agents = ["claude", "cursor"]
+    cfg.agent("cursor").state_db = "/somewhere/state.vscdb"
+    cfg.agent("claude").home = r"\\wsl.localhost\Ubuntu\home\u\.claude"
+
+    cfg.enabled_agents = ["claude"]  # the user unticks Cursor
+    config_mod.save(cfg)
+
+    reloaded = config_mod.load(path)
+    assert reloaded.enabled_agents == ["claude"]
+    assert reloaded.agent("cursor").state_db == "/somewhere/state.vscdb"
+    assert reloaded.agent("claude").home == r"\\wsl.localhost\Ubuntu\home\u\.claude"
+
+
+def test_enabled_agents_tables_come_first(tmp_path):
+    """Cosmetic but deliberate: the file should still read in tray order."""
+    cfg = Config()
+    cfg.enabled_agents = ["codex"]
+    cfg.agent("cursor").state_db = "/x"
+    cfg.enabled_agents = ["codex"]
+
+    tables = [line for line in config_mod.dumps(cfg).splitlines() if line.startswith("[agents.")]
+    assert tables == ["[agents.codex]", "[agents.cursor]"]
+
+
+def test_dumps_does_not_invent_tables_for_unconfigured_agents(tmp_path):
+    cfg = Config()  # enabled_agents defaults to ["claude"], cfg.agents is empty
+    tables = [line for line in config_mod.dumps(cfg).splitlines() if line.startswith("[agents.")]
+    assert tables == ["[agents.claude]"]

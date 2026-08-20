@@ -155,10 +155,6 @@ class _SectionLayout:
     height: float  # total section height, header included
 
 
-#: Overrides for keys with no `AgentAdapter` (stats-only integrations, see
-#: `ui.wizard._STATS_ONLY_AGENTS`) whose correct casing plain `.title()` can't produce.
-_DISPLAY_NAME_OVERRIDES = {"jetbrains": "JetBrains AI Assistant", "copilot": "GitHub Copilot CLI"}
-
 # --------------------------------------------------------------------------- provider badges
 
 #: One accent colour per provider, used only as a colour swatch — not sampled from any
@@ -286,19 +282,18 @@ def _provider_badge(key: str, size: int) -> QtGui.QPixmap:
 def _display_name(key: str) -> str:
     """Best-effort human name for an agent key ("claude" -> "Claude Code").
 
-    Reaches into the agent-adapter registry (`tintaview.agents`, not stats/core, so
-    safe to import here) for the canonical `display_name`; falls back to a titleised
-    key if that's ever unavailable, so a cosmetic lookup can never crash the flyout.
+    Delegates to `agents_base.display_name`, which is the single place a key becomes a
+    label for every surface (tray tooltip, settings dialog, these section headers) —
+    this used to carry its own adapter lookup plus a private copy of the stats-only
+    provider names, which is exactly how a name drifts between two windows. Still
+    wrapped in try/except: a cosmetic lookup must never crash the flyout's paint.
     """
     try:
-        from tintaview.agents.base import get as get_agent
+        from tintaview.agents.base import display_name as agent_display_name
 
-        adapter = get_agent(key)
-        if adapter is not None:
-            return adapter.display_name
+        return agent_display_name(key)
     except Exception:
-        pass
-    return _DISPLAY_NAME_OVERRIDES.get(key) or key.replace("_", " ").title() or key
+        return key.replace("_", " ").title() or key
 
 
 class Flyout(QtWidgets.QWidget):

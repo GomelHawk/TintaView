@@ -62,6 +62,51 @@ Non-goals: lighting effects beyond solid/blink, per-agent colours or device zoni
 or remote status, team dashboards, code signing / notarization, and distribution via PyPI,
 winget, the Windows Store or Homebrew.
 
+### Two config UIs — touch both
+
+TintaView has **two** places a user changes settings, and they overlap on purpose:
+
+- `ui/wizard.py` — the console wizard (`tintaview setup`). Covers everything: agent
+  hook install/diff, autostart, WSL split, platform detection, and every engine's
+  device-level knobs (OpenRGB host/port, G HUB `dll_path`, per-engine device-type lists).
+- `ui/settings_dialog.py` — the in-process Qt popup opened from the tray's
+  "Settings…" menu item (`TrayApp._open_settings` in `ui/tray.py`). Covers only the
+  knobs worth reaching often without a terminal: enabled agents/providers (+ their
+  order — a drag-reorderable list), chime, usage-poll interval, update-check, lighting
+  engine mode, and the three status colours (with a reset-to-defaults button). It hands
+  off to the console wizard via its "Open Full Setup Wizard (Terminal)…" button, and by
+  raising `launch_wizard` when a newly ticked agent has no hooks installed.
+
+**Whenever a `Config` field either UI exposes gets added, renamed, or its choices
+change, update both.** What can drift is now deliberately narrowed to the fields
+themselves — everything the two UIs *label* comes from one table each:
+
+| Shared | Lives in | Read by |
+| --- | --- | --- |
+| engine keys, order, labels, per-platform gating | `engines.factory.ENGINE_MODES` / `ENGINE_DISPLAY` / `engine_supported()` | both UIs |
+| agent + stats-only provider keys and display names | `agents.base.STATS_ONLY_AGENTS` / `display_name()` | both UIs, tray tooltip, usage flyout |
+
+Add a stats-only provider by adding a row to `agents.base.STATS_ONLY_AGENTS`, a detect
+callable to `ui.wizard._STATS_ONLY_DETECT` and a provider to
+`stats.service.DEFAULT_PROVIDERS` — no display name is written twice.
+
+Two things the popup **cannot** do, because they're side effects the wizard attaches to
+a field rather than the field itself, and each one silently produced a config that looks
+right and never works:
+
+- **Hooks.** Ticking an agent sets `enabled_agents` but installs nothing. The dialog
+  therefore checks `install.hooks.status()` for newly ticked agents and offers the
+  wizard; the diff-and-confirm install flow stays in the terminal.
+- **Per-agent defaults.** The wizard seeds `confirm_detection` from the adapter (Cursor
+  needs `stall`, not the `event` default) and fills a WSL-split UNC `home`. The dialog
+  seeds `confirm_detection` (`_seed_new_agent_defaults`); the UNC `home` still needs the
+  wizard, which is part of why the hook prompt points there.
+
+Related invariant, in `core/config.py`: `dumps()` writes an `[agents.X]` table for every
+*configured* agent, not just the enabled ones. Unticking an agent in the popup is one
+click with no diff, and that table holds values the user can't re-derive (a WSL-split
+UNC `home`, a hand-picked `state_db`/`quota_path`).
+
 ## Core contracts
 
 These are **on-disk / on-the-wire contracts**. They appear in URLs baked into every already

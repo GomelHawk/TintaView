@@ -23,6 +23,44 @@ log = logging.getLogger(__name__)
 #: picture (detected/not-running/unsupported) regardless of what's configured.
 _KNOWN_ENGINES = ("chroma", "ghub", "openrgb", "none")
 
+#: The pickable values of `engine.mode`, in the order both config UIs offer them.
+#: "auto" first and default — see `ui.wizard._step_engine` for why pinning one engine is
+#: the riskier answer.
+ENGINE_MODES: tuple[str, ...] = ("auto", "chroma", "ghub", "openrgb", "none")
+
+#: Human label per mode, shared by the console wizard (`ui.wizard`) and the tray's
+#: settings dialog (`ui.settings_dialog`) so an engine is never named one thing in one
+#: config UI and something else in the other. Each UI may append its own detail
+#: ("running now", "not supported on linux") after the label.
+ENGINE_DISPLAY: dict[str, str] = {
+    "auto": "Detect automatically (recommended)",
+    "chroma": "Razer Chroma",
+    "ghub": "Logitech G HUB",
+    "openrgb": "OpenRGB",
+    "none": "Status only — no lights",
+}
+
+#: Which `install.detect.Environment.supports_*` flag gates each engine. Chroma and
+#: G HUB are Windows-only SDKs, so on WSL/Linux/macOS "not detected" would be misleading:
+#: no amount of starting Synapse or G HUB on *this* machine makes them answer. Duck-typed
+#: on `env` so this module needn't import `install.detect`.
+ENGINE_SUPPORTED = {
+    "chroma": lambda env: env.supports_chroma,
+    "ghub": lambda env: env.supports_ghub,
+    "openrgb": lambda env: env.supports_openrgb,
+}
+
+
+def engine_supported(name: str, env) -> bool:
+    """Can `name` ever work on this platform? True for ungated modes ("auto", "none")."""
+    check = ENGINE_SUPPORTED.get(name)
+    if check is None:
+        return True
+    try:
+        return bool(check(env))
+    except AttributeError:  # an Environment from an older/newer build
+        return True
+
 
 def _build(name: str, cfg: Config) -> LightingEngine | None:
     """One engine instance for `name`, or None for an unknown name (skipped, not fatal —
