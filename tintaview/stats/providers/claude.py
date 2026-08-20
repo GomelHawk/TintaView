@@ -34,7 +34,9 @@ from pathlib import Path
 from typing import Any
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.i18n import t
 
+from .. import format as fmt
 from ..model import UsageProvider, UsageResult, UsageRow
 
 log = logging.getLogger(__name__)
@@ -133,30 +135,16 @@ def _money(m: dict[str, Any] | None) -> tuple[float, str] | None:
 
 def _fmt_reset(iso: str | None) -> str:
     """Mirror the in-app wording: relative within a day ('Resets in 3 hr 23 min'),
-    absolute weekday+time otherwise ('Resets Fri 3:59 PM')."""
+    absolute weekday+time otherwise ('Resets Fri 3:59 PM') — worded by `stats.format`,
+    which builds both forms without `strftime` (`%-I` is Linux-only and `%a`/`%p` follow
+    the C locale, not the language the user picked)."""
     if not iso:
         return ""
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
-        return iso
-    delta = dt - datetime.now(UTC)
-    secs = int(delta.total_seconds())
-    if secs <= 0:
-        return "Resets now"
-    if secs < 86400:
-        h, rem = divmod(secs, 3600)
-        m, _ = divmod(rem, 60)
-        if h:
-            return f"Resets in {h} hr {m} min"
-        return f"Resets in {m} min"
-    # Build the absolute form manually — strftime's %-I is Linux-only (Windows
-    # rejects it) and %a/%p are locale-dependent. Keep it portable + English.
-    local = dt.astimezone()
-    weekday = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][local.weekday()]
-    hour12 = local.hour % 12 or 12
-    ampm = "AM" if local.hour < 12 else "PM"
-    return f"Resets {weekday} {hour12}:{local.minute:02d} {ampm}"
+        return iso  # an unparseable value from the API, quoted as it arrived
+    return fmt.reset_text(dt)
 
 
 def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
@@ -177,8 +165,8 @@ def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
                       show_pct=True, severity=sev, kind="limit")
         )
 
-    window("session", "five_hour", "5-hour limit")
-    window("weekly_all", "seven_day", "Weekly · all models")
+    window("session", "five_hour", t("usage.claude.session"))
+    window("weekly_all", "seven_day", t("usage.claude.weekly_all"))
 
     # Per-model weekly buckets, if the plan exposes them. These do NOT have a
     # stable top-level key (the API hands out an obfuscated/rotating key per model,
@@ -196,9 +184,11 @@ def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
         resets = lim.get("resets_at")
         # A model with no usage yet has no reset time (mirrors the in-app
         # "You haven't used Fable yet" wording) — fall back to a plain label.
-        right = _fmt_reset(resets) if resets else "Not used yet"
+        right = _fmt_reset(resets) if resets else t("usage.claude.not_used_yet")
         rows.append(
-            UsageRow(label=f"Weekly · {model_name}", pct=float(pct), right=right,
+            # `model_name` is the API's own display name ("Opus", "Fable") — never
+            # translated, same as every other value an agent hands back.
+            UsageRow(label=t("usage.claude.weekly_model", model=model_name), pct=float(pct), right=right,
                       show_pct=True, severity=lim.get("severity") or "normal", kind="limit")
         )
 
@@ -225,8 +215,9 @@ def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
     if used and limit and pct is not None:
         sym = "$" if used[1] == "USD" else ""
         rows.append(
-            UsageRow(label="Usage credits", pct=float(pct),
-                      right=f"{sym}{used[0]:.2f} of {sym}{limit[0]:.2f}",
+            UsageRow(label=t("usage.claude.credits"), pct=float(pct),
+                      right=t("usage.claude.credits_right",
+                              used=f"{sym}{used[0]:.2f}", limit=f"{sym}{limit[0]:.2f}"),
                       show_pct=False, severity="normal", kind="credits")
         )
     return rows
@@ -245,10 +236,16 @@ def _norm_model(m: str | None) -> str | None:
     return m
 
 
+#: Fallback window key -> catalogue key for its row label. The dict keys stay internal
+#: identifiers rather than the label itself, so accumulating a window and naming it are
+#: separate concerns and the label can be translated at render time.
+_WINDOW_LABELS = {"5h": "usage.claude.window_5h", "week": "usage.claude.window_week"}
+
+
 def _reconstruct_from_jsonl(home: Path) -> dict[str, dict[str, float]]:
     """Approximate 5h and 7d token totals + cost from transcript usage lines."""
     now = datetime.now(UTC)
-    cutoffs = {"5-hour": now - timedelta(hours=5), "This week": now - timedelta(days=7)}
+    cutoffs = {"5h": now - timedelta(hours=5), "week": now - timedelta(days=7)}
     acc = {k: {"in": 0, "out": 0, "cache_r": 0, "cache_w": 0, "cost": 0.0} for k in cutoffs}
 
     pattern = os.path.join(home, "projects", "**", "*.jsonl")
@@ -293,11 +290,13 @@ def _reconstruct_from_jsonl(home: Path) -> dict[str, dict[str, float]]:
 
 def _fallback_rows(acc: dict[str, dict[str, float]]) -> list[UsageRow]:
     rows: list[UsageRow] = []
-    for label, a in acc.items():
+    for window, a in acc.items():
         total = a["in"] + a["out"] + a["cache_r"] + a["cache_w"]
         if total == 0 and a["cost"] == 0:
             continue
-        right = f"{total / 1e6:.2f}M tokens · ~${a['cost']:.2f}"
+        right = t("usage.claude.estimate_right",
+                  tokens=f"{total / 1e6:.2f}", cost=f"${a['cost']:.2f}")
+        label = t(_WINDOW_LABELS.get(window, window))
         rows.append(UsageRow(label=label, pct=0.0, right=right, show_pct=False, severity="normal", kind="info"))
     return rows
 
@@ -313,12 +312,15 @@ class ClaudeUsageProvider(UsageProvider):
             return self._fetch(agent_config, timeout)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
             log.exception("claude usage provider failed unexpectedly")
-            return UsageResult(agent=self.key, error=f"Claude usage unavailable: {e!r}")
+            return UsageResult(agent=self.key,
+                                error=t("usage.claude.error.unavailable", detail=repr(e)))
 
     def _fetch(self, agent_config: AgentConfig, timeout: float) -> UsageResult:
         home = _resolve_home(agent_config)
+        # `tier` is the plan name straight out of the credentials file ("Max", "Team") —
+        # a product name, so the surrounding words are translated and it is not.
         tier = _read_tier(home)
-        header = "Your usage limits" + (f" · {tier}" if tier else "")
+        header = t("usage.claude.header_tier", tier=tier) if tier else t("usage.claude.header")
 
         try:
             data = _fetch_usage(home, timeout)
@@ -328,10 +330,7 @@ class ClaudeUsageProvider(UsageProvider):
                     agent=self.key,
                     header=header,
                     source="official",
-                    error=(
-                        "Your Claude Code login has expired. Run `claude` (or restart "
-                        "Claude Code) to sign in again, then try this again."
-                    ),
+                    error=t("usage.claude.error.login_expired"),
                 )
             if e.code == 429:
                 # Rate-limited is not "no data" — don't let a noisier local estimate
@@ -341,7 +340,7 @@ class ClaudeUsageProvider(UsageProvider):
                     agent=self.key,
                     header=header,
                     source="official",
-                    error="Claude usage endpoint is rate-limited (HTTP 429) — try again shortly.",
+                    error=t("usage.claude.error.rate_limited"),
                 )
             return self._fallback(home, note=f"endpoint HTTP {e.code} ({e.reason})")
         except (urllib.error.URLError, OSError, ValueError, KeyError, TimeoutError) as e:
@@ -354,14 +353,14 @@ class ClaudeUsageProvider(UsageProvider):
 
     def _fallback(self, home: Path, note: str) -> UsageResult:
         log.info("claude usage: %s — falling back to local transcript estimate", note)
-        header = "Claude usage — estimate (official % unavailable)"
+        header = t("usage.claude.header_estimate")
         try:
             acc = _reconstruct_from_jsonl(home)
         except OSError as e:
             return UsageResult(agent=self.key, header=header, source="estimate",
-                                error=f"Claude usage unavailable: {e!r}")
+                                error=t("usage.claude.error.unavailable", detail=repr(e)))
         rows = _fallback_rows(acc)
         if not rows:
             return UsageResult(agent=self.key, header=header, source="estimate",
-                                error="No local Claude transcripts found to estimate usage.")
+                                error=t("usage.claude.error.no_transcripts"))
         return UsageResult(agent=self.key, rows=rows, header=header, source="estimate")

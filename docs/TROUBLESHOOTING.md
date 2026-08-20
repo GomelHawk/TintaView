@@ -232,6 +232,30 @@ icon and usage panel.
   underlying Cursor endpoint or token storage may have changed since this was written;
   lighting is unaffected either way.
 
+## Part of the interface is still in English
+
+TintaView's interface language (`ui.language`, set in the tray's **Settings…** window or
+by the first question of `tintaview setup`) covers the tray menu and tooltip, the About
+and update dialogs, the settings window and the usage panel. Three things stay English
+whatever you pick, and none of them is a bug:
+
+- **The setup wizard, `doctor` and the rest of the CLI**, deliberately — half their
+  output is a diff of your own config files, and a partial translation there is worse
+  than plain English (see the README's [Interface
+  language](../README.md#interface-language) section).
+- **Anything an agent's own API reported** — a plan name ("Max", "Copilot Free"), a model
+  name, release notes, an HTTP error string. Those are quoted exactly as they arrived.
+- **A usage section still showing cached numbers.** Rows are worded when they are
+  fetched, and the last good result is cached on disk, so right after switching language
+  a cached section keeps its old wording. "Refresh usage" in the tray menu, or the next
+  5-minute poll, replaces it.
+
+If a *whole* language looks like it did nothing — every string still English on an
+installed copy while a source checkout is fine — the wheel is missing its catalogues.
+Check `python -c "from tintaview.i18n import catalog; print(len(catalog('ru')))"`; a `0`
+there means the install is broken, and re-running the installer (which is also the update
+mechanism) is the fix.
+
 ## The WSL split (daemon on Windows, hooks in the distro)
 
 If your coding agents run inside a WSL distro but you want physical lighting, the

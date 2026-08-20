@@ -25,6 +25,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QRectF, Qt
 
 from tintaview.core.config import Config
+from tintaview.i18n import t
 from tintaview.ui import icons
 
 if TYPE_CHECKING:  # pragma: no cover - types only, no runtime import of the stats layer
@@ -519,7 +520,7 @@ class Flyout(QtWidgets.QWidget):
             p.drawText(
                 QRectF(x, CONTENT_TOP, w, self.height() - CONTENT_TOP - PAD),
                 Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
-                "No agents enabled.",
+                t("flyout.no_agents"),
             )
             p.end()
             return
@@ -570,7 +571,14 @@ class Flyout(QtWidgets.QWidget):
 
             if not result.ok:
                 p.setPen(SUBTLE)
-                reason = result.error or "No usage data."
+                # `result.error` is already localised by the provider that built it (or
+                # quotes an API's own text verbatim); this is only the no-reason case.
+                reason = result.error or t("flyout.no_usage_data")
+                # Elided, not cut: these reasons are a sentence long and the card is
+                # 380px, so most of them don't fit on the one line this section gets.
+                # A trailing "…" at least reads as "there is more" rather than as text
+                # that happens to stop mid-word.
+                reason = QtGui.QFontMetrics(f).elidedText(reason, Qt.ElideRight, int(w))
                 p.drawText(QRectF(x, section.rows_top, w, 20), Qt.AlignLeft | Qt.AlignVCenter, reason)
                 continue
 
@@ -582,12 +590,33 @@ class Flyout(QtWidgets.QWidget):
 
                 f.setPointSize(11)
                 p.setFont(f)
-                p.setPen(TEXT)
-                p.drawText(QRectF(x, ry, w, 18), Qt.AlignLeft | Qt.AlignVCenter, row.label)
 
                 right = row.right
                 if row.show_pct:
                     right = f"{right}   {row.pct:.0f}%" if right else f"{row.pct:.0f}%"
+
+                # The right-hand text is measured first; the label gets what's left, and
+                # is elided if it doesn't fit. Both used to be drawn into the same
+                # full-width rect — one left-aligned, one right-aligned — which only
+                # looks right while the two happen to be short enough not to meet. They
+                # stopped being short enough as soon as the labels were translated:
+                # "5-часовой лимит" and its reset time overprinted each other mid-row.
+                # The right half is also drawn a point smaller (it is the secondary half,
+                # like the section header): the width that buys back is what keeps a
+                # translated label from being elided in the first place.
+                right_font = QtGui.QFont(f)
+                right_font.setPointSize(10)
+                right_metrics = QtGui.QFontMetrics(right_font)
+                right_w = right_metrics.horizontalAdvance(right) if right else 0.0
+
+                metrics = QtGui.QFontMetrics(f)
+                label_w = max(24.0, w - right_w - (10 if right else 0))
+                p.setPen(TEXT)
+                p.drawText(
+                    QRectF(x, ry, label_w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                    metrics.elidedText(row.label, Qt.ElideRight, int(label_w)),
+                )
+                p.setFont(right_font)
                 p.setPen(SUBTLE)
                 p.drawText(QRectF(x, ry, w, 18), Qt.AlignRight | Qt.AlignVCenter, right)
 

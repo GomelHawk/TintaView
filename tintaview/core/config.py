@@ -217,6 +217,11 @@ class StatsConfig:
 class UIConfig:
     chime_on_confirm: bool = False
     collapsed_agents: list[str] = field(default_factory=list)  # flyout sections user collapsed
+    #: Interface language for the tray and the usage panel — a code from
+    #: `tintaview.i18n.LANGUAGES`. English by default, and English again for anything
+    #: unrecognised (`i18n.normalize`), so a typo in a hand-edited config still starts.
+    #: Only the *interface*: whatever an agent's own API reports is quoted as it arrived.
+    language: str = "en"
 
 
 @dataclass

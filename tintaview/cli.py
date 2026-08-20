@@ -27,6 +27,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
     cfg = config_mod.load()
     log_mod.setup("tintaview")
 
+    # Before anything can render a label: the stats providers build their row text on
+    # worker threads started by the tray, and `TrayApp` itself applies this too (so an
+    # embedder or a test constructing it directly gets the configured language), but the
+    # first usage poll can be in flight before that constructor is even reached.
+    from .i18n import set_language
+
+    set_language(cfg.ui.language)
+
     from .core.server import StatusServer
 
     server = StatusServer(cfg)

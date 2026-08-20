@@ -154,27 +154,29 @@ disk. Nothing lights up and no hooks are installed until you've run it.
 
 ## What the wizard asks
 
-`tintaview setup` runs the same seven-step flow whether it's launched by `install.ps1`,
+`tintaview setup` runs the same eight-step flow whether it's launched by `install.ps1`,
 by `install.sh`, or by hand:
 
-1. **Platform** — auto-detected (Windows / WSL / Linux / macOS), with a prompt to
+1. **Language** — which language the tray and usage panel speak (see
+   [Interface language](#interface-language)). The wizard itself stays in English.
+2. **Platform** — auto-detected (Windows / WSL / Linux / macOS), with a prompt to
    override it if detection guessed wrong.
-2. **Agents** — probes `~/.claude`, `~/.codex`, `~/.cursor` and `PATH`, pre-ticks
+3. **Agents** — probes `~/.claude`, `~/.codex`, `~/.cursor` and `PATH`, pre-ticks
    whatever it finds, and asks which you want TintaView to watch (at least one).
-3. **Lighting engine** — probes Chroma, G HUB and OpenRGB and shows each as detected /
+4. **Lighting engine** — probes Chroma, G HUB and OpenRGB and shows each as detected /
    not running / unsupported here; warns that OpenRGB and Razer Synapse / Logitech G HUB
    fight over the same hardware (G HUB itself doesn't — it can keep running), and that
    Linux OpenRGB usually needs udev rules and the `i2c-dev` kernel module. Pinning
    **Logitech G HUB** prints the ON/OFF checklist for G HUB (Game lighting control and
    the TintaView integration on; onboard memory, Windows Dynamic Lighting and OpenRGB
    off).
-4. **Install location** — where the program files go (separate from your settings,
+5. **Install location** — where the program files go (separate from your settings,
    which always live under `~/.tintaview` or `%LOCALAPPDATA%\TintaView`).
-5. **Autostart** — a per-user `Run` registry entry (Windows), a systemd `--user` unit plus
+6. **Autostart** — a per-user `Run` registry entry (Windows), a systemd `--user` unit plus
    an XDG autostart entry (Linux), or a launchd agent (macOS). No admin, no Scheduled Task.
-6. **Hooks** — for each agent, shows the exact before/after diff of the config file
+7. **Hooks** — for each agent, shows the exact before/after diff of the config file
    it's about to write and asks for confirmation before touching anything.
-7. **Verify** — saves the config, installs the hook script, then optionally waits
+8. **Verify** — saves the config, installs the hook script, then optionally waits
    (about a minute) for a real event from your agent so you know it actually worked.
 
 Answer every question with its default and skip the prompts entirely with
@@ -183,7 +185,7 @@ Answer every question with its default and skip the prompts entirely with
 ## Usage stats
 
 Click the tray icon to open the usage panel. Its header bar has the TintaView logo, a
-settings (⚙) button that opens the same setup wizard as the tray menu's "Settings…", and
+settings (⚙) button that opens the same settings window as the tray menu's "Settings…", and
 a close (✕) button — both also close the panel, same as clicking the tray icon again or
 clicking outside it. Each agent's section header shows a small coloured dot next to its
 name — the same **green/idle · yellow/working · red/confirm** colours as the tray icon
@@ -219,6 +221,39 @@ Usage is polled every 5 minutes (rate limits, not urgency) and the last good res
 cached, so the panel is never blank and a rate-limit response never overwrites good data
 with a worse estimate.
 
+## Interface language
+
+English by default, and available in **Spanish, Italian, German, Polish, Russian,
+Belarusian and Ukrainian**. Pick one in two places, both writing the same
+`ui.language` setting:
+
+- the tray menu's **Settings…** window, on the *General* tab — the change applies
+  immediately, no restart;
+- the console wizard's first question (`tintaview setup`).
+
+Each language is listed under its own name ("Polski", "Українська"), so it's findable
+even when the interface is currently in a language you don't read. Hand-editing
+`config.toml` works too, and a locale-style value is understood — `language = "ru_RU"`
+means Russian. Anything unrecognised falls back to English rather than refusing to start.
+
+What is translated: the tray icon's menu and tooltip, the About and update dialogs, the
+settings window, and the usage panel — including the row labels and the "usage
+unavailable" reasons the providers produce.
+
+What is **not**, on purpose:
+
+- **Anything an agent's own API reports** — a plan name ("Max", "Copilot Free"), a model
+  name, release notes, an HTTP error message. Those are quoted exactly as they arrived,
+  in whatever language they arrived in.
+- **The setup wizard, `doctor` and the rest of the CLI.** They are read once, from a
+  terminal, and half of what they print is a diff of your own config files; plain English
+  throughout is more useful there than a partial translation.
+
+One wrinkle worth knowing: usage rows are worded when they're fetched, and the last good
+result is cached on disk. Right after switching language, a section still showing cached
+numbers keeps its old wording until the next poll (or the tray menu's "Refresh usage")
+replaces it.
+
 ## Configuration
 
 One file: `~/.tintaview/config.toml` (Windows: `%LOCALAPPDATA%\TintaView\config.toml`),
@@ -247,6 +282,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `stats.poll_seconds` | `300` | How often usage providers are polled. |
 | `stats.enabled` | `true` | Turn the usage panel off entirely. |
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
+| `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `update.channel` | `stable` | Update channel (currently only `stable` is published). |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout and tooltip. The wizard sets this for you, in the order you type the agents' numbers. |

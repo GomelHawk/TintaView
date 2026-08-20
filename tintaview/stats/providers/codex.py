@@ -42,7 +42,9 @@ from pathlib import Path
 from typing import Any
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.i18n import t
 
+from .. import format as fmt
 from ..model import UsageProvider, UsageResult, UsageRow
 
 log = logging.getLogger(__name__)
@@ -203,25 +205,10 @@ def _fmt_reset(resets_at: Any = None, resets_in_seconds: Any = None) -> str:
             return ""
     else:
         return ""
-    secs = int((dt - now).total_seconds())
-    if secs <= 0:
-        return "Resets now"
-    if secs < 86400:
-        h, rem = divmod(secs, 3600)
-        m, _ = divmod(rem, 60)
-        return f"Resets in {h} hr {m} min" if h else f"Resets in {m} min"
-    local = dt.astimezone()
-    if secs >= 6 * 86400:
-        # Beyond a week a weekday name is ambiguous at best — "Resets Fri" for a monthly
-        # budget four weeks out reads as *this* Friday. Codex's own UI shows a date here,
-        # so match it.
-        month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][local.month - 1]
-        return f"Resets {local.day} {month}"
-    weekday = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][local.weekday()]
-    hour12 = local.hour % 12 or 12
-    ampm = "AM" if local.hour < 12 else "PM"
-    return f"Resets {weekday} {hour12}:{local.minute:02d} {ampm}"
+    # Beyond a week a weekday name is ambiguous at best — "Resets Fri" for a monthly
+    # budget four weeks out reads as *this* Friday. Codex's own UI shows a date there,
+    # so `date_after_days` makes `stats.format` match it.
+    return fmt.reset_text(dt, date_after_days=6)
 
 
 def _window_label(window: dict[str, Any], fallback: str) -> str:
@@ -239,17 +226,17 @@ def _window_label(window: dict[str, Any], fallback: str) -> str:
     minutes = int(minutes)
     if minutes % 43200 == 0:  # 30-day months, as Codex counts them
         months = minutes // 43200
-        return "Monthly limit" if months == 1 else f"{months}-month limit"
+        return t("usage.codex.limit.monthly") if months == 1 else t("usage.codex.limit.months", count=months)
     if minutes % 10080 == 0:
         weeks = minutes // 10080
-        return "Weekly limit" if weeks == 1 else f"{weeks}-week limit"
+        return t("usage.codex.limit.weekly") if weeks == 1 else t("usage.codex.limit.weeks", count=weeks)
     if minutes % 1440 == 0:
         days = minutes // 1440
-        return "Daily limit" if days == 1 else f"{days}-day limit"
+        return t("usage.codex.limit.daily") if days == 1 else t("usage.codex.limit.days", count=days)
     if minutes % 60 == 0:
         hours = minutes // 60
-        return "Hourly limit" if hours == 1 else f"{hours}-hour limit"
-    return f"{minutes}-minute limit"
+        return t("usage.codex.limit.hourly") if hours == 1 else t("usage.codex.limit.hours", count=hours)
+    return t("usage.codex.limit.minutes", count=minutes)
 
 
 def _pct_row(label: str, window: dict[str, Any]) -> UsageRow:
@@ -279,7 +266,8 @@ def _accumulate(acc: dict[str, int], totals: dict[str, Any]) -> None:
 
 def _total_row(label: str, acc: dict[str, int]) -> UsageRow:
     total = acc["total"] or (acc["input"] + acc["output"])
-    right = f"{total / 1e6:.2f}M tokens" if total >= 1_000_000 else f"{total / 1e3:.0f}k tokens"
+    right = (t("usage.tokens.millions", value=f"{total / 1e6:.2f}") if total >= 1_000_000
+             else t("usage.tokens.thousands", value=f"{total / 1e3:.0f}"))
     return UsageRow(label=label, pct=0.0, right=right, show_pct=False, severity="normal", kind="info")
 
 
@@ -294,13 +282,14 @@ class CodexUsageProvider(UsageProvider):
             return self._fetch(agent_config)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
             log.exception("codex usage provider failed unexpectedly")
-            return UsageResult(agent=self.key, error=f"Codex usage unavailable: {e!r}")
+            return UsageResult(agent=self.key,
+                                error=t("usage.codex.error.unavailable", detail=repr(e)))
 
     def _fetch(self, agent_config: AgentConfig) -> UsageResult:
         home = _resolve_home(agent_config)
         files = _iter_recent_session_files(home)
         if not files:
-            return UsageResult(agent=self.key, error="No recent Codex session files found.")
+            return UsageResult(agent=self.key, error=t("usage.codex.error.no_sessions"))
 
         now = datetime.now(UTC)
         cutoffs = {"5h": now - timedelta(hours=5), "7d": now - timedelta(days=7)}
@@ -330,7 +319,7 @@ class CodexUsageProvider(UsageProvider):
                     _accumulate(window_totals[label], totals)
 
         if latest_record is None:
-            return UsageResult(agent=self.key, error="No Codex token-usage records found in recent sessions.")
+            return UsageResult(agent=self.key, error=t("usage.codex.error.no_records"))
 
         payload = latest_record.get("payload") or {}
         rate_limits = payload.get("rate_limits") or {}
@@ -340,13 +329,16 @@ class CodexUsageProvider(UsageProvider):
         if primary or secondary:
             rows = []
             if primary:
-                rows.append(_pct_row(_window_label(primary, "5-hour limit"), primary))
+                rows.append(_pct_row(_window_label(primary, t("usage.codex.limit.primary")), primary))
             if secondary:
-                rows.append(_pct_row(_window_label(secondary, "Weekly"), secondary))
+                rows.append(_pct_row(_window_label(secondary, t("usage.codex.limit.secondary")), secondary))
             if rows:
-                return UsageResult(agent=self.key, rows=rows, header="Codex usage limits", source="official")
+                return UsageResult(agent=self.key, rows=rows,
+                                    header=t("usage.codex.header.limits"), source="official")
 
         # No official percentages available on this session (typically API-key auth,
         # verified null on this machine) — informational token totals instead.
-        rows = [_total_row("Last 5 hours", window_totals["5h"]), _total_row("Last 7 days", window_totals["7d"])]
-        return UsageResult(agent=self.key, rows=rows, header="Codex usage — token totals", source="activity")
+        rows = [_total_row(t("usage.codex.last_5h"), window_totals["5h"]),
+                _total_row(t("usage.codex.last_7d"), window_totals["7d"])]
+        return UsageResult(agent=self.key, rows=rows,
+                            header=t("usage.codex.header.totals"), source="activity")

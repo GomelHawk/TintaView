@@ -124,6 +124,7 @@ def _hook_bin_name() -> str:
 def test_writes_config_matching_answers(monkeypatch, _isolated):
     home, tv_home = _isolated
     _feed(monkeypatch, [
+        "",          # language: keep English (the shipped default)
         "",          # platform: accept detected
         "",          # agents: accept pre-ticked (default config ships enabled=["claude"])
         "openrgb",   # engine: explicit, non-default choice
@@ -149,12 +150,12 @@ def test_writes_config_matching_answers(monkeypatch, _isolated):
 
 def test_rerun_keeps_current_engine_as_default(monkeypatch, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "openrgb", "", "n", "y", "n"])
+    _feed(monkeypatch, ["", "", "", "openrgb", "", "n", "y", "n"])  # leading "" = keep English
     assert wizard.run_wizard() == 0
 
     # Reconfigure: blank answer on the engine question should keep "openrgb", not fall
     # back to whatever auto-detection would otherwise suggest.
-    _feed(monkeypatch, ["", "", "", "", "n", "y", "n"])
+    _feed(monkeypatch, ["", "", "", "", "", "n", "y", "n"])
     assert wizard.run_wizard() == 0
 
     cfg = config_mod.load(tv_home / "config.toml")
@@ -169,6 +170,7 @@ def test_agent_numbers_are_a_selection_not_a_toggle(monkeypatch, capsys, _isolat
     """
     home, tv_home = _isolated
     _feed(monkeypatch, [
+        "",   # language: keep English
         "",   # platform: accept
         "1",  # agents: claude, and only claude
         "",   # engine: accept default
@@ -180,6 +182,36 @@ def test_agent_numbers_are_a_selection_not_a_toggle(monkeypatch, capsys, _isolat
 
     assert wizard.run_wizard() == 0
     assert config_mod.load(tv_home / "config.toml").enabled_agents == ["claude"]
+
+
+def test_language_step_writes_the_choice(monkeypatch, _isolated):
+    """The wizard is where a first-time install picks its interface language — the tray's
+    Settings popup is the only other route, and it isn't open yet at install time. The
+    wizard's own prose stays English either way (see `wizard._step_language`)."""
+    from tintaview import i18n
+
+    home, tv_home = _isolated
+    try:
+        _feed(monkeypatch, ["ru", "", "", "", "", "n", "y", "n"])  # answered by key
+        assert wizard.run_wizard() == 0
+        assert config_mod.load(tv_home / "config.toml").ui.language == "ru"
+    finally:
+        i18n.set_language("en")  # global state; the rest of the suite asserts English
+
+
+def test_language_step_keeps_the_configured_language_on_enter(monkeypatch, _isolated):
+    from tintaview import i18n
+
+    home, tv_home = _isolated
+    cfg = config_mod.Config()
+    cfg.ui.language = "pl"
+    config_mod.save(cfg, tv_home / "config.toml")
+    try:
+        _feed(monkeypatch, ["", "", "", "", "", "n", "y", "n"])
+        assert wizard.run_wizard() == 0
+        assert config_mod.load(tv_home / "config.toml").ui.language == "pl"
+    finally:
+        i18n.set_language("en")
 
 
 def test_multiselect_returns_exactly_what_was_typed(monkeypatch):
@@ -252,7 +284,7 @@ def test_choice_reprompts_on_an_out_of_range_number(monkeypatch, capsys):
 
 def test_hook_diff_shown_but_not_applied_when_declined(monkeypatch, capsys, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "", "", "n", "n", "n"])  # "n" declines the hook diff
+    _feed(monkeypatch, ["", "", "", "", "", "n", "n", "n"])  # first "n" declines the hook diff
 
     assert wizard.run_wizard() == 0
 
@@ -264,7 +296,7 @@ def test_hook_diff_shown_but_not_applied_when_declined(monkeypatch, capsys, _iso
 
 def test_hook_diff_shown_and_applied_when_accepted(monkeypatch, capsys, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "", "", "n", "y", "n"])
+    _feed(monkeypatch, ["", "", "", "", "", "n", "y", "n"])
 
     assert wizard.run_wizard() == 0
 
@@ -714,7 +746,7 @@ def test_ghub_ready_says_so_and_asks_nothing(monkeypatch, capsys):
 
 def test_engine_step_can_pick_ghub(monkeypatch, capsys, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "ghub", "", "n", "y", "n"])  # typed by key, not position
+    _feed(monkeypatch, ["", "", "", "ghub", "", "n", "y", "n"])  # typed by key, not position
 
     assert wizard.run_wizard() == 0
 
@@ -736,6 +768,7 @@ def test_engine_step_offers_auto_and_defaults_to_it(monkeypatch, capsys, _isolat
     """
     home, tv_home = _isolated
     _feed(monkeypatch, [
+        "",   # language: keep English
         "",   # platform: accept
         "",   # agents: accept
         "",   # engine: accept the default
@@ -752,7 +785,7 @@ def test_engine_step_offers_auto_and_defaults_to_it(monkeypatch, capsys, _isolat
 
 def test_engine_step_still_allows_pinning_one(monkeypatch, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "2", "", "n", "y", "n"])  # 2 = Razer Chroma
+    _feed(monkeypatch, ["", "", "", "2", "", "n", "y", "n"])  # 2 = Razer Chroma
     assert wizard.run_wizard() == 0
     assert config_mod.load(tv_home / "config.toml").engine.mode == "chroma"
 
@@ -774,7 +807,7 @@ def test_unavailable_options_are_marked_but_still_selectable(monkeypatch, capsys
 
     # Typed by key, not position — inserting new engines must not silently renumber
     # what an existing test (or a copied instruction) types.
-    _feed(monkeypatch, ["", "", "openrgb", "", "n", "y", "n"])
+    _feed(monkeypatch, ["", "", "", "openrgb", "", "n", "y", "n"])  # leading "" = keep English
     assert wizard.run_wizard() == 0
 
     out = capsys.readouterr().out

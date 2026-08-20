@@ -34,6 +34,11 @@ version_file = "tintaview/_version.py"
 
 [tool.setuptools.package-data]
 tintaview = ["hooks/*", "assets/generated/*"]
+# Interface translations, read at runtime via importlib.resources. Its own entry
+# because the glob is relative to the package that owns the files, and these live in
+# tintaview.i18n, not tintaview. tests/test_i18n.py guards this line: without it the
+# wheel installs with no catalogues and every language silently falls back to English.
+"tintaview.i18n" = ["locales/*.json"]
 
 [tool.ruff]
 line-length = 100

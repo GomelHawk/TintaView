@@ -87,6 +87,7 @@ from typing import Any
 from urllib.parse import quote
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.i18n import t
 
 from ..model import UsageProvider, UsageResult, UsageRow
 
@@ -100,13 +101,12 @@ USER_URL = "https://api.github.com/copilot_internal/user"
 _CRED_TARGET_SUFFIX = ".github-copilot-app"
 _CRED_TYPE_GENERIC = 1  # CRED_TYPE_GENERIC, from wincred.h
 
-_QUOTA_LABELS = {
-    "chat": "Chat messages",
-    "completions": "Code completions",
-    "premium_interactions": "Premium requests",
-}
+#: Quota ids GitHub's endpoint reports, in the order its own usage page shows them. The
+#: labels are translated (`usage.copilot.quota.*`); a quota id this build doesn't know
+#: falls back to the id itself, title-cased — see `_quota_label`.
 _QUOTA_ORDER = ("chat", "completions", "premium_interactions")
-_PLAN_LABELS = {"free_limited_copilot": "Copilot Free"}
+#: Plan SKUs whose marketing name isn't derivable from the SKU string.
+_PLAN_LABELS = {"free_limited_copilot": "usage.copilot.plan.free_limited_copilot"}
 
 
 class _DbError(Exception):
@@ -245,11 +245,13 @@ def _shape(data: Any) -> Any:
 def _plan_label(payload: dict[str, Any]) -> str:
     sku = payload.get("access_type_sku")
     if isinstance(sku, str) and sku in _PLAN_LABELS:
-        return _PLAN_LABELS[sku]
+        return t(_PLAN_LABELS[sku])
     plan = payload.get("copilot_plan")
     if isinstance(plan, str) and plan:
-        return f"Copilot {plan.replace('_', ' ').title()}"
-    return "GitHub Copilot"
+        # The plan name itself is GitHub's ("business", "individual") — only the word
+        # around it is ours, and "Copilot" is the product name in every language.
+        return t("usage.copilot.plan.named", plan=plan.replace("_", " ").title())
+    return t("usage.copilot.plan.generic")
 
 
 def _fmt_days_until(iso_ts: Any) -> str:
@@ -261,16 +263,22 @@ def _fmt_days_until(iso_ts: Any) -> str:
         return ""
     seconds = (dt - datetime.now(UTC)).total_seconds()
     if seconds <= 0:
-        return "Resets today"
-    return f"Resets in {math.ceil(seconds / 86400)}d"
+        return t("usage.reset.today")
+    return t("usage.reset.in_days", days=math.ceil(seconds / 86400))
+
+
+def _quota_label(quota_id: str) -> str:
+    key = f"usage.copilot.quota.{quota_id}"
+    label = t(key)
+    return quota_id.replace("_", " ").title() if label == key else label
 
 
 def _quota_snapshot_row(quota_id: str, snapshot: Any, reset_text: str) -> UsageRow | None:
     if not isinstance(snapshot, dict) or not snapshot.get("has_quota"):
         return None  # `has_quota: false` means "not part of this plan", not "0 left"
-    label = _QUOTA_LABELS.get(quota_id, quota_id.replace("_", " ").title())
+    label = _quota_label(quota_id)
     if snapshot.get("unlimited"):
-        return UsageRow(label=label, pct=0.0, right="Unlimited", show_pct=False,
+        return UsageRow(label=label, pct=0.0, right=t("usage.copilot.unlimited"), show_pct=False,
                          severity="normal", kind="info")
     remaining = snapshot.get("percent_remaining")
     if not isinstance(remaining, int | float) or isinstance(remaining, bool):
@@ -340,8 +348,10 @@ def _read_totals_by_model(db_path: Path, since: datetime) -> dict[str, int]:
 
 def _fmt_tokens(total: int) -> str:
     if total >= 1_000_000:
-        return f"{total / 1e6:.2f}M tokens"
-    return f"{total / 1e3:.1f}k tokens" if total >= 1000 else f"{total} tokens"
+        return t("usage.tokens.millions", value=f"{total / 1e6:.2f}")
+    if total >= 1000:
+        return t("usage.tokens.thousands", value=f"{total / 1e3:.1f}")
+    return t("usage.tokens.plain", value=total)
 
 
 def _rows_from_totals(totals: dict[str, int]) -> list[UsageRow]:
@@ -362,7 +372,8 @@ class CopilotUsageProvider(UsageProvider):
             return self._fetch(agent_config, timeout)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
             log.exception("copilot usage provider failed unexpectedly")
-            return UsageResult(agent=self.key, error=f"GitHub Copilot usage unavailable: {e!r}")
+            return UsageResult(agent=self.key,
+                                error=t("usage.copilot.error.unavailable", detail=repr(e)))
 
     def _fetch(self, agent_config: AgentConfig, timeout: float) -> UsageResult:
         quota = self._fetch_quota(timeout)
@@ -391,7 +402,9 @@ class CopilotUsageProvider(UsageProvider):
         if not rows:
             return None
         return UsageResult(
-            agent=self.key, rows=rows, header=f"GitHub Copilot — {_plan_label(payload)}", source="official"
+            agent=self.key, rows=rows,
+            header=t("usage.copilot.header.official", plan=_plan_label(payload)),
+            source="official",
         )
 
     def _fetch_token_totals(self, agent_config: AgentConfig) -> UsageResult:
@@ -400,12 +413,12 @@ class CopilotUsageProvider(UsageProvider):
         try:
             totals = _read_totals_by_model(db_path, since)
         except _DbError:
-            return UsageResult(agent=self.key, error="GitHub Copilot usage data not found.")
+            return UsageResult(agent=self.key, error=t("usage.copilot.error.no_data"))
 
         rows = _rows_from_totals(totals)
         if not rows:
-            return UsageResult(agent=self.key, error="No recent GitHub Copilot activity found.")
+            return UsageResult(agent=self.key, error=t("usage.copilot.error.no_activity"))
         return UsageResult(
             agent=self.key, rows=rows,
-            header=f"GitHub Copilot — token totals ({_WINDOW_DAYS}d)", source="activity",
+            header=t("usage.copilot.header.totals", days=_WINDOW_DAYS), source="activity",
         )

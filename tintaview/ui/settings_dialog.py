@@ -1,8 +1,8 @@
 """A native settings window: the GUI counterpart to the console `setup` wizard
 (`tintaview.ui.wizard`), covering the knobs a user wants to reach often — enabled
 agents (drag-reorderable — that list order is also the tray tooltip/flyout order),
-lighting engine, status colours, chime, usage/update polling — without spawning a
-console.
+interface language, lighting engine, status colours, chime, usage/update polling —
+without spawning a console.
 
 Deliberately **not** a replacement for the wizard: hook installation, autostart and
 per-engine device wiring (OpenRGB host/port, G HUB dll_path, WSL split) only ever
@@ -41,20 +41,56 @@ from ..agents import base as agents_base
 from ..core import config as config_mod
 from ..core.config import ColorsConfig, Config, DeviceColorsConfig
 from ..engines.factory import ENGINE_DISPLAY, ENGINE_MODES, available_engines, engine_supported
+from ..i18n import LANGUAGES, t
+from ..i18n import normalize as normalize_language
 from ..install import detect
 
 log = logging.getLogger(__name__)
 
+
+#: Width the dialog is laid out for. Wider than it needs to be in English on purpose:
+#: German and Polish run 30-40% longer than the same English string, and `QCheckBox` and
+#: `QLabel` in a form's field column clip rather than wrap, so a width chosen against
+#: English produced "Ton, wenn ein Agent eine Bestätig" with the rest cut off.
+_MIN_WIDTH = 560
+
+#: Width the wrapped hints below are asked to size themselves for. A `QLabel` with
+#: `wordWrap` reports a one-line `sizeHint`, so a layout gives it one line's height and
+#: the second line lands on top of whatever is underneath — the fix is an explicit
+#: minimum height computed from the width it will actually get (`heightForWidth`).
+_HINT_WIDTH = _MIN_WIDTH - 40
+
+
+def _hint(text: str) -> QtWidgets.QLabel:
+    """A small, greyed explanatory line, spanning the whole form width."""
+    label = QtWidgets.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: palette(mid); font-size: 11px;")
+    label.setMinimumHeight(label.heightForWidth(_HINT_WIDTH))
+    return label
+
+
+def _engine_label(mode: str) -> str:
+    """Translated name for an engine mode.
+
+    `ENGINE_DISPLAY` stays the shared table of *which* engines exist and in what order
+    (see AGENTS.md's "Two config UIs"); this only translates the label, and falls back to
+    that table's English so an engine added to `engines.factory` without a catalogue key
+    still shows a real name here instead of a bare key.
+    """
+    fallback = ENGINE_DISPLAY.get(mode, mode)
+    key = f"engine.mode.{mode}"
+    label = t(key)
+    return fallback if label == key else label
+
 #: The three real statuses, in the order they escalate. `none` is deliberately absent:
 #: it is not a fourth visible state (see `ColorsConfig`'s docstring) and offering a
 #: colour picker for it would invite someone to set a colour nothing ever shows.
-_STATUS_ROWS: tuple[tuple[str, str], ...] = (
-    ("idle", "Idle"),
-    ("working", "Working"),
-    ("confirm", "Needs confirmation"),
-)
+_STATUSES: tuple[str, ...] = ("idle", "working", "confirm")
 
-_PROBE_PENDING_SUFFIX = "  (checking…)"
+#: Two spaces before the availability detail, so it reads as an aside on the engine's
+#: name rather than part of it. The detail itself is translated (`settings.engine.*`).
+_DETAIL_GAP = "  "
 
 
 def _safe_hex(value: str, fallback: str) -> str:
@@ -102,7 +138,9 @@ class _ColorButton(QtWidgets.QPushButton):
     def _pick(self) -> None:
         from PySide6 import QtGui
 
-        color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self._hex), self, "Choose colour")
+        color = QtWidgets.QColorDialog.getColor(
+            QtGui.QColor(self._hex), self, t("settings.colors.picker")
+        )
         if color.isValid():
             self.set_hex_color(color.name())
 
@@ -131,7 +169,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def __init__(self, cfg: Config, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TintaView Settings")
+        self.setWindowTitle(t("settings.title"))
         self._cfg = cfg
         #: Edited in place, then either saved (accept) or discarded (reject) — never
         #: the caller's live `cfg` directly, so a cancelled dialog changes nothing.
@@ -140,8 +178,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.launch_wizard = False
 
         tabs = QtWidgets.QTabWidget(self)
-        tabs.addTab(self._build_general_tab(), "General")
-        tabs.addTab(self._build_lighting_tab(), "Lighting")
+        tabs.addTab(self._build_general_tab(), t("settings.tab.general"))
+        tabs.addTab(self._build_lighting_tab(), t("settings.tab.lighting"))
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
@@ -149,18 +187,15 @@ class SettingsDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
 
-        advanced = QtWidgets.QPushButton("Open Full Setup Wizard (Terminal)…")
-        advanced.setToolTip(
-            "Open the full console setup wizard in a terminal for hooks, autostart, "
-            "and engine-specific options (OpenRGB host/port, G HUB path, ...)."
-        )
+        advanced = QtWidgets.QPushButton(t("settings.wizard"))
+        advanced.setToolTip(t("settings.wizard.tooltip"))
         advanced.clicked.connect(self._open_advanced_setup)
         buttons.addButton(advanced, QtWidgets.QDialogButtonBox.ResetRole)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(_MIN_WIDTH)
 
         self.engine_probe_done.connect(self._apply_engine_probe)
         self._start_engine_probe()
@@ -170,11 +205,6 @@ class SettingsDialog(QtWidgets.QDialog):
     def _build_general_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(widget)
-
-        agents_box = QtWidgets.QWidget()
-        agents_layout = QtWidgets.QVBoxLayout(agents_box)
-        agents_layout.setContentsMargins(0, 0, 0, 0)
-        agents_layout.setSpacing(2)
 
         # The full provider list: hook-capable agents (Claude Code, Codex CLI, Cursor)
         # plus the stats-only integrations (JetBrains, Copilot) that have no
@@ -205,18 +235,20 @@ class SettingsDialog(QtWidgets.QDialog):
             self._agent_list.addItem(item)
         row_height = self._agent_list.sizeHintForRow(0) if self._agent_list.count() else 22
         self._agent_list.setFixedHeight(min(160, row_height * max(1, len(ordered_keys)) + 6))
-        agents_layout.addWidget(self._agent_list)
-        hint = QtWidgets.QLabel("Drag to reorder — the order here is also the flyout/tooltip order.")
-        hint.setStyleSheet("color: palette(mid); font-size: 11px;")
-        agents_layout.addWidget(hint)
-        # Any slack the form layout hands this row goes below the hint, so the hint stays
-        # attached to the list it describes instead of drifting to the bottom of the row.
-        agents_layout.addStretch(1)
-        form.addRow("Enabled agents:", agents_box)
+        form.addRow(t("settings.agents"), self._agent_list)
+        form.addRow(_hint(t("settings.agents.hint")))
 
-        self._chime_check = QtWidgets.QCheckBox("Sound when an agent needs confirmation")
+        self._language_combo = self._build_language_combo()
+        form.addRow(t("settings.language"), self._language_combo)
+        form.addRow(_hint(t("settings.language.hint")))
+
+        self._chime_check = QtWidgets.QCheckBox(t("settings.chime"))
         self._chime_check.setChecked(self._cfg.ui.chime_on_confirm)
-        form.addRow("", self._chime_check)
+        # Spanning the whole form, not sitting in the field column beside an empty label:
+        # a QCheckBox clips its own text rather than wrapping or eliding it, and the field
+        # column is only as wide as the longest *label* leaves it — which cut the German
+        # wording short by a word.
+        form.addRow(self._chime_check)
 
         self._poll_spin = QtWidgets.QSpinBox()
         # Lower bound normally 30s (the usage APIs rate-limit and their windows are
@@ -225,15 +257,34 @@ class SettingsDialog(QtWidgets.QDialog):
         # accept, silently changing a setting the user never touched.
         stored_poll = int(self._cfg.stats.poll_seconds or 0)
         self._poll_spin.setRange(max(1, min(30, stored_poll)), max(3600, stored_poll))
-        self._poll_spin.setSuffix(" s")
+        self._poll_spin.setSuffix(f" {t('settings.poll.suffix')}")
         self._poll_spin.setValue(stored_poll)
-        form.addRow("Usage refresh interval:", self._poll_spin)
+        form.addRow(t("settings.poll"), self._poll_spin)
 
-        self._update_check = QtWidgets.QCheckBox("Check for updates on startup")
+        self._update_check = QtWidgets.QCheckBox(t("settings.update_check"))
         self._update_check.setChecked(self._cfg.update.check)
-        form.addRow("", self._update_check)
+        form.addRow(self._update_check)  # spanning, same reason as the chime row
 
         return widget
+
+    def _build_language_combo(self) -> QtWidgets.QComboBox:
+        """Interface-language picker, listing each language under its own name.
+
+        Endonyms, not English names ("Polski", not "Polish"): someone who opens this
+        because the interface is in a language they don't read is looking for the word
+        they *do* recognise. Only the interface changes — the hint under the combo says
+        so, because a usage panel that keeps reporting an agent's own API wording in
+        English would otherwise look like a half-applied setting.
+        """
+        combo = QtWidgets.QComboBox()
+        for code, name in LANGUAGES:
+            combo.addItem(name, userData=code)
+        # `normalize` so a hand-edited `language = "ru_RU"` (or a code this build doesn't
+        # know) selects the language it resolves to rather than silently landing on the
+        # first row and writing that back on accept.
+        index = combo.findData(normalize_language(self._cfg.ui.language))
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        return combo
 
     # --- Lighting tab --------------------------------------------------------
 
@@ -244,16 +295,16 @@ class SettingsDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout()
         self._engine_combo = QtWidgets.QComboBox()
         for mode in ENGINE_MODES:
-            label = ENGINE_DISPLAY.get(mode, mode)
+            label = _engine_label(mode)
             # Availability detail is filled in by `_apply_engine_probe` once the probe
             # comes back; the real engines say so meanwhile rather than reading as
             # "available".
             if mode not in ("auto", "none"):
-                label += _PROBE_PENDING_SUFFIX
+                label += _DETAIL_GAP + t("settings.engine.checking")
             self._engine_combo.addItem(label, userData=mode)
         index = self._engine_combo.findData(self._cfg.engine.mode)
         self._engine_combo.setCurrentIndex(index if index >= 0 else 0)
-        form.addRow("Lighting engine:", self._engine_combo)
+        form.addRow(t("settings.engine"), self._engine_combo)
         outer.addLayout(form)
 
         outer.addWidget(self._build_colors_group())
@@ -272,16 +323,16 @@ class SettingsDialog(QtWidgets.QDialog):
         accept, a colour the user actually changed is written to both — while a status
         they never touched keeps its LED-tuned device default untouched too.
         """
-        group = QtWidgets.QGroupBox("Status colours")
+        group = QtWidgets.QGroupBox(t("settings.colors.group"))
         grid = QtWidgets.QGridLayout(group)
 
         self._color_buttons: dict[str, _ColorButton] = {}
         #: An explicit device colour queued for a status, or None to derive it from the
         #: swatch. Only "Reset colours to defaults" queues one — it has to restore the
         #: *hardware* defaults, which aren't the icon's (see `_reset_colors`).
-        self._device_overrides: dict[str, str | None] = {s: None for s, _ in _STATUS_ROWS}
-        for row, (status, label) in enumerate(_STATUS_ROWS):
-            grid.addWidget(QtWidgets.QLabel(f"{label}:"), row, 0)
+        self._device_overrides: dict[str, str | None] = dict.fromkeys(_STATUSES)
+        for row, status in enumerate(_STATUSES):
+            grid.addWidget(QtWidgets.QLabel(f"{t(f'settings.colors.{status}')}:"), row, 0)
             icon_hex = getattr(self._cfg.colors, status)
             button = _ColorButton(_safe_hex(icon_hex, getattr(ColorsConfig(), status)))
             self._color_buttons[status] = button
@@ -290,19 +341,13 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # One line. The reason the two palettes differ is real (below, as a tooltip) but
         # it is not something to make someone read every time they open Settings.
-        note = QtWidgets.QLabel("Applies to the tray icon and your device lighting.")
-        note.setToolTip(
-            "Left alone, each status keeps its own default on each side: the icon uses "
-            "the TintaView mark's hues, the hardware a more saturated version that "
-            "reads better through an LED diffuser."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: palette(mid); font-size: 11px;")
-        grid.addWidget(note, len(_STATUS_ROWS), 0, 1, 3)
+        note = _hint(t("settings.colors.note"))
+        note.setToolTip(t("settings.colors.note_tooltip"))
+        grid.addWidget(note, len(_STATUSES), 0, 1, 3)
 
-        reset_colors = QtWidgets.QPushButton("Reset colours to defaults")
+        reset_colors = QtWidgets.QPushButton(t("settings.colors.reset"))
         reset_colors.clicked.connect(self._reset_colors)
-        grid.addWidget(reset_colors, len(_STATUS_ROWS) + 1, 0, 1, 3)
+        grid.addWidget(reset_colors, len(_STATUSES) + 1, 0, 1, 3)
         return group
 
     def _reset_colors(self) -> None:
@@ -354,12 +399,18 @@ class SettingsDialog(QtWidgets.QDialog):
         """
         for i in range(self._engine_combo.count()):
             mode = self._engine_combo.itemData(i)
-            label = ENGINE_DISPLAY.get(mode, mode)
+            label = _engine_label(mode)
             if mode not in ("auto", "none"):
                 if not engine_supported(mode, env):
-                    label += f"  (not supported on {getattr(env, 'platform', 'this platform')})"
+                    # The platform name is a config/detection value ("windows", "linux"),
+                    # not prose — passed through as it is everywhere else it appears.
+                    platform = getattr(env, "platform", "") or t("settings.engine.this_platform")
+                    detail = t("settings.engine.unsupported", platform=platform)
+                elif probes.get(mode):
+                    detail = t("settings.engine.running")
                 else:
-                    label += "  (running)" if probes.get(mode) else "  (not running)"
+                    detail = t("settings.engine.not_running")
+                label += _DETAIL_GAP + detail
             self._engine_combo.setItemText(i, label)
 
     # --- actions --------------------------------------------------------
@@ -384,10 +435,7 @@ class SettingsDialog(QtWidgets.QDialog):
         # Same floor the wizard's agent step enforces: with nothing enabled TintaView
         # tracks nothing, shows "No agents enabled." and looks broken rather than off.
         if not checked:
-            QtWidgets.QMessageBox.warning(
-                self, "TintaView",
-                "Pick at least one agent — TintaView needs one to have anything to show.",
-            )
+            QtWidgets.QMessageBox.warning(self, "TintaView", t("settings.error.no_agents"))
             return
 
         cfg = self.result_cfg
@@ -396,6 +444,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._seed_new_agent_defaults(newly_enabled)
 
         cfg.ui.chime_on_confirm = self._chime_check.isChecked()
+        cfg.ui.language = self._language_combo.currentData()
         cfg.stats.poll_seconds = self._poll_spin.value()
         cfg.update.check = self._update_check.isChecked()
         cfg.engine.mode = self._engine_combo.currentData()
@@ -415,9 +464,7 @@ class SettingsDialog(QtWidgets.QDialog):
             config_mod.save(cfg)
         except Exception:
             log.exception("could not save settings")
-            QtWidgets.QMessageBox.warning(
-                self, "TintaView", "Could not save settings — see the log for details."
-            )
+            QtWidgets.QMessageBox.warning(self, "TintaView", t("settings.error.save_failed"))
             return
         self._offer_hook_install(newly_enabled)
         self.accept()
@@ -474,9 +521,7 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         answer = QtWidgets.QMessageBox.question(
             self, "TintaView",
-            f"{', '.join(missing)}: TintaView's hooks aren't installed yet, so it won't "
-            "see this agent working.\n\nYour other settings have been saved. Open the "
-            "full setup wizard now to install the hooks?",
+            t("settings.hooks.prompt", agents=", ".join(missing)),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
         )
         if answer == QtWidgets.QMessageBox.Yes:

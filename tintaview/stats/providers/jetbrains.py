@@ -61,7 +61,9 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.i18n import t
 
+from .. import format as fmt
 from ..model import UsageProvider, UsageResult, UsageRow
 
 log = logging.getLogger(__name__)
@@ -71,9 +73,6 @@ COMPONENT_NAME = "AIAssistantQuotaManager2"
 #: Raw quota units per "credit", as JetBrains's own status-bar widget displays them —
 #: see the module docstring for how this was derived.
 CREDIT_SCALE = 100_000.0
-
-_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
-           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 class _QuotaFileError(Exception):
@@ -182,14 +181,22 @@ def _severity(pct: float) -> str:
     return "critical" if pct >= 90 else "warning" if pct >= 75 else "normal"
 
 
-def _fmt_date(value: Any, prefix: str) -> str:
+def _fmt_date(value: Any) -> str:
+    """The refill date as a bare "14 Sep", or "" if it can't be read.
+
+    Bare on purpose: the two places it is used need it worded differently ("Renews 14
+    Sep" on its own, just the date when it shares the row with a credit figure), and the
+    previous version built the long form and then stripped the "Renews " prefix back off
+    with `removeprefix` — which silently stops working the moment that word is a
+    translation rather than a literal.
+    """
     if not isinstance(value, str) or not value:
         return ""
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
     except ValueError:
         return ""
-    return f"{prefix} {dt.day} {_MONTHS[dt.month - 1]}"
+    return fmt.date_text(dt)
 
 
 def _quota_row(label: str, sub_quota: Any, right: str, kind: str) -> UsageRow | None:
@@ -217,12 +224,12 @@ def _parse_usage(quota: dict[str, Any], next_refill: dict[str, Any] | None) -> l
     purchased, a top-up balance in credits."""
     rows: list[UsageRow] = []
 
-    reset = ""
+    date = ""
     if isinstance(next_refill, dict) and next_refill.get("type") == "Known":
-        reset = _fmt_date(next_refill.get("next"), "Renews")
+        date = _fmt_date(next_refill.get("next"))
 
     tariff = quota.get("tariffQuota")
-    right = reset
+    right = t("usage.renews", date=date) if date else ""
     if isinstance(tariff, dict):
         current = _num(tariff.get("current"))
         maximum = _num(tariff.get("maximum"))
@@ -230,21 +237,23 @@ def _parse_usage(quota: dict[str, Any], next_refill: dict[str, Any] | None) -> l
             # `current` is the amount already used (this is also what `_pct`/severity
             # are computed from, so the text must match: a higher `current` means more
             # consumed and a redder bar, not more remaining).
-            credits = f"{current / CREDIT_SCALE:.2f} / {maximum / CREDIT_SCALE:.2f} used"
-            # Dropping the "Renews " word (not the date) is what keeps this row inside
+            credits = t("usage.jetbrains.credits_used",
+                        used=f"{current / CREDIT_SCALE:.2f}",
+                        maximum=f"{maximum / CREDIT_SCALE:.2f}")
+            # The bare date, not the "Renews DD Mon" form, is what keeps this row inside
             # the flyout's 380px card alongside the "Monthly Credits" label — the full
-            # "X / Y used · Renews DD Mon" combination measures wider than the card.
-            short_reset = reset.removeprefix("Renews ")
-            right = f"{credits} · {short_reset}" if short_reset else credits
-    included = _quota_row("Monthly Credits", tariff, right, "limit")
+            # combination measures wider than the card.
+            right = t("usage.jetbrains.credits_and_date", credits=credits, date=date) if date else credits
+    included = _quota_row(t("usage.jetbrains.monthly_credits"), tariff, right, "limit")
     if included is not None:
         rows.append(included)
 
     top_up = quota.get("topUpQuota")
     if isinstance(top_up, dict) and (_num(top_up.get("maximum")) or 0) > 0:
         available = _num(top_up.get("available"))
-        right = f"{available / CREDIT_SCALE:.2f} credits available" if available is not None else ""
-        top_up_row = _quota_row("Top-up Credits", top_up, right, "credits")
+        right = (t("usage.jetbrains.credits_available", available=f"{available / CREDIT_SCALE:.2f}")
+                 if available is not None else "")
+        top_up_row = _quota_row(t("usage.jetbrains.top_up_credits"), top_up, right, "credits")
         if top_up_row is not None:
             rows.append(top_up_row)
 
@@ -262,25 +271,24 @@ class JetBrainsUsageProvider(UsageProvider):
             return self._fetch(agent_config)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
             log.exception("jetbrains usage provider failed unexpectedly")
-            return UsageResult(agent=self.key, error=f"JetBrains AI usage unavailable: {e!r}")
+            return UsageResult(agent=self.key,
+                                error=t("usage.jetbrains.error.unavailable", detail=repr(e)))
 
     def _fetch(self, agent_config: AgentConfig) -> UsageResult:
         try:
             path = _resolve_quota_path(agent_config)
         except _QuotaFileError as e:
             log.info("jetbrains quota file unavailable: %s", e)
-            return UsageResult(
-                agent=self.key,
-                error="JetBrains AI Assistant not found (no IDE has synced a quota yet).",
-            )
+            return UsageResult(agent=self.key, error=t("usage.jetbrains.error.not_found"))
 
         try:
             quota, next_refill = _parse_file(path)
         except _QuotaFileError as e:
             log.info("jetbrains quota file unreadable: %s", e)
-            return UsageResult(agent=self.key, error="JetBrains AI usage unavailable (quota file unreadable).")
+            return UsageResult(agent=self.key, error=t("usage.jetbrains.error.unreadable"))
 
         rows = _parse_usage(quota, next_refill)
         if not rows:
-            return UsageResult(agent=self.key, error="JetBrains AI usage unavailable (no active quota).")
-        return UsageResult(agent=self.key, rows=rows, header="AI Assistant", source="official")
+            return UsageResult(agent=self.key, error=t("usage.jetbrains.error.no_quota"))
+        return UsageResult(agent=self.key, rows=rows, header=t("usage.jetbrains.header"),
+                            source="official")

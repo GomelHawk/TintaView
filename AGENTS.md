@@ -30,8 +30,10 @@ tintaview/
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
   engines/   base.py  chroma.py  ghub.py  openrgb.py  null.py  factory.py
   agents/    base.py  claude.py  codex.py  cursor.py     # hook manifest + paths per agent
-  stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py  cache.py  model.py  service.py
-  ui/        tray.py  flyout.py  wizard.py  icons.py
+  stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py
+             cache.py  model.py  service.py  format.py   # format.py = shared row wording
+  i18n/      __init__.py  locales/{en,es,it,de,pl,ru,be,uk}.json
+  ui/        tray.py  flyout.py  wizard.py  icons.py  settings_dialog.py
   install/   detect.py  hooks.py  hookscript.py  codex_flag.py  autostart.py  wsl.py
              components.py  doctor.py  update.py  restart.py
   hooks/     tv-hook.sh  tv-hook.cmd                     # shipped as package data
@@ -56,6 +58,7 @@ optional at runtime.
 | Engines | **Chroma, G HUB and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → ghub → openrgb → status-only`. |
 | Tray icon | **A single whole-icon state.** No per-agent ray splitting or zone splitting: a user watches one agent at a time, and a gradient icon among solid ones reads as a different icon rather than a fourth state. |
 | Cursor stats | Local session token from `state.vscdb` → Cursor's own Connect RPC. No login UI of our own. |
+| Translations | **JSON catalogues read by a stdlib `t()`, not `QTranslator`, and only for the tray + usage panel.** See [Interface language](#interface-language-i18n). |
 | Stack | Python 3.12+, PySide6 (Qt) tray, stdlib HTTP server. |
 
 Non-goals: lighting effects beyond solid/blink, per-agent colours or device zoning, multi-machine
@@ -67,13 +70,15 @@ winget, the Windows Store or Homebrew.
 TintaView has **two** places a user changes settings, and they overlap on purpose:
 
 - `ui/wizard.py` — the console wizard (`tintaview setup`). Covers everything: agent
-  hook install/diff, autostart, WSL split, platform detection, and every engine's
-  device-level knobs (OpenRGB host/port, G HUB `dll_path`, per-engine device-type lists).
+  hook install/diff, autostart, WSL split, platform detection, interface language, and
+  every engine's device-level knobs (OpenRGB host/port, G HUB `dll_path`, per-engine
+  device-type lists).
 - `ui/settings_dialog.py` — the in-process Qt popup opened from the tray's
   "Settings…" menu item (`TrayApp._open_settings` in `ui/tray.py`). Covers only the
   knobs worth reaching often without a terminal: enabled agents/providers (+ their
-  order — a drag-reorderable list), chime, usage-poll interval, update-check, lighting
-  engine mode, and the three status colours (with a reset-to-defaults button). It hands
+  order — a drag-reorderable list), interface language, chime, usage-poll interval,
+  update-check, lighting engine mode, and the three status colours (with a
+  reset-to-defaults button). It hands
   off to the console wizard via its "Open Full Setup Wizard (Terminal)…" button, and by
   raising `launch_wizard` when a newly ticked agent has no hooks installed.
 
@@ -83,8 +88,10 @@ themselves — everything the two UIs *label* comes from one table each:
 
 | Shared | Lives in | Read by |
 | --- | --- | --- |
-| engine keys, order, labels, per-platform gating | `engines.factory.ENGINE_MODES` / `ENGINE_DISPLAY` / `engine_supported()` | both UIs |
+| engine keys, order, per-platform gating | `engines.factory.ENGINE_MODES` / `ENGINE_DISPLAY` / `engine_supported()` | both UIs |
+| engine labels *as shown in the popup* | `i18n` key `engine.mode.<mode>`, falling back to `ENGINE_DISPLAY` | settings dialog |
 | agent + stats-only provider keys and display names | `agents.base.STATS_ONLY_AGENTS` / `display_name()` | both UIs, tray tooltip, usage flyout |
+| supported interface languages | `i18n.LANGUAGES` | both UIs |
 
 Add a stats-only provider by adding a row to `agents.base.STATS_ONLY_AGENTS`, a detect
 callable to `ui.wizard._STATS_ONLY_DETECT` and a provider to
@@ -298,6 +305,67 @@ rate-limited response replace good data with an estimate.
 In a **WSL split** install the Claude/Codex JSONL files sit behind a UNC path: scan only files
 modified in the last 7 days and cache by mtime, or the poll is slow.
 
+## Interface language (i18n)
+
+`tintaview/i18n/` — one JSON catalogue per language plus a `t(key, **kwargs)` lookup. English
+(`ui.language = "en"`) is the default and `en.json` is the source of truth for the key set.
+Languages: en, es, it, de, pl, ru, be, uk (`i18n.LANGUAGES`, endonyms included).
+
+The decisions behind it, in the order they get questioned:
+
+- **Not `QTranslator`/`.qm`.** Two of the three things that produce translated text can't
+  import PySide6: the usage providers (`stats/providers/*`, which build row labels on a worker
+  thread and run in a `--headless` install) and `core.config`. A Qt-only mechanism would need a
+  second mechanism beside it, plus compiled `.qm` files committed as generated assets and a
+  build step. JSON + `dict` lookups needs neither.
+- **Scope is the tray and the usage panel, and stops there.** The console wizard, `doctor` and
+  the CLI stay English: they are read once from a terminal, half their output is a diff of the
+  user's own config files, and a partly-translated diff-and-confirm flow is worse than an
+  English one. The wizard does still *set* `ui.language` (its first step) — that is the only
+  route a first-time install has to it.
+- **Nothing an agent's API returns is ever translated** — plan and model names, release notes,
+  HTTP error text. Interpolate them into a translated sentence, don't rewrite them.
+- **`t()` never raises.** Missing key → English → the key itself; a translation whose
+  placeholders don't match the call is skipped in favour of English. It is called from
+  `paintEvent` and from stats threads, where an exception is a crash or a blank panel.
+- **Named placeholders only** (`{count}`, never `{}`), so a translator can reorder them, and
+  a caller may pass *more* than a given language uses: `usage.reset.at_time` gets `hour12`,
+  `hour24` and `ampm`, and each catalogue picks the clock its readers expect.
+- **Plurals are a table of CLDR forms**, selected by `count=`. Russian, Ukrainian, Belarusian
+  and Polish need three (`one/few/many`) — "5 сессий" is not "5 сессия".
+- Shared row wording (weekday and month abbreviations, "Resets in …") lives in
+  `stats/format.py`, not in each provider. `strftime("%a")`/`%b`/`%p` are the C locale, not
+  the user's choice, so they are never used for user-visible text.
+
+Three layout rules exist **only** because a translated string is 30-40% longer than its
+English original, and each of them was a visible defect first:
+
+- **Settings dialog** (`ui/settings_dialog.py`): checkboxes and explanatory hints go in
+  *spanning* form rows, never in the field column beside a label — a `QCheckBox` clips its
+  own text instead of wrapping (German lost a word off the end), and the field column is
+  only as wide as the longest label leaves it. Hints are built by `_hint()`, which sets an
+  explicit `minimumHeight` from `heightForWidth`: a word-wrapped `QLabel` reports a
+  one-line `sizeHint`, so its second line lands on top of the widget below it. `_MIN_WIDTH`
+  is sized for the longest language, not for English.
+- **Usage flyout** (`ui/flyout.py`): a row's label is drawn into the width the right-hand
+  text leaves, elided, with the right half a point smaller. Drawing both into the same
+  full-width rect (left- and right-aligned) works only while they are short enough not to
+  meet; translated labels and reset times overprinted each other.
+- **`stats.format.reset_at_time`** passes the hour twice (12- and 24-hour) and lets each
+  catalogue pick. Non-English catalogues use the short noun form ("Сброс через …", "Reset
+  in …") rather than a full sentence, because that column is what squeezes the label.
+
+`tests/test_i18n.py` is what keeps this honest: key parity and placeholder parity against
+`en.json`, every plural form its language's rule can select, every literal `t("…")` in the
+package resolving to a real key, no unused keys, and `pyproject.toml` still declaring
+`"tintaview.i18n" = ["locales/*.json"]` as package data (without which the wheel ships no
+catalogues and every language silently falls back to English).
+
+Adding a language: a row in `i18n.LANGUAGES`, a `locales/<code>.json` copied from `en.json`
+and translated, and a plural rule in `_PLURAL_RULES` if it isn't one/other. Adding a *string*:
+a key in `en.json` **and every other catalogue** — the parity tests fail otherwise, which is
+the point.
+
 ## Packaging: no compiled bundle, ever
 
 One artifact for every platform — a pure-Python wheel installed into a private venv under the
@@ -373,6 +441,12 @@ the release — see `.gitattributes`.
  injected into `GHubEngine`'s constructor, asserting snapshot/restore round-trips.
 - Tests must pass on Windows too — watch for path separators, file permissions (`chmod` is a no-op
   there) and locked files.
+- **Language is process-global.** Most of the suite asserts English text, so any test that calls
+  `i18n.set_language` must put it back (`tests/test_i18n.py` does it in an autouse fixture; the
+  tray/wizard tests use `try/finally`). A leaked language fails a test in another module
+  entirely.
+- The full-wizard tests in `tests/test_wizard.py` feed `input()` a *positional* list of answers,
+  so adding or removing a wizard step means updating every one of those lists.
 - **Manual matrix before a release:** Windows+WSL (Chroma), Windows+WSL (G HUB), Windows+WSL
  (OpenRGB), native Ubuntu (OpenRGB), macOS (status-only) × each agent — walk
  `session-start → working → confirm → idle → session-end` and confirm the lights return to
@@ -392,3 +466,4 @@ the release — see `.gitattributes`.
 | Unsigned build (accepted) | Ship via the install scripts so no MOTW tag ever reaches anything. If a Defender *heuristic* ever bites, submit to Microsoft's false-positive portal and consider free OSS signing (SignPath) or Azure Trusted Signing |
 | PySide6 size (~60 MB) | Accepted for the usage-card quality; revisit `pystray` only if it becomes a real problem |
 | macOS lighting | There isn't any realistically — positioned as status + stats only, stated up front |
+| Non-English catalogues | Written in-house, not by native speakers, and not reviewed by one. `en.json` is the source of truth and the parity tests keep the *structure* right; wording is fixed per report, not by re-translating everything. Expect a placeholder mistake to surface as English (by design, see `t()`) rather than as a crash |

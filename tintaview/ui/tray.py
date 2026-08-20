@@ -23,6 +23,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from tintaview.core.config import Config
 from tintaview.core.events import STATUS_NONE
+from tintaview.i18n import set_language, t
 from tintaview.ui import icons
 from tintaview.ui.flyout import Flyout
 
@@ -38,12 +39,13 @@ CLICK_REOPEN_GUARD_S = 0.25  # guards against "the click that just closed it" re
 ICON_SIZE = 128
 FIRST_COPYRIGHT_YEAR = 2026
 
-_STATUS_LABELS = {
-    "idle": "idle",
-    "working": "working",
-    "confirm": "needs confirmation",
-    "none": "no session",
-}
+#: Statuses with a translated tooltip label. A status outside this set (a payload from a
+#: newer build) is shown verbatim rather than as a missing translation key.
+_STATUS_KEYS = ("idle", "working", "confirm", "none")
+
+
+def _status_label(status: str) -> str:
+    return t(f"status.{status}") if status in _STATUS_KEYS else status
 
 
 def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]:
@@ -113,8 +115,7 @@ def run_console_setup() -> None:
         command = _console_command()
         if command is None:
             QtWidgets.QMessageBox.information(
-                None, "TintaView",
-                "Run this in a terminal to change settings:\n\n    tintaview setup",
+                None, "TintaView", t("tray.wizard.terminal_hint"),
             )
             return
 
@@ -127,11 +128,7 @@ def run_console_setup() -> None:
     except Exception:
         # A failure to open the wizard must never kill the tray.
         log.exception("could not open the setup wizard")
-        QtWidgets.QMessageBox.warning(
-            None, "TintaView",
-            "Could not open the setup wizard. Run `tintaview setup` in a terminal "
-            "instead; see the log for details.",
-        )
+        QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.wizard.open_failed"))
 
 
 class StatsWorker(QtCore.QObject):
@@ -245,6 +242,11 @@ class TrayApp(QtCore.QObject):
         self._server = server
         self._app = app
 
+        # Applied here rather than only in `cli.py` so every route into the tray — an
+        # embedder, a test building a TrayApp directly — renders in the configured
+        # language. `set_language` is idempotent, so doing it in both places is free.
+        set_language(cfg.ui.language)
+
         self._prev_effective = "none"
         self._blink_on = True
         self._sound_action: QtGui.QAction | None = None  # set by _build_menu below
@@ -271,9 +273,13 @@ class TrayApp(QtCore.QObject):
         )
 
         self.tray = QtWidgets.QSystemTrayIcon(icons.brand_icon(ICON_SIZE))
-        self.tray.setToolTip("TintaView: connecting…")
+        self.tray.setToolTip(t("tray.tooltip.connecting"))
         self.tray.activated.connect(self._on_activated)
-        self.tray.setContextMenu(self._build_menu())
+        # Held as an attribute: `QSystemTrayIcon.setContextMenu` doesn't take ownership,
+        # and the menu is replaced wholesale on a language change (see `_apply_settings`),
+        # so the live one needs a Python reference of its own to stay alive.
+        self._menu = self._build_menu()
+        self.tray.setContextMenu(self._menu)
         self.tray.show()
 
         self.state_timer = QtCore.QTimer(self)
@@ -303,9 +309,15 @@ class TrayApp(QtCore.QObject):
     # --- menu -------------------------------------------------------------
 
     def _build_menu(self) -> QtWidgets.QMenu:
+        """Build the context menu from scratch.
+
+        Called again after a language change (see `_apply_settings`) rather than
+        retranslating each action in place: the menu is a handful of items with no state
+        beyond the chime check mark, which is re-synced from config either way.
+        """
         menu = QtWidgets.QMenu()
-        menu.addAction("Refresh usage", self._stats_worker.fetch)
-        sound_action = menu.addAction("Sound on confirm")
+        menu.addAction(t("tray.menu.refresh_usage"), self._stats_worker.fetch)
+        sound_action = menu.addAction(t("tray.menu.sound_on_confirm"))
         sound_action.setCheckable(True)
         sound_action.setChecked(self._cfg.ui.chime_on_confirm)
         sound_action.toggled.connect(self._set_sound)
@@ -314,12 +326,12 @@ class TrayApp(QtCore.QObject):
         # contradicting the dialog.
         self._sound_action = sound_action
         menu.addSeparator()
-        menu.addAction("Settings…", self._open_settings)
-        menu.addAction("Check for updates", self._check_updates)
+        menu.addAction(t("tray.menu.settings"), self._open_settings)
+        menu.addAction(t("tray.menu.check_updates"), self._check_updates)
         menu.addSeparator()
-        menu.addAction("About", self._show_about)
+        menu.addAction(t("tray.menu.about"), self._show_about)
         menu.addSeparator()
-        menu.addAction("Quit", self._app.quit)
+        menu.addAction(t("tray.menu.quit"), self._app.quit)
         return menu
 
     def _set_sound(self, on: bool) -> None:
@@ -373,11 +385,7 @@ class TrayApp(QtCore.QObject):
                 run_console_setup()
         except Exception:
             log.exception("could not open the settings dialog")
-            QtWidgets.QMessageBox.warning(
-                None, "TintaView",
-                "Could not open Settings. Run `tintaview setup` in a terminal "
-                "instead; see the log for details.",
-            )
+            QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.settings.open_failed"))
 
     def _apply_settings(self, new_cfg: Config) -> None:
         """Push a saved `SettingsDialog` result into the live config and refresh
@@ -392,10 +400,12 @@ class TrayApp(QtCore.QObject):
         mode this dialog exists to avoid.
         """
         engine_changed = new_cfg.engine.mode != self._cfg.engine.mode
+        language_changed = new_cfg.ui.language != self._cfg.ui.language
 
         self._cfg.enabled_agents = list(new_cfg.enabled_agents)
         self._cfg.agents = new_cfg.agents  # newly enabled agents' seeded defaults
         self._cfg.ui.chime_on_confirm = new_cfg.ui.chime_on_confirm
+        self._cfg.ui.language = new_cfg.ui.language
         self._cfg.stats.poll_seconds = new_cfg.stats.poll_seconds
         self._cfg.update.check = new_cfg.update.check
         self._cfg.engine.mode = new_cfg.engine.mode
@@ -406,6 +416,17 @@ class TrayApp(QtCore.QObject):
             setattr(self._cfg.colors.device, status, getattr(new_cfg.colors.device, status))
 
         self.usage_timer.setInterval(max(1000, int(self._cfg.stats.poll_seconds * 1000)))
+
+        # A language is not a value anything re-reads on its own: the menu's action
+        # texts were baked in when it was built, and the tooltip and the usage rows are
+        # only rebuilt on their next refresh. Switch the catalogue first, then rebuild
+        # the menu — `_poll_state` (tooltip) and `_stats_worker.fetch` (row labels) at
+        # the end of this method cover the rest. Rows that fall back to the on-disk cache
+        # keep the language they were fetched in until the next good poll replaces them.
+        if language_changed:
+            set_language(self._cfg.ui.language)
+            self._menu = self._build_menu()
+            self.tray.setContextMenu(self._menu)
 
         # The context menu's own copy of chime_on_confirm. Signals blocked so setting the
         # check mark doesn't re-enter `_set_sound` and save the config a second time.
@@ -456,7 +477,7 @@ class TrayApp(QtCore.QObject):
         copyright_years = str(FIRST_COPYRIGHT_YEAR) if year <= FIRST_COPYRIGHT_YEAR else f"{FIRST_COPYRIGHT_YEAR}-{year}"
 
         dialog = QtWidgets.QDialog(None)
-        dialog.setWindowTitle("About TintaView")
+        dialog.setWindowTitle(t("tray.about.title"))
 
         logo = QtWidgets.QLabel()
         pixmap = icons.logo_pixmap(480)
@@ -464,9 +485,11 @@ class TrayApp(QtCore.QObject):
             logo.setPixmap(pixmap)
         logo.setAlignment(QtCore.Qt.AlignCenter)
 
-        version_label = QtWidgets.QLabel(f"Version {__version__}")
+        version_label = QtWidgets.QLabel(t("tray.about.version", version=__version__))
         version_label.setAlignment(QtCore.Qt.AlignCenter)
 
+        # Not translated on purpose: a copyright notice is the same line in every
+        # language, and the two names in it are names.
         copyright_label = QtWidgets.QLabel(f"Copyright (C) {copyright_years} Dmitry Koshelenko, Igor Koshelenko")
         copyright_label.setAlignment(QtCore.Qt.AlignCenter)
 
@@ -488,9 +511,8 @@ class TrayApp(QtCore.QObject):
         interrupt whatever the user is doing. "Check for updates" in the menu (below)
         is where the actual install prompt lives."""
         self.tray.showMessage(
-            "TintaView update available",
-            f"Version {tag} is available — you have {current}. Use \"Check for "
-            "updates\" in the tray menu to install it.",
+            t("tray.update.balloon_title"),
+            t("tray.update.balloon_body", latest=tag, current=current),
             QtWidgets.QSystemTrayIcon.Information,
             8000,
         )
@@ -507,27 +529,23 @@ class TrayApp(QtCore.QObject):
         try:
             from tintaview.install import update as update_mod
         except ImportError:
-            QtWidgets.QMessageBox.information(
-                None, "TintaView", "Update checking isn't available in this build."
-            )
+            QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.unsupported"))
             return
 
         release = update_mod.latest_release()
         if release is None:
-            QtWidgets.QMessageBox.information(
-                None, "TintaView",
-                "Couldn't check for updates just now — no network, a rate limit, or no "
-                "releases published yet. Try again later.",
-            )
+            QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.check_failed"))
             return
 
         tag = str(release.get("tag_name") or "").lstrip("vV").strip()
         if not tag or update_mod.compare_versions(__version__, tag) >= 0:
             QtWidgets.QMessageBox.information(
-                None, "TintaView", f"You're up to date (version {__version__})."
+                None, "TintaView", t("tray.update.up_to_date", version=__version__)
             )
             return
 
+        # The release notes are the project's own published text, quoted as written —
+        # the same rule the usage providers follow for anything an API hands back.
         notes = str(release.get("body") or "").strip()
         if len(notes) > 500:
             notes = notes[:500].rstrip() + "…"
@@ -535,9 +553,7 @@ class TrayApp(QtCore.QObject):
 
         answer = QtWidgets.QMessageBox.question(
             None, "TintaView",
-            f"Version {tag} is available — you have {__version__}.{notes_block}\n\n"
-            "Your settings and your agents' hook configuration are never changed by an "
-            "update.\n\nInstall it now?",
+            t("tray.update.confirm", latest=tag, current=__version__, notes=notes_block),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
         )
         if answer != QtWidgets.QMessageBox.Yes:
@@ -547,11 +563,7 @@ class TrayApp(QtCore.QObject):
         # run_update's own platform logic (verify SHA-256, run silently) take over.
         code = update_mod.run_update(check_only=False)
         if code != 0:
-            QtWidgets.QMessageBox.warning(
-                None, "TintaView",
-                "The update didn't complete. Run `tintaview update` from a terminal to "
-                "see why.",
-            )
+            QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.update.failed"))
 
     # --- state / icon -------------------------------------------------------------
 
@@ -630,9 +642,16 @@ class TrayApp(QtCore.QObject):
             info = agents.get(key, {})
             status = info.get("effective", "none")
             count = info.get("count", 0)
-            label = _STATUS_LABELS.get(status, status)
-            suffix = f" ({count} session{'s' if count != 1 else ''})" if count else ""
-            parts.append(f"{self._agent_display_name(key)}: {label}{suffix}")
+            name, label = self._agent_display_name(key), _status_label(status)
+            if count:
+                # Two keys rather than a suffix glued on: the session count is
+                # plural-sensitive (Russian, Ukrainian, Belarusian and Polish each need
+                # three forms), and where it sits in the line is the translator's call.
+                sessions = t("tray.tooltip.session_count", count=count)
+                parts.append(t("tray.tooltip.agent_sessions", agent=name, status=label,
+                                sessions=sessions))
+            else:
+                parts.append(t("tray.tooltip.agent", agent=name, status=label))
         # One line per agent. Joined with " · " this wrapped mid-entry once three agents
         # were enabled, so a status could end up split across two lines with the agent
         # name stranded on the first — the exact thing a glanceable tooltip must not do.
@@ -705,7 +724,7 @@ def run_tray(cfg: Config, server: Any) -> int:
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # closing the flyout must not quit the tray
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
-        print("No system tray available on this platform.", file=sys.stderr)
+        print(t("tray.no_system_tray"), file=sys.stderr)
         return 1
     _tray = TrayApp(cfg, server, app)  # noqa: F841 - kept alive by Qt's event loop / parenting
     return app.exec()

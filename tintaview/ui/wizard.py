@@ -37,6 +37,8 @@ from ..engines.factory import (
     available_engines,
     engine_supported,
 )
+from ..i18n import LANGUAGES, set_language
+from ..i18n import normalize as normalize_language
 from ..install import codex_flag, detect
 from ..install import hooks as hooks_mod
 from ..install.detect import (
@@ -196,7 +198,37 @@ def _step_welcome() -> None:
     )
 
 
-# --------------------------------------------------------------------------- step 2: platform
+# --------------------------------------------------------------------------- step 2: language
+
+
+def _step_language(cfg: config_mod.Config, assume_yes: bool) -> str:
+    """Pick the interface language for the tray and the usage panel.
+
+    This wizard itself stays in English whatever is chosen here (see the module
+    docstring's scope note and `tintaview.i18n`): it is a diff-and-confirm flow read once
+    from a terminal, and a half-translated one is worse than a plain English one. The
+    *tray* is what someone looks at every day, so this is where they get to set it —
+    otherwise a first-time install has no route to it except opening the tray's own
+    Settings popup afterwards.
+
+    Options are listed under their own names ("Polski", not "Polish"), same as the popup.
+    """
+    print("\n=== Language ===")
+    print(
+        "Language for the tray icon's menu, tooltip and usage panel. This setup wizard "
+        "stays in English, and usage figures an agent's own API reports keep their "
+        "original wording."
+    )
+    choice = _prompt_choice(
+        "Which language should TintaView's interface use?",
+        list(LANGUAGES), normalize_language(cfg.ui.language), assume_yes,
+    )
+    cfg.ui.language = choice
+    set_language(choice)
+    return choice
+
+
+# --------------------------------------------------------------------------- step 3: platform
 
 
 def _mode_explainer(env: Environment) -> str:
@@ -891,6 +923,7 @@ def _run(platform_override: str | None, assume_yes: bool) -> int:
     env = detect.detect(override=platform_override)
 
     _step_welcome()
+    _step_language(cfg, assume_yes)
     env = _step_platform(env, assume_yes)
     _step_agents(cfg, env, assume_yes)
     _step_engine(cfg, env, assume_yes)

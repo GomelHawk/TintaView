@@ -109,6 +109,48 @@ def test_flyout_set_results_resizes_and_paints(qapp):
     assert not pixmap.isNull()
 
 
+def test_flyout_row_label_yields_to_the_right_hand_text(qapp):
+    """A long label must be elided into the space the right-hand text leaves, not drawn
+    over the top of it.
+
+    Both used to be drawn into the same full-width rect, left- and right-aligned, which
+    only works while the two are short enough not to meet — translated labels and reset
+    times overprinted each other mid-row (Russian's "Сброс через 3 ч 11 мин" is a third
+    wider than the English wording).
+    """
+    flyout = Flyout()
+    flyout.set_results({
+        "claude": UsageResult(
+            agent="claude",
+            rows=[UsageRow(label="A label far too long to fit beside its own reset time",
+                            pct=50.0, right="Resets in 3 hr 11 min", severity="normal",
+                            kind="limit")],
+        )
+    })
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)  # must not raise
+    assert not pixmap.isNull()
+
+
+def test_flyout_paints_in_every_language(qapp):
+    """Smoke test: no language may break the paint path (a missing catalogue key renders
+    as the key, which is ugly but must never be an exception mid-`paintEvent`)."""
+    from tintaview import i18n
+
+    flyout = Flyout()
+    try:
+        for code in i18n.LANGUAGE_CODES:
+            i18n.set_language(code)
+            flyout.set_results(_sample_results())
+            pixmap = QtGui.QPixmap(flyout.size())
+            flyout.render(pixmap)
+            assert not pixmap.isNull()
+            flyout.set_results({})  # the "No agents enabled." path, also translated
+            flyout.render(QtGui.QPixmap(flyout.size()))
+    finally:
+        i18n.set_language("en")
+
+
 def test_flyout_handles_empty_results(qapp):
     flyout = Flyout()
     flyout.set_results({})
@@ -496,6 +538,33 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     # The device palette is what the controller actually sends to the hardware.
     assert cfg.colors.device.idle == "#040506"
     assert app_instance.usage_timer.interval() == 90_000
+
+
+def test_apply_settings_switches_the_interface_language(tray_with_controller):
+    """A language change has to reach the menu and the tooltip.
+
+    Neither retranslates itself: the menu's action texts were baked in when it was
+    built, and the tooltip is only rebuilt on the next state poll — so `_apply_settings`
+    rebuilds the menu and re-polls. Without that, picking a language did nothing visible
+    until the tray was restarted.
+    """
+    from tintaview import i18n
+
+    app_instance, _server = tray_with_controller
+    try:
+        app_instance._apply_settings(_accepted_copy(app_instance, **{"ui.language": "ru"}))
+
+        assert app_instance._cfg.ui.language == "ru"
+        assert i18n.current_language() == "ru"
+        texts = [a.text() for a in app_instance.tray.contextMenu().actions()]
+        assert "Выход" in texts
+        assert "Quit" not in texts
+        # Agent display names stay as they are ("Claude Code" is a product name); the
+        # status word beside each is what gets translated.
+        assert app_instance.tray.toolTip().startswith("Claude Code: нет сессии")
+    finally:
+        # Global state: the rest of this module asserts English text.
+        i18n.set_language("en")
 
 
 def test_apply_settings_resyncs_the_sound_menu_item(tray_with_controller):

@@ -37,7 +37,9 @@ from typing import Any
 from urllib.parse import quote
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.i18n import t
 
+from .. import format as fmt
 from ..model import UsageProvider, UsageResult, UsageRow
 
 log = logging.getLogger(__name__)
@@ -178,11 +180,7 @@ def _fmt_cycle_end(value: Any) -> str:
         dt = datetime.fromtimestamp(number, UTC).astimezone()
     except (OverflowError, OSError, ValueError):
         return ""
-    return f"Resets {dt.day} {_MONTHS[dt.month - 1]}"
-
-
-_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
-           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    return fmt.reset_at_date(dt)
 
 
 def _usage_row(label: str, pct: Any, right: str) -> UsageRow | None:
@@ -216,7 +214,7 @@ def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
     resets = _fmt_cycle_end(payload.get("billingCycleEnd"))
     rows: list[UsageRow] = []
 
-    auto = _usage_row("Cursor Models", plan.get("autoPercentUsed"), resets)
+    auto = _usage_row(t("usage.cursor.models"), plan.get("autoPercentUsed"), resets)
     if auto is not None:
         rows.append(auto)
 
@@ -226,10 +224,10 @@ def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
     api_right = ""
     included = plan.get("includedSpend")
     if isinstance(included, int | float) and not isinstance(included, bool) and included > 0:
-        api_right = f"${included / 100:,.2f} included"
+        api_right = t("usage.cursor.included", amount=f"${included / 100:,.2f}")
     elif not rows:
         api_right = resets
-    api = _usage_row("Other Models", plan.get("apiPercentUsed"), api_right)
+    api = _usage_row(t("usage.cursor.other_models"), plan.get("apiPercentUsed"), api_right)
     if api is not None:
         rows.append(api)
 
@@ -247,7 +245,8 @@ class CursorUsageProvider(UsageProvider):
             return self._fetch(agent_config, timeout)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
             log.exception("cursor usage provider failed unexpectedly")
-            return UsageResult(agent=self.key, error=f"Cursor usage unavailable: {e!r}")
+            return UsageResult(agent=self.key,
+                                error=t("usage.cursor.error.unavailable", detail=repr(e)))
 
     def _fetch(self, agent_config: AgentConfig, timeout: float) -> UsageResult:
         db_path = _resolve_state_db(agent_config)
@@ -256,23 +255,23 @@ class CursorUsageProvider(UsageProvider):
         except _TokenError as e:
             log.info("cursor token unavailable: %s", e)  # the exception text, never the token
             if "not found" in str(e) or "not signed in" in str(e):
-                return UsageResult(agent=self.key, error="Cursor not signed in.")
-            return UsageResult(
-                agent=self.key, error="Cursor usage unavailable (state DB locked or unreadable)."
-            )
+                return UsageResult(agent=self.key, error=t("usage.cursor.error.not_signed_in"))
+            return UsageResult(agent=self.key, error=t("usage.cursor.error.db_unreadable"))
 
         try:
             data = self._post_with_retry(token, db_path, timeout)
         except urllib.error.HTTPError as e:
-            return UsageResult(agent=self.key, error=f"Cursor usage endpoint HTTP {e.code}.")
+            return UsageResult(agent=self.key, error=t("usage.cursor.error.http", code=e.code))
         except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
-            return UsageResult(agent=self.key, error=f"Cursor usage unavailable: {e!r}")
+            return UsageResult(agent=self.key,
+                                error=t("usage.cursor.error.unavailable", detail=repr(e)))
 
         log.debug("cursor usage payload shape: %s", _shape(data))
         rows = _parse_usage(data)
         if not rows:
-            return UsageResult(agent=self.key, error="Cursor usage unavailable (unofficial endpoint changed).")
-        return UsageResult(agent=self.key, rows=rows, header="Included in Pro", source="official")
+            return UsageResult(agent=self.key, error=t("usage.cursor.error.payload"))
+        return UsageResult(agent=self.key, rows=rows, header=t("usage.cursor.header"),
+                            source="official")
 
     def _post_with_retry(self, token: str, db_path: Path, timeout: float) -> dict[str, Any]:
         try:

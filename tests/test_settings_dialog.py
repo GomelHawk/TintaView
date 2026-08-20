@@ -390,6 +390,54 @@ def test_accept_saves_chosen_engine_mode(qapp, tmp_path):
     assert saved.engine.mode == "none"
 
 
+# --------------------------------------------------------------------------- language
+
+
+def test_language_combo_lists_every_language_under_its_own_name(qapp, tmp_path):
+    """Endonyms, not English names: someone opening this because the interface is in a
+    language they can't read is looking for the word they *do* recognise."""
+    from tintaview.i18n import LANGUAGES
+
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    combo = dialog._language_combo
+    listed = [(combo.itemData(i), combo.itemText(i)) for i in range(combo.count())]
+    assert listed == list(LANGUAGES)
+    assert ("pl", "Polski") in listed
+
+
+def test_language_combo_starts_on_the_configured_language(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.ui.language = "de"
+    dialog = SettingsDialog(cfg)
+    assert dialog._language_combo.currentData() == "de"
+
+
+def test_language_combo_normalizes_a_hand_edited_locale(qapp, tmp_path):
+    """`language = "ru_RU"` in a hand-edited config means Russian. Landing on the first
+    row instead would also write English back on accept — silently changing a setting
+    the user never touched."""
+    cfg = make_cfg(tmp_path)
+    cfg.ui.language = "ru_RU"
+    dialog = SettingsDialog(cfg)
+    assert dialog._language_combo.currentData() == "ru"
+
+
+def test_accept_saves_the_chosen_language(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+    dialog._language_combo.setCurrentIndex(dialog._language_combo.findData("uk"))
+
+    dialog._on_accept()
+
+    assert dialog.result_cfg.ui.language == "uk"
+    assert config_mod.load(cfg.path).ui.language == "uk"
+    # The dialog only records the choice; applying it live is the tray's job
+    # (`TrayApp._apply_settings`), so nothing here switched the running catalogue.
+    from tintaview.i18n import current_language
+
+    assert current_language() == "en"
+
+
 # --------------------------------------------------------------------------- colours
 
 
