@@ -238,7 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.log:
         log_path = Path(args.log)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_fh = open(log_path, "w", encoding="utf-8", buffering=1)
+        # Intentionally not a context manager: under pythonw this handle becomes
+        # sys.stdout/stderr for the process lifetime and must stay open (see finally).
+        log_fh = open(log_path, "w", encoding="utf-8", buffering=1)  # noqa: SIM115
         # pythonw.exe has no console: sys.stdout / stderr are None and every print
         # would crash (or PowerShell `*>` captures nothing). Always bind real files.
         if sys.stdout is None and sys.stderr is None:
