@@ -253,7 +253,13 @@ OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in p
 | --- | --- | --- | --- | --- |
 | Claude Code | `~/.claude/settings.json` | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `Notification` + matcher `permission_prompt` |
 | Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
-| Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`, `postToolUse` | none → stall heuristic |
+| Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`/`postToolUse`, `beforeShellExecution`/`afterShellExecution` | none → stall heuristic |
+
+A summary, not the contract: each adapter's `bindings()` is the source of truth, and two details
+don't fit the columns. Cursor binds **both** the generic tool pair *and* the shell-execution pair
+to `tool-start`/`tool-end` — the shell one is what arms the stall detector for a command sitting on
+an approval prompt, which is the case the heuristic exists for. Claude binds `Notification` twice,
+on **two matchers**: `permission_prompt` → `confirm` and `idle_prompt` → `idle`.
 
 JetBrains AI Assistant and GitHub Copilot CLI are deliberately absent from this table — see
 [Statistics](#statistics) for why each is stats-only with no `agents/` adapter.
@@ -290,6 +296,11 @@ id pulled out by `sed`, **no Python startup**, `curl -s -m 1`, output discarded,
 
 **Drift detection.** Agents rewrite their config on upgrade, so the tray re-checks hook presence
 periodically and surfaces "Hooks missing for Codex — Fix" rather than silently going dark.
+
+**Not done, and deliberately so:** Claude Code and Codex both support plugin-bundled hooks, so a
+`tintaview` plugin could collapse install down to one `/plugin install`. It would only ever cover
+two of the three agents — Cursor has no plugin equivalent — so the merge-and-diff path above stays
+the primary route regardless, and a plugin would be an addition to it, never a replacement.
 
 ### Cursor stall heuristic
 
