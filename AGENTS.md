@@ -478,6 +478,30 @@ into the Windows-side config. It relies on the **`curl.exe` trick**: called from
 runs in the *Windows* network namespace, so `127.0.0.1:8777` reaches the daemon with no firewall
 rule and no mirrored-networking requirement.
 
+**Anything that *inspects* an install has to cross the same boundary the installer does.** On the
+Windows half, `Path.home()` is `C:\Users\you` and `config_dir()` is `%LOCALAPPDATA%\TintaView` —
+neither has anything to do with where the hooks actually are. Two rules, both learned from
+`doctor` reporting five failures on a working machine:
+
+- **Resolve an agent's config against `agents.<key>.home`, never `adapter.default_home()`.** The
+  wizard writes the distro's UNC path there for exactly this reason. `install.wsl.RemotePathAdapter`
+  wraps an adapter so `hooks_config_path()` answers with it; `doctor._configured_adapter` is the
+  general form (it also covers a plain hand-edited `home =`).
+- **The hook script lives in the distro, at `wsl.remote_hook_bin($HOME)`** — the Windows-side
+  `bin\tv-hook.cmd` is *correctly* absent in a split install, and the installed hook entries point
+  at the distro's POSIX path, so a staleness comparison against the Windows path marks every agent
+  stale. Those relative paths are named once in `install.wsl` (`REMOTE_HOOK_BIN_REL` /
+  `REMOTE_HOOK_ENV_REL`); don't spell them out a second time anywhere else.
+
+`mode` is `wsl-split` on **both** sides — gate on `env.is_windows_side` too, since inside the
+distro these are all ordinary local files. A distro that can't be reached (stopped, `wsl.exe`
+missing) is a normal condition: degrade to the local checks, never report a failure for it.
+
+`agents.enabled` legitimately contains **stats-only** keys (`jetbrains`, `copilot` — see
+`agents_base.STATS_ONLY_NAMES`). They have no adapter by design, so anything iterating
+`enabled_agents` and calling `agents_base.get()` must treat a `None` adapter for one of those keys
+as expected, not as a bad config value.
+
 ### Updating
 
 Config and every agent's hook configuration are **never touched by an update** — hooks point at the

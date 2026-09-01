@@ -117,6 +117,29 @@ def _write_remote_file(
 
 _HOOK_SCRIPT = Path(__file__).resolve().parent.parent / "hooks" / "tv-hook.sh"
 
+#: Where a split install's hook files live *inside the distro*, relative to its `$HOME`.
+#: `doctor` checks these same paths, so they are named once here rather than spelled out
+#: again on the checking side — a split install that reported its own hook script
+#: missing (because `doctor` looked at the Windows `config_dir()` instead) is exactly
+#: what a second copy of these strings buys you.
+REMOTE_HOOK_BIN_REL = ".tintaview/bin/tv-hook.sh"
+REMOTE_HOOK_ENV_REL = ".tintaview/hook.env"
+
+
+def remote_hook_bin(home: str) -> PurePosixPath:
+    """The distro-side `tv-hook.sh` path for a distro whose `$HOME` is `home`.
+
+    A `PurePosixPath`, not a `Path`: it names a file inside the distro, not on whatever
+    filesystem this process is running on, and must keep forward slashes even when this
+    code runs natively on Windows.
+    """
+    return PurePosixPath(f"{home.rstrip('/')}/{REMOTE_HOOK_BIN_REL}")
+
+
+def remote_hook_env(home: str) -> PurePosixPath:
+    """The distro-side `hook.env` path — see `remote_hook_bin`."""
+    return PurePosixPath(f"{home.rstrip('/')}/{REMOTE_HOOK_ENV_REL}")
+
 
 def install_hook(distro: str, url: str) -> Path:
     """Install `tv-hook.sh` + `hook.env` inside `distro`'s `~/.tintaview/`.
@@ -127,18 +150,14 @@ def install_hook(distro: str, url: str) -> Path:
     split relies on. Returns the (POSIX, distro-side) path to the installed script.
     """
     home = distro_home(distro)
-    bin_dir = f"{home}/.tintaview/bin"
-    hook_path = f"{bin_dir}/tv-hook.sh"
-    env_path = f"{home}/.tintaview/hook.env"
+    hook_path = remote_hook_bin(home)
+    env_path = remote_hook_env(home)
 
     script = _HOOK_SCRIPT.read_text(encoding="utf-8")
-    _write_remote_file(distro, hook_path, script, executable=True)
-    _write_remote_file(distro, env_path, f"TINTAVIEW_URL={url}\nTINTAVIEW_CURL=curl.exe\n")
+    _write_remote_file(distro, str(hook_path), script, executable=True)
+    _write_remote_file(distro, str(env_path), f"TINTAVIEW_URL={url}\nTINTAVIEW_CURL=curl.exe\n")
 
-    # A PurePosixPath, not Path: this names a file inside the distro, not on whatever
-    # filesystem this process happens to be running on, and must keep forward slashes
-    # even when this code is running natively on Windows.
-    return PurePosixPath(hook_path)
+    return hook_path
 
 
 def agent_homes_unc(distro: str) -> dict[str, str]:
@@ -165,13 +184,14 @@ def agent_homes_unc(distro: str) -> dict[str, str]:
 # --------------------------------------------------------------------------- hook install
 
 
-class _RemotePathAdapter:
+class RemotePathAdapter:
     """Wraps a real agent adapter so `hooks_config_path()` returns a pre-computed path.
 
-    Lets `tintaview.install.hooks` plan/apply a hook install against a WSL distro's
-    config file — reached over its `\\\\wsl.localhost\\...` UNC path — without teaching
-    that module anything about WSL. Everything else (key, bindings, render_hooks, ...)
-    passes straight through to the wrapped adapter.
+    Lets `tintaview.install.hooks` plan/apply a hook install — and `install.doctor`
+    *check* one — against a config file that isn't where this machine's `Path.home()`
+    says it is: a WSL distro's, reached over its `\\\\wsl.localhost\\...` UNC path, or
+    any home overridden by `agents.<key>.home`. Everything else (key, bindings,
+    render_hooks, ...) passes straight through to the wrapped adapter.
     """
 
     def __init__(self, inner: Any, path: Path) -> None:
@@ -255,14 +275,14 @@ def install_agent_hooks(distro: str, agent_keys: list[str], assume_yes: bool) ->
         return result
 
     result["route"] = "unc"
-    hook_bin = PurePosixPath(f"{home}/.tintaview/bin/tv-hook.sh")
+    hook_bin = remote_hook_bin(home)
     for key in agent_keys:
         adapter = agents_base.get(key)
         if adapter is None:
             continue
         try:
             unc_path = agent_config_unc_path(distro, home, adapter)
-            plan = hooks_mod.plan_install(_RemotePathAdapter(adapter, unc_path), hook_bin)
+            plan = hooks_mod.plan_install(RemotePathAdapter(adapter, unc_path), hook_bin)
         except (ValueError, OSError) as exc:
             result["plans"][key] = f"failed: {exc}"
             continue

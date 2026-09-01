@@ -35,6 +35,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .. import __version__
@@ -380,23 +381,87 @@ def _check_engine(reporter: _Reporter, cfg: Config, env: Environment) -> None:
 # --------------------------------------------------------------------------- 5. hook script
 
 
-def _check_hook_script(reporter: _Reporter, cfg: Config) -> None:
-    hook_bin = config_mod.hook_bin_path()
+def _wsl_split_home(env: Environment) -> str | None:
+    """The distro's POSIX `$HOME` when this is the Windows half of a WSL-split install.
+
+    None otherwise — including when this *is* the distro (`platform=wsl`), where the
+    hook script and every agent config are ordinary local files and the plain checks are
+    already right. Also None when the distro can't be reached: a stopped distro is a
+    normal condition, and reporting "hooks missing" because `wsl.exe` timed out would be
+    the same false alarm this function exists to remove.
+    """
+    from . import detect, wsl
+
+    if env.mode != detect.MODE_WSL_SPLIT or not env.is_windows_side or not env.distro:
+        return None
+    try:
+        return wsl.distro_home(env.distro)
+    except Exception as exc:  # noqa: BLE001 - WslError, or wsl.exe missing entirely
+        log.info("doctor: could not reach %s to locate its hooks: %r", env.distro, exc)
+        return None
+
+
+def _remote_path(distro: str, posix_path: object) -> Path:
+    """A distro-side POSIX path as the Windows side can open it."""
+    from . import detect
+
+    return Path(detect.wsl_path_to_unc(distro, str(posix_path)))
+
+
+def _configured_adapter(cfg: Config, adapter: AgentAdapter) -> AgentAdapter:
+    """`adapter`, but with `hooks_config_path()` resolved against `agents.<key>.home`.
+
+    A bare adapter answers from `Path.home()`, which on the Windows half of a WSL-split
+    install is `C:\\Users\\you` — the wrong side of the boundary entirely. The config
+    already records where each agent really lives (the wizard writes the distro's UNC
+    path there), and `_check_codex_flag` has always read it; this is the same resolution,
+    applied to the hooks check that used to disagree with it in the very same report.
+    """
+    from . import wsl
+
+    acfg = cfg.agent(adapter.key)
+    if not acfg.home:
+        return adapter
+    home = config_mod.expand(acfg.home)
+    if home == adapter.default_home():
+        return adapter
+    # Derived from the adapter's own paths rather than re-spelling ".claude/settings.json"
+    # here, exactly as `wsl.agent_config_unc_path` does.
+    rel = adapter.hooks_config_path("user").relative_to(adapter.default_home())
+    return wsl.RemotePathAdapter(adapter, home / rel)
+
+
+def _check_hook_script(reporter: _Reporter, cfg: Config, env: Environment) -> None:
+    from . import wsl
+
+    split_home = _wsl_split_home(env)
+    if split_home is not None:
+        # The agents run inside the distro, so that is where the script they invoke
+        # lives. The Windows-side `bin\tv-hook.cmd` is *correctly* absent in a split
+        # install — checking for it reported five failures on a working machine.
+        hook_bin = _remote_path(env.distro, wsl.remote_hook_bin(split_home))
+        hook_env = _remote_path(env.distro, wsl.remote_hook_env(split_home))
+        where = f" inside {env.distro}"
+    else:
+        hook_bin = config_mod.hook_bin_path()
+        hook_env = config_mod.hook_env_path()
+        where = ""
 
     if not hook_bin.exists():
         reporter.fail(
             "HOOK SCRIPT", f"{hook_bin} does not exist",
             "run `tintaview hooks install --agent all` to write it (or reinstall TintaView)",
         )
-    elif sys.platform != "win32" and not os.access(hook_bin, os.X_OK):
+    elif split_home is None and sys.platform != "win32" and not os.access(hook_bin, os.X_OK):
+        # Skipped for a distro-side script: the executable bit is not readable through a
+        # UNC path, and `install_hook` chmod +x'd it inside the distro where it counts.
         reporter.fail(
             "HOOK SCRIPT", f"{hook_bin} exists but is not executable",
             f"run `chmod +x {hook_bin}`",
         )
     else:
-        reporter.ok("HOOK SCRIPT", f"{hook_bin} exists and is executable")
+        reporter.ok("HOOK SCRIPT", f"{hook_bin} exists{where}")
 
-    hook_env = config_mod.hook_env_path()
     expected_url = f"http://{cfg.server.host}:{cfg.server.port}"
 
     if not hook_env.exists():
@@ -424,7 +489,7 @@ def _check_hook_script(reporter: _Reporter, cfg: Config) -> None:
             f"edit {hook_env} and set TINTAVIEW_URL={expected_url}, then run `tintaview doctor` again",
         )
     else:
-        reporter.ok("HOOK SCRIPT", f"{hook_env} points at {expected_url}")
+        reporter.ok("HOOK SCRIPT", f"{hook_env} points at {expected_url}{where}")
 
 
 # --------------------------------------------------------------------------- 6. agent hooks
@@ -454,24 +519,44 @@ def _check_codex_flag(reporter: _Reporter, cfg: Config, adapter: AgentAdapter) -
         )
 
 
-def _check_agent_hooks(reporter: _Reporter, cfg: Config) -> None:
+def _check_agent_hooks(reporter: _Reporter, cfg: Config, env: Environment) -> None:
     from ..agents import base as agents_base
     from . import hooks as hooks_mod
+    from . import wsl
 
     if not cfg.enabled_agents:
         return  # already reported by _check_config
 
-    hook_bin = config_mod.hook_bin_path()
+    split_home = _wsl_split_home(env)
+    if split_home is not None:
+        # The hooks were written pointing at the distro's own tv-hook.sh, so that is
+        # what "is this path still current?" has to be measured against. Comparing them
+        # to the Windows path would report every agent as `stale-path`.
+        hook_bin = wsl.remote_hook_bin(split_home)
+    else:
+        hook_bin = config_mod.hook_bin_path()
 
     for key in cfg.enabled_agents:
         adapter = agents_base.get(key)
         if adapter is None:
+            if key in agents_base.STATS_ONLY_NAMES:
+                # Not a misconfiguration: these have no scriptable event API, so they
+                # are usage-only *by design* and belong in `agents.enabled` so their
+                # cards appear. Telling the user to remove them would delete the very
+                # usage the STATS section reports as working.
+                reporter.ok(
+                    "AGENT HOOKS",
+                    f"{agents_base.display_name(key)}: usage only — no hooks to install",
+                )
+                continue
+            known = "/".join(a.key for a in agents_base.all_agents())
             reporter.warn(
-                "AGENT HOOKS", f"{key}: not a known agent (claude/codex/cursor)",
+                "AGENT HOOKS", f"{key}: not a known agent ({known})",
                 f"fix the [agents] enabled list in {cfg.path or config_mod.config_path()}",
             )
             continue
 
+        adapter = _configured_adapter(cfg, adapter)
         path = adapter.hooks_config_path()
         try:
             state = hooks_mod.status(adapter, hook_bin)
@@ -705,8 +790,8 @@ def run_doctor(verbose: bool = False, paint: bool = False,
     cfg = _check_config(reporter)
     daemon_ok = _check_daemon(reporter, cfg)
     _check_engine(reporter, cfg, env)
-    _check_hook_script(reporter, cfg)
-    _check_agent_hooks(reporter, cfg)
+    _check_hook_script(reporter, cfg, env)
+    _check_agent_hooks(reporter, cfg, env)
     _check_stats(reporter, cfg)
     if verbose:
         _live_hook_test(reporter, cfg, daemon_ok, interactive)

@@ -10,15 +10,17 @@ tell a real daemon apart from "nothing there" and "something else entirely".
 
 from __future__ import annotations
 
+import pathlib
 import socket
 import stat
 import sys
+from pathlib import PurePosixPath
 
 import pytest
 
 from tintaview.agents import base as agents_base
 from tintaview.core import config as config_mod
-from tintaview.core.config import Config, ServerConfig
+from tintaview.core.config import AgentConfig, Config, ServerConfig
 from tintaview.core.server import StatusServer
 from tintaview.install import doctor as D
 from tintaview.install import hooks as hooks_mod
@@ -624,3 +626,227 @@ def test_paint_selftest_warns_instead_of_claiming_an_unconfirmed_pass(monkeypatc
     assert reporter.warns == 1
     assert reporter.fails == 0
     assert "could not ask whether you saw it" in out
+
+
+# --------------------------------------------------------------------------- WSL split
+
+
+def _fake_distro(tmp_path, monkeypatch, distro="Ubuntu", home="/home/dev"):
+    r"""A stand-in for `\\wsl.localhost\<distro>\...`, backed by a real temp tree.
+
+    Returns `(unc_root, posix_home, env)`. `wsl_path_to_unc` is redirected onto the tree
+    so the checks open real files, and `distro_home` answers without spawning wsl.exe.
+    """
+    from tintaview.install import detect as detect_mod
+    from tintaview.install import wsl as wsl_mod
+
+    unc_root = tmp_path / "wsl" / distro
+    monkeypatch.setattr(detect_mod, "wsl_path_to_unc", lambda d, p: str(unc_root) + str(p))
+    monkeypatch.setattr(wsl_mod, "distro_home", lambda d: home)
+    env = detect_mod.Environment(
+        platform=detect_mod.PLATFORM_WINDOWS, mode=detect_mod.MODE_WSL_SPLIT, distro=distro
+    )
+    return unc_root, home, env
+
+
+def _write_distro_hook_files(unc_root, home, url="http://127.0.0.1:8777"):
+    from tintaview.install import wsl as wsl_mod
+
+    bin_path = pathlib.Path(str(unc_root) + str(wsl_mod.remote_hook_bin(home)))
+    env_path = pathlib.Path(str(unc_root) + str(wsl_mod.remote_hook_env(home)))
+    bin_path.parent.mkdir(parents=True, exist_ok=True)
+    bin_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(f"TINTAVIEW_URL={url}\nTINTAVIEW_CURL=curl.exe\n", encoding="utf-8")
+    return bin_path, env_path
+
+
+def _install_claude_hooks_in_distro(unc_root, home, hook_bin=None):
+    """Wire the distro's `.claude/settings.json` exactly as the installer does."""
+    from tintaview.install import wsl as wsl_mod
+
+    adapter = agents_base.get("claude")
+    settings = unc_root / "home" / "dev" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    remote = wsl_mod.RemotePathAdapter(adapter, settings)
+    plan = hooks_mod.plan_install(remote, hook_bin or wsl_mod.remote_hook_bin(home))
+    hooks_mod.apply(plan)
+    return settings
+
+
+def test_wsl_split_hook_script_is_checked_inside_the_distro(tmp_path, monkeypatch, capsys):
+    """The regression: the agents run inside the distro, so that is where the script
+    they invoke lives. The Windows-side `bin\\tv-hook.cmd` is correctly absent, and
+    checking for it failed a working install."""
+    unc_root, home, env = _fake_distro(tmp_path, monkeypatch)
+    _write_distro_hook_files(unc_root, home)
+    cfg = _write_config(enabled_agents=[], port=8777)
+    reporter = D._Reporter(verbose=True)
+
+    D._check_hook_script(reporter, cfg, env)
+
+    out = capsys.readouterr().out
+    assert reporter.fails == 0, out
+    assert "inside Ubuntu" in out
+    assert "tv-hook.sh" in out
+    assert "tv-hook.cmd" not in out  # never looked on the Windows side
+
+
+def test_wsl_split_hook_script_genuinely_missing_still_fails(tmp_path, monkeypatch, capsys):
+    """The fix must not make the check vacuous."""
+    _unc_root, _home, env = _fake_distro(tmp_path, monkeypatch)
+    cfg = _write_config(enabled_agents=[])
+    reporter = D._Reporter(verbose=True)
+
+    D._check_hook_script(reporter, cfg, env)
+
+    assert reporter.fails == 2  # the script and hook.env
+    assert "tv-hook.sh" in capsys.readouterr().out
+
+
+def test_wsl_split_agent_hooks_are_read_from_the_distro(tmp_path, monkeypatch, capsys):
+    unc_root, home, env = _fake_distro(tmp_path, monkeypatch)
+    settings = _install_claude_hooks_in_distro(unc_root, home)
+    cfg = _write_config(enabled_agents=["claude"],
+                        agents={"claude": AgentConfig(home=str(settings.parent))})
+    reporter = D._Reporter(verbose=True)
+
+    D._check_agent_hooks(reporter, cfg, env)
+
+    out = capsys.readouterr().out
+    assert reporter.fails == 0, out
+    assert "Claude Code: installed" in out
+    assert str(settings) in out
+
+
+def test_wsl_split_agent_hooks_compare_against_the_distro_hook_path(tmp_path, monkeypatch, capsys):
+    """Hooks pointing somewhere else must still read as stale — proof the comparison
+    is against the distro's tv-hook.sh and not merely always-true."""
+    unc_root, home, env = _fake_distro(tmp_path, monkeypatch)
+    settings = _install_claude_hooks_in_distro(
+        unc_root, home, hook_bin=PurePosixPath("/opt/somewhere/else/tv-hook.sh")
+    )
+    cfg = _write_config(enabled_agents=["claude"],
+                        agents={"claude": AgentConfig(home=str(settings.parent))})
+    reporter = D._Reporter(verbose=True)
+
+    D._check_agent_hooks(reporter, cfg, env)
+
+    assert reporter.fails == 1
+    assert "old tv-hook path" in capsys.readouterr().out
+
+
+def test_wsl_split_agent_hooks_genuinely_missing_still_fails(tmp_path, monkeypatch, capsys):
+    unc_root, _home, env = _fake_distro(tmp_path, monkeypatch)
+    home_dir = unc_root / "home" / "dev" / ".claude"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    cfg = _write_config(enabled_agents=["claude"],
+                        agents={"claude": AgentConfig(home=str(home_dir))})
+    reporter = D._Reporter(verbose=True)
+
+    D._check_agent_hooks(reporter, cfg, env)
+
+    assert reporter.fails == 1
+    assert "hooks missing" in capsys.readouterr().out
+
+
+def test_an_unreachable_distro_falls_back_to_local_checks(tmp_path, monkeypatch, capsys):
+    """A stopped distro is a normal condition — it must not turn into a false failure
+    report about the wrong filesystem, and it must not raise."""
+    from tintaview.install import wsl as wsl_mod
+
+    _unc_root, _home, env = _fake_distro(tmp_path, monkeypatch)
+
+    def boom(distro):
+        raise wsl_mod.WslError("Ubuntu isn't running")
+
+    monkeypatch.setattr(wsl_mod, "distro_home", boom)
+    _write_hook_bin()
+    cfg = _write_config(enabled_agents=[])
+    _write_hook_env(f"http://{cfg.server.host}:{cfg.server.port}")
+    reporter = D._Reporter(verbose=True)
+
+    D._check_hook_script(reporter, cfg, env)  # must not raise
+
+    out = capsys.readouterr().out
+    assert reporter.fails == 0, out
+    assert str(config_mod.hook_bin_path()) in out  # the local path, as a fallback
+
+
+def test_inside_the_distro_the_local_paths_are_used(tmp_path, monkeypatch, capsys):
+    """`mode` is wsl-split on *both* sides; only the Windows half looks across the
+    boundary. Inside the distro these are ordinary local files."""
+    from tintaview.install import detect as detect_mod
+
+    _fake_distro(tmp_path, monkeypatch)
+    env = detect_mod.Environment(
+        platform=detect_mod.PLATFORM_WSL, mode=detect_mod.MODE_WSL_SPLIT, distro="Ubuntu"
+    )
+    _write_hook_bin()
+    cfg = _write_config(enabled_agents=[])
+    _write_hook_env(f"http://{cfg.server.host}:{cfg.server.port}")
+    reporter = D._Reporter(verbose=True)
+
+    D._check_hook_script(reporter, cfg, env)
+
+    out = capsys.readouterr().out
+    assert reporter.fails == 0, out
+    assert str(config_mod.hook_bin_path()) in out
+
+
+# --------------------------------------------------------------------------- configured home
+
+
+def test_configured_adapter_resolves_against_the_agent_home(tmp_path):
+    adapter = agents_base.get("claude")
+    cfg = Config(agents={"claude": AgentConfig(home=str(tmp_path / "elsewhere" / ".claude"))})
+
+    resolved = D._configured_adapter(cfg, adapter)
+
+    assert resolved.hooks_config_path() == tmp_path / "elsewhere" / ".claude" / "settings.json"
+    assert resolved.key == "claude"  # everything else passes through
+
+
+def test_configured_adapter_is_the_adapter_itself_without_an_override(tmp_path):
+    adapter = agents_base.get("claude")
+    assert D._configured_adapter(Config(), adapter) is adapter
+
+
+# --------------------------------------------------------------------------- stats-only agents
+
+
+def test_stats_only_agents_are_not_reported_as_config_errors(capsys):
+    """copilot and jetbrains have no scriptable event API, so they are usage-only *by
+    design* and belong in `agents.enabled`. Doctor used to call them unknown keys and
+    tell the user to delete them — which would remove the usage cards the STATS section
+    reports as working."""
+    from tintaview.install import detect as detect_mod
+
+    cfg = _write_config(enabled_agents=["copilot", "jetbrains"])
+    env = detect_mod.Environment(platform=detect_mod.PLATFORM_LINUX,
+                                 mode=detect_mod.MODE_NATIVE)
+    reporter = D._Reporter(verbose=True)
+
+    D._check_agent_hooks(reporter, cfg, env)
+
+    out = capsys.readouterr().out
+    assert reporter.fails == 0 and reporter.warns == 0, out
+    assert "GitHub Copilot CLI: usage only" in out
+    assert "JetBrains AI Assistant: usage only" in out
+    assert "not a known agent" not in out
+
+
+def test_a_genuinely_unknown_agent_key_still_warns(capsys):
+    from tintaview.install import detect as detect_mod
+
+    cfg = _write_config(enabled_agents=["nonesuch"])
+    env = detect_mod.Environment(platform=detect_mod.PLATFORM_LINUX,
+                                 mode=detect_mod.MODE_NATIVE)
+    reporter = D._Reporter(verbose=True)
+
+    D._check_agent_hooks(reporter, cfg, env)
+
+    out = capsys.readouterr().out
+    assert reporter.warns == 1
+    assert "nonesuch: not a known agent" in out
+    assert "claude/codex/cursor" in out  # listed from the registry, not hardcoded
