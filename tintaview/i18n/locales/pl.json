@@ -9,8 +9,11 @@
 
   "tray.menu.refresh_usage": "Odśwież zużycie",
   "tray.menu.sound_on_confirm": "Dźwięk przy prośbie o potwierdzenie",
+  "tray.menu.pause_lighting": "Wstrzymaj podświetlenie",
   "tray.menu.settings": "Ustawienia…",
   "tray.menu.check_updates": "Sprawdź aktualizacje",
+  "tray.menu.open_logs": "Otwórz folder dzienników",
+  "tray.menu.diagnostics": "Uruchom diagnostykę…",
   "tray.menu.about": "O programie",
   "tray.menu.quit": "Zakończ",
 
@@ -30,6 +33,10 @@
   "tray.update.up_to_date": "Masz najnowszą wersję ({version}).",
   "tray.update.confirm": "Wersja {latest} jest już dostępna — masz {current}.{notes}\n\nAktualizacja nigdy nie zmienia Twoich ustawień ani konfiguracji hooków Twoich agentów.\n\nZainstalować teraz?",
   "tray.update.failed": "Aktualizacja nie została ukończona. Uruchom `tintaview update` w terminalu, aby sprawdzić dlaczego.",
+  "tray.diagnostics.title": "Diagnostyka TintaView",
+  "tray.diagnostics.running": "Trwa diagnostyka, może to potrwać kilka sekund…",
+  "tray.diagnostics.failed": "Nie udało się uruchomić diagnostyki. Uruchom `tintaview doctor` w terminalu.",
+  "tray.logs.open_failed": "Nie udało się otworzyć folderu dzienników ({path}).",
 
   "flyout.no_agents": "Nie włączono żadnego agenta.",
   "flyout.no_usage_data": "Brak danych o zużyciu.",
@@ -45,6 +52,7 @@
   "settings.poll": "Częstotliwość odświeżania zużycia:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Sprawdzaj aktualizacje przy uruchomieniu",
+  "settings.update_beta": "Uwzględniaj wersje wstępne (beta)",
   "settings.language": "Język interfejsu:",
   "settings.language.hint": "Kreator konfiguracji pozostaje w języku angielskim, a dane zwracane przez API danego agenta zachowują oryginalne brzmienie.",
   "settings.engine": "Silnik podświetlenia:",
@@ -108,6 +116,7 @@
   "usage.claude.header": "Twoje limity zużycia",
   "usage.claude.header_tier": "Twoje limity zużycia · {tier}",
   "usage.claude.header_estimate": "Zużycie Claude — szacunek (oficjalny % niedostępny)",
+  "usage.claude.header_estimate_unpriced": "Zużycie Claude — szacunek (oficjalne % niedostępne; nieznany model wyceniony stawką domyślną)",
   "usage.claude.session": "Limit 5-godzinny",
   "usage.claude.weekly_all": "Tygodniowo · wszystkie modele",
   "usage.claude.weekly_model": "Tygodniowo · {model}",

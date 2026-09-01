@@ -546,6 +546,51 @@ def test_other_general_fields_round_trip_on_accept(qapp, tmp_path):
     assert saved.update.check is False
 
 
+def test_update_channel_round_trips_on_accept(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+    assert dialog._update_beta.isChecked() is False  # "stable" is the default
+
+    dialog._update_beta.setChecked(True)
+    dialog._on_accept()
+    assert config_mod.load(cfg.path).update.channel == "beta"
+
+
+def test_update_channel_reads_back_as_ticked(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.update.channel = "beta"
+    dialog = SettingsDialog(cfg)
+    assert dialog._update_beta.isChecked() is True
+
+    dialog._update_beta.setChecked(False)
+    dialog._on_accept()
+    assert config_mod.load(cfg.path).update.channel == "stable"
+
+
+def test_an_unrecognised_channel_shows_as_stable_and_is_written_back_as_stable(qapp, tmp_path):
+    """Same forgiving-parse policy as `engine.mode` and `ui.language`: a hand-edited
+    typo must not leave the dialog showing a state it can't represent."""
+    cfg = make_cfg(tmp_path)
+    cfg.update.channel = "nightly"
+    dialog = SettingsDialog(cfg)
+
+    assert dialog._update_beta.isChecked() is False
+    dialog._on_accept()
+    assert config_mod.load(cfg.path).update.channel == "stable"
+
+
+def test_the_channel_box_is_disabled_when_update_checks_are_off(qapp, tmp_path):
+    """A channel with checking switched off is a live-looking control that does
+    nothing."""
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+
+    dialog._update_check.setChecked(False)
+    assert dialog._update_beta.isEnabled() is False
+    dialog._update_check.setChecked(True)
+    assert dialog._update_beta.isEnabled() is True
+
+
 def test_a_low_stored_poll_interval_is_not_silently_raised(qapp, tmp_path):
     """The spin box floor is 30s, but clamping a hand-edited `poll_seconds = 5` up to 30
     on open would write that back on accept — changing a setting nobody touched."""

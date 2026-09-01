@@ -196,7 +196,9 @@ a close (✕) button — both also close the panel, same as clicking the tray ic
 clicking outside it. Each agent's section header shows a small coloured dot next to its
 name — the same **green/idle · yellow/working · red/confirm** colours as the tray icon
 and lighting (see above), reflecting that specific agent's current session, or no dot at
-all when that agent has no session open. What the rows below it show depends on the
+all when that agent has no session open. While an agent is working, the name of the tool
+it's running (`Bash`, `Edit`, …) appears in grey after the dot, so the panel says what an
+agent is busy with and not only that it is. What the rows below it show depends on the
 agent:
 
 - **Claude Code** — the same official 5-hour / weekly / usage-credit percentages Claude
@@ -226,6 +228,24 @@ agent:
 Usage is polled every 5 minutes (rate limits, not urgency) and the last good result is
 cached, so the panel is never blank and a rate-limit response never overwrites good data
 with a worse estimate.
+
+## Tray menu
+
+Right-click the tray icon for:
+
+| Item | What it does |
+| --- | --- |
+| **Refresh usage** | Poll every agent now instead of waiting for the 5-minute cycle. |
+| **Sound on confirm** | Play a sound the moment a session first needs your approval. |
+| **Pause lighting** | Hand your devices straight back to Synapse / G HUB / OpenRGB and stop driving them — for recording, streaming or screenshots. The tray icon and the usage panel keep working; only the hardware is released. It is deliberately **not** remembered across restarts, so you can never end up with permanently dead lights and no idea why. |
+| **Settings…** | The settings window (agents, language, colours, engine, update options). |
+| **Check for updates** | Run the update check now and offer to install. |
+| **Open logs folder** | Open the log directory in your file manager — on Windows that's inside `%LOCALAPPDATA%\TintaView`, which is worth a menu item because nothing else tells you where it is. |
+| **Run diagnostics** | Run the same checks as `tintaview doctor -v` and show the report in a window you can select and copy from — handy when there's no terminal to hand, which on Windows is the normal case. |
+| **About** / **Quit** | Version information; exit (this also releases your lighting). |
+
+Launching TintaView a second time while it's already running doesn't start a second copy
+or fail silently — it opens the running one's usage panel.
 
 ## Interface language
 
@@ -269,7 +289,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | --- | --- | --- |
 | `server.host` | `127.0.0.1` | Where the status broker listens. |
 | `server.port` | `8777` | Port for the status broker (hooks and the tray both talk to this). |
-| `server.watchdog_timeout` | `600` | Seconds of hook silence before the lights are force-released (crash safety). |
+| `server.watchdog_timeout` | `600` | Seconds of silence from a session before it is dropped and its lighting released (crash safety, for an agent that died without sending its end-of-session hook). Counted per session, so one busy agent never keeps another agent's dead session alive. |
 | `engine.mode` | `auto` | `auto` \| `chroma` \| `ghub` \| `openrgb` \| `none`. `auto` probes `engine.order` and uses the first that responds. |
 | `engine.order` | `["chroma", "ghub", "openrgb"]` | Probe order for `auto` mode. |
 | `engine.chroma.devices` | `["mouse", "headset"]` | Chroma device endpoints to drive. |
@@ -291,7 +311,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
-| `update.channel` | `stable` | Update channel (currently only `stable` is published). |
+| `update.channel` | `stable` | `stable` \| `beta`. `stable` offers published releases only; `beta` also offers pre-releases (never drafts). Also a tick box in **Settings…**. Anything else here is read as `stable`. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
 | `agents.<key>.confirm_detection` | `event` | `event` (a real hook fires) or `stall` (heuristic — Cursor's default). |
@@ -352,6 +372,13 @@ match.
 Updating never touches `config.toml` or any agent's hook configuration — hooks always
 point at the same stable `tv-hook` path, so an update can never leave an agent's hooks
 broken.
+
+**Beta releases.** Tick **Include pre-release (beta) versions** in Settings (or set
+`update.channel = "beta"`) and both the startup check and **Check for updates** will also
+offer pre-releases. Drafts are never offered, and once a final release ships you move onto
+it rather than being stranded on the last release candidate. Set it back to `stable` at
+any time — the next check then only offers published releases, and you keep whatever
+you're on until one is newer than it.
 
 ## Uninstall
 

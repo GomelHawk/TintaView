@@ -9,8 +9,11 @@
 
   "tray.menu.refresh_usage": "Оновити витрати",
   "tray.menu.sound_on_confirm": "Звук під час запиту підтвердження",
+  "tray.menu.pause_lighting": "Призупинити підсвічування",
   "tray.menu.settings": "Налаштування…",
   "tray.menu.check_updates": "Перевірити оновлення",
+  "tray.menu.open_logs": "Відкрити теку журналів",
+  "tray.menu.diagnostics": "Запустити діагностику…",
   "tray.menu.about": "Про програму",
   "tray.menu.quit": "Вийти",
 
@@ -30,6 +33,10 @@
   "tray.update.up_to_date": "У вас найновіша версія ({version}).",
   "tray.update.confirm": "Доступна версія {latest} — у вас {current}.{notes}\n\nОновлення ніколи не змінює ні ваші налаштування, ні конфігурацію хуків ваших агентів.\n\nУстановити зараз?",
   "tray.update.failed": "Оновлення не завершилося. Виконайте `tintaview update` у терміналі, щоб побачити причину.",
+  "tray.diagnostics.title": "Діагностика TintaView",
+  "tray.diagnostics.running": "Виконується діагностика, це може зайняти кілька секунд…",
+  "tray.diagnostics.failed": "Не вдалося запустити діагностику. Виконайте `tintaview doctor` у терміналі.",
+  "tray.logs.open_failed": "Не вдалося відкрити теку журналів ({path}).",
 
   "flyout.no_agents": "Жодного агента не ввімкнено.",
   "flyout.no_usage_data": "Немає даних про витрати.",
@@ -45,6 +52,7 @@
   "settings.poll": "Інтервал оновлення витрат:",
   "settings.poll.suffix": "с",
   "settings.update_check": "Перевіряти оновлення під час запуску",
+  "settings.update_beta": "Включати попередні версії (бета)",
   "settings.language": "Мова інтерфейсу:",
   "settings.language.hint": "Майстер налаштування залишається англійською, а дані, які повертає API самого агента, зберігають початкові формулювання.",
   "settings.engine": "Рушій підсвітки:",
@@ -108,6 +116,7 @@
   "usage.claude.header": "Ваші ліміти витрат",
   "usage.claude.header_tier": "Ваші ліміти витрат · {tier}",
   "usage.claude.header_estimate": "Витрати Claude — оцінка (офіційні % недоступні)",
+  "usage.claude.header_estimate_unpriced": "Використання Claude — оцінка (офіційні % недоступні; невідома модель за тарифом за замовчуванням)",
   "usage.claude.session": "Ліміт 5 год",
   "usage.claude.weekly_all": "Тиждень · усі моделі",
   "usage.claude.weekly_model": "Тиждень · {model}",

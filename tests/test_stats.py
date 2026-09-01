@@ -232,6 +232,72 @@ class TestClaudeFallback:
         assert result.source == "estimate"
         assert result.error
 
+    @staticmethod
+    def _write_transcript(home: Path, model: str, input_tokens: int) -> None:
+        """One usage line, an hour old, so it lands in both the 5h and 7d windows."""
+        project_dir = home / "projects" / "proj1"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({
+            "timestamp": _iso(datetime.now(UTC) - timedelta(hours=1)),
+            "message": {"model": model, "usage": {"input_tokens": input_tokens,
+                                                   "output_tokens": 0}},
+        })
+        (project_dir / "session.jsonl").write_text(line + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _cost_of(result, label: str = "5-hour") -> float:
+        row = next(r for r in result.rows if r.label == label)
+        return float(row.right.split("$")[1])
+
+    @pytest.mark.parametrize(
+        ("model", "expected_cost"),
+        [
+            # 1M input tokens, so the cost in dollars *is* the input rate per MTok.
+            ("claude-opus-5", 5.0),
+            ("claude-sonnet-5", 2.0),
+            ("claude-haiku-4-5-20251001", 1.0),  # a dated snapshot still resolves
+            ("claude-fable-5", 10.0),
+        ],
+    )
+    def test_current_models_are_priced(self, tmp_path, model, expected_cost):
+        """Regression: `claude-opus-5` was absent from PRICING, and an unknown model
+        defaulted to (0.0, 0.0) — so the model most sessions actually run contributed
+        exactly nothing to the estimate. A plausible-but-silently-low total is the
+        failure mode nobody notices, which is why this is pinned per model.
+        """
+        home = tmp_path / "claude_home"
+        home.mkdir(parents=True)
+        self._write_transcript(home, model, 1_000_000)
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert result.ok
+        assert self._cost_of(result) == pytest.approx(expected_cost, rel=0.01)
+        assert "unknown model" not in (result.header or "")
+
+    def test_an_unknown_model_is_estimated_and_says_so(self, tmp_path):
+        """A model released after this build must not price at zero — it gets the
+        flagship rate, and the header admits the rate was a guess."""
+        home = tmp_path / "claude_home"
+        home.mkdir(parents=True)
+        self._write_transcript(home, "claude-something-99", 1_000_000)
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert result.ok
+        assert self._cost_of(result) > 0.0
+        assert self._cost_of(result) == pytest.approx(5.0, rel=0.01)  # DEFAULT_PRICING
+        assert "unknown model" in result.header
+
+    def test_a_known_model_keeps_the_plain_estimate_header(self, tmp_path):
+        home = tmp_path / "claude_home"
+        home.mkdir(parents=True)
+        self._write_transcript(home, "claude-opus-5", 1_000_000)
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert result.header == "Claude usage — estimate (official % unavailable)"
+
 
 class TestClaudeAuthAndRateLimit:
     def test_401_reports_expired_login_and_no_rows(self, tmp_path, monkeypatch):

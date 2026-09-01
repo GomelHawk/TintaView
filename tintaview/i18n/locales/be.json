@@ -9,8 +9,11 @@
 
   "tray.menu.refresh_usage": "Абнавіць выдатак",
   "tray.menu.sound_on_confirm": "Гук пры запросе пацвярджэння",
+  "tray.menu.pause_lighting": "Прыпыніць падсветку",
   "tray.menu.settings": "Налады…",
   "tray.menu.check_updates": "Праверыць абнаўленні",
+  "tray.menu.open_logs": "Адкрыць папку журналаў",
+  "tray.menu.diagnostics": "Запусціць дыягностыку…",
   "tray.menu.about": "Пра праграму",
   "tray.menu.quit": "Выйсці",
 
@@ -30,6 +33,10 @@
   "tray.update.up_to_date": "У вас найноўшая версія ({version}).",
   "tray.update.confirm": "Даступная версія {latest} — у вас {current}.{notes}\n\nАбнаўленне ніколі не змяняе ні вашы налады, ні канфігурацыю хукаў вашых агентаў.\n\nУстанавіць зараз?",
   "tray.update.failed": "Абнаўленне не завяршылася. Выканайце `tintaview update` у тэрмінале, каб убачыць прычыну.",
+  "tray.diagnostics.title": "Дыягностыка TintaView",
+  "tray.diagnostics.running": "Выконваецца дыягностыка, гэта можа заняць некалькі секунд…",
+  "tray.diagnostics.failed": "Не ўдалося запусціць дыягностыку. Выканайце `tintaview doctor` у тэрмінале.",
+  "tray.logs.open_failed": "Не ўдалося адкрыць папку журналаў ({path}).",
 
   "flyout.no_agents": "Ні адзін агент не ўключаны.",
   "flyout.no_usage_data": "Няма даных пра выдатак.",
@@ -45,6 +52,7 @@
   "settings.poll": "Інтэрвал абнаўлення выдатку:",
   "settings.poll.suffix": "с",
   "settings.update_check": "Правяраць абнаўленні пры запуску",
+  "settings.update_beta": "Уключаць папярэднія версіі (бэта)",
   "settings.language": "Мова інтэрфейсу:",
   "settings.language.hint": "Чараўнік наладкі застаецца па-англійску, а даныя, якія вяртае API самога агента, зберагаюць пачатковыя формулюроўкі.",
   "settings.engine": "Рухавік падсвятлення:",
@@ -108,6 +116,7 @@
   "usage.claude.header": "Вашы ліміты выдатку",
   "usage.claude.header_tier": "Вашы ліміты выдатку · {tier}",
   "usage.claude.header_estimate": "Выдатак Claude — ацэнка (афіцыйныя % недаступныя)",
+  "usage.claude.header_estimate_unpriced": "Выкарыстанне Claude — ацэнка (афіцыйныя % недаступныя; невядомая мадэль па тарыфе па змаўчанні)",
   "usage.claude.session": "5-гадзінны ліміт",
   "usage.claude.weekly_all": "Тыдзень · усе мадэлі",
   "usage.claude.weekly_model": "Тыдзень · {model}",

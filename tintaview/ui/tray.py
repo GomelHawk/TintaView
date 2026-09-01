@@ -10,6 +10,7 @@ method isn't there at all (e.g. some other object standing in for a real server)
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import logging
 import subprocess
@@ -196,6 +197,15 @@ class UpdateCheckWorker(QtCore.QObject):
 
     update_available = QtCore.Signal(str, str)  # (latest_tag, current_version)
 
+    def __init__(self, channel: str = "stable") -> None:
+        super().__init__()
+        # Held rather than read from config on each run: this fires on a worker thread,
+        # and the config the tray started with is the one its menus already reflect.
+        self._channel = channel
+
+    def set_channel(self, channel: str) -> None:
+        self._channel = channel
+
     def fetch(self) -> None:
         threading.Thread(target=self._run, daemon=True, name="tv-tray-update-check").start()
 
@@ -208,7 +218,7 @@ class UpdateCheckWorker(QtCore.QObject):
             return
 
         try:
-            release = update_mod.latest_release()
+            release = update_mod.latest_release(channel=self._channel)
             if release is None:
                 return
             tag = str(release.get("tag_name") or "").lstrip("vV").strip()
@@ -220,6 +230,42 @@ class UpdateCheckWorker(QtCore.QObject):
         self.update_available.emit(tag, __version__)
 
 
+class DoctorWorker(QtCore.QObject):
+    """Runs `tintaview doctor` off the GUI thread and hands back its report as text.
+
+    `doctor` writes a human report to stdout and returns an exit code; a windowed build
+    has no stdout anyone can read, so it is captured and shown in a dialog instead.
+    `redirect_stdout` is process-global, which is safe here only because a tray process
+    has no other stdout writer — and it is worth it: the alternative is spawning a
+    console the user has to keep open, on a platform where the tray runs as pythonw
+    precisely so that no console ever appears.
+    """
+
+    report_ready = QtCore.Signal(str)
+
+    def fetch(self) -> None:
+        threading.Thread(target=self._run, daemon=True, name="tv-tray-doctor").start()
+
+    def _run(self) -> None:
+        import contextlib
+        import io
+
+        try:
+            from tintaview.install.doctor import run_doctor
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                # paint=False: the paint self-test is interactive ("did the lights go
+                # red?") and would block forever with no terminal to answer from.
+                run_doctor(verbose=True, paint=False)
+            report = buffer.getvalue().strip()
+        except Exception:
+            log.exception("doctor run failed")
+            self.report_ready.emit("")
+            return
+        self.report_ready.emit(report)
+
+
 class TrayApp(QtCore.QObject):
     """Owns the tray icon, the flyout and the polling timers.
 
@@ -227,6 +273,12 @@ class TrayApp(QtCore.QObject):
     running Qt event loop: tests build a `TrayApp` directly against a fake server
     and call `_poll_state()` / `_apply_state()` synchronously.
     """
+
+    #: Emitted from an HTTP worker thread when a second `tintaview` launch asks this
+    #: instance to surface itself (see `StatusServer.request_show`). A signal, not a
+    #: direct call: showing a widget from a non-GUI thread is undefined behaviour, and
+    #: a queued signal is Qt's supported way across that boundary.
+    show_requested = QtCore.Signal()
 
     def __init__(self, cfg: Config, server: Any, app: QtWidgets.QApplication) -> None:
         super().__init__()
@@ -257,8 +309,18 @@ class TrayApp(QtCore.QObject):
         self._stats_worker = StatsWorker(cfg)
         self._stats_worker.results_ready.connect(self._apply_results)
 
-        self._update_worker = UpdateCheckWorker()
+        self._update_worker = UpdateCheckWorker(cfg.update.channel)
         self._update_worker.update_available.connect(self._on_update_available)
+
+        self._doctor_worker = DoctorWorker()
+        self._doctor_worker.report_ready.connect(self._show_doctor_report)
+        self._doctor_dialog: QtWidgets.QDialog | None = None
+
+        self.show_requested.connect(self._on_show_requested)
+        # A second launch of TintaView pops this instance's panel instead of exiting in
+        # silence. Guarded because `server` may be any object with a state payload.
+        with contextlib.suppress(AttributeError):
+            server.on_show = self.show_requested.emit
 
         self.flyout = Flyout(
             collapsed=cfg.ui.collapsed_agents,
@@ -320,14 +382,116 @@ class TrayApp(QtCore.QObject):
         # this check mark has to be re-synced after an accept or the menu starts
         # contradicting the dialog.
         self._sound_action = sound_action
+
+        pause_action = menu.addAction(t("tray.menu.pause_lighting"))
+        pause_action.setCheckable(True)
+        pause_action.setChecked(self._lighting_paused())
+        pause_action.toggled.connect(self._set_paused)
+        # Same reason as the chime action: the menu is rebuilt on a language change and
+        # the check mark has to be re-synced from the controller, not remembered here.
+        self._pause_action = pause_action
+
         menu.addSeparator()
         menu.addAction(t("tray.menu.settings"), self._open_settings)
         menu.addAction(t("tray.menu.check_updates"), self._check_updates)
+        menu.addAction(t("tray.menu.open_logs"), self._open_logs)
+        menu.addAction(t("tray.menu.diagnostics"), self._run_diagnostics)
         menu.addSeparator()
         menu.addAction(t("tray.menu.about"), self._show_about)
         menu.addSeparator()
         menu.addAction(t("tray.menu.quit"), self._app.quit)
         return menu
+
+    # --- lighting pause -----------------------------------------------------
+
+    def _controller(self):
+        """The lighting controller, or None when `server` is a stand-in without one."""
+        return getattr(self._server, "controller", None)
+
+    def _lighting_paused(self) -> bool:
+        controller = self._controller()
+        return bool(getattr(controller, "paused", False))
+
+    def _set_paused(self, paused: bool) -> None:
+        """Release the lights (or take them back). Runtime-only, never written to
+        config — see `LightController.set_paused`."""
+        controller = self._controller()
+        if controller is None:
+            return
+        try:
+            controller.set_paused(paused)
+        except Exception:
+            log.exception("could not %s lighting", "pause" if paused else "resume")
+
+    # --- support actions ----------------------------------------------------
+
+    def _open_logs(self) -> None:
+        """Open the log directory in the platform file manager.
+
+        Worth a menu item because the logs live next to the venv under
+        `%LOCALAPPDATA%\\TintaView` on Windows — a path nobody finds by guessing, in a
+        build with no console to print it in.
+        """
+        from tintaview.core.log import log_path
+
+        folder = log_path().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            opened = QtGui.QDesktopServices.openUrl(
+                QtCore.QUrl.fromLocalFile(str(folder))
+            )
+        except OSError:
+            log.exception("could not open the logs folder")
+            opened = False
+        if not opened:
+            QtWidgets.QMessageBox.information(
+                None, "TintaView", t("tray.logs.open_failed", path=str(folder))
+            )
+
+    def _run_diagnostics(self) -> None:
+        """Run `doctor` in the background and show its report in a dialog.
+
+        The dialog opens immediately on a "running…" placeholder rather than after the
+        run: `doctor` probes the daemon, the lighting engine and every agent's hooks
+        over the network, which takes seconds — long enough that a menu item that
+        appeared to do nothing would get clicked again.
+        """
+        dialog = self._doctor_dialog
+        if dialog is None:
+            dialog = QtWidgets.QDialog()
+            dialog.setWindowTitle(t("tray.diagnostics.title"))
+            dialog.resize(760, 520)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            view = QtWidgets.QPlainTextEdit()
+            view.setReadOnly(True)
+            # Monospace: `doctor` aligns its report in columns, which a proportional
+            # font shreds. Selectable (a read-only QPlainTextEdit still is) so the
+            # report can be copied into a bug report.
+            view.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+            layout.addWidget(view)
+            buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            dialog._view = view  # type: ignore[attr-defined]
+            self._doctor_dialog = dialog
+
+        dialog._view.setPlainText(t("tray.diagnostics.running"))  # type: ignore[attr-defined]
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._doctor_worker.fetch()
+
+    def _show_doctor_report(self, report: str) -> None:
+        dialog = self._doctor_dialog
+        if dialog is None:
+            return
+        dialog._view.setPlainText(report or t("tray.diagnostics.failed"))  # type: ignore[attr-defined]
+
+    def _on_show_requested(self) -> None:
+        """A second `tintaview` launch asked this instance to surface itself."""
+        if self._usage_results:
+            self.flyout.set_results(self._usage_results)
+        self._show_flyout_near_cursor()
 
     def _set_sound(self, on: bool) -> None:
         self._cfg.ui.chime_on_confirm = on
@@ -403,6 +567,10 @@ class TrayApp(QtCore.QObject):
         self._cfg.ui.language = new_cfg.ui.language
         self._cfg.stats.poll_seconds = new_cfg.stats.poll_seconds
         self._cfg.update.check = new_cfg.update.check
+        self._cfg.update.channel = new_cfg.update.channel
+        # The worker captured the channel when it was built, so switching channels in
+        # the dialog would otherwise keep checking the old one until the next restart.
+        self._update_worker.set_channel(new_cfg.update.channel)
         self._cfg.engine.mode = new_cfg.engine.mode
         for status in ("idle", "working", "confirm"):
             setattr(self._cfg.colors, status, getattr(new_cfg.colors, status))
@@ -528,7 +696,7 @@ class TrayApp(QtCore.QObject):
             QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.unsupported"))
             return
 
-        release = update_mod.latest_release()
+        release = update_mod.latest_release(channel=self._cfg.update.channel)
         if release is None:
             QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.check_failed"))
             return
@@ -557,7 +725,7 @@ class TrayApp(QtCore.QObject):
 
         # The installer replaces files this process is running from, so hand off and let
         # run_update's own platform logic (verify SHA-256, run silently) take over.
-        code = update_mod.run_update(check_only=False)
+        code = update_mod.run_update(check_only=False, channel=self._cfg.update.channel)
         if code != 0:
             QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.update.failed"))
 
@@ -576,7 +744,10 @@ class TrayApp(QtCore.QObject):
 
     def _apply_state(self, payload: dict) -> None:
         agents_payload = payload.get("agents", {})
-        self.flyout.set_status({k: v.get("effective", "none") for k, v in agents_payload.items()})
+        self.flyout.set_status(
+            {k: v.get("effective", "none") for k, v in agents_payload.items()},
+            {k: v.get("tool", "") for k, v in agents_payload.items()},
+        )
 
         effective = payload.get("effective", "none")
 

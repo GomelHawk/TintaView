@@ -9,8 +9,11 @@
 
   "tray.menu.refresh_usage": "Обновить расход",
   "tray.menu.sound_on_confirm": "Звук при запросе подтверждения",
+  "tray.menu.pause_lighting": "Приостановить подсветку",
   "tray.menu.settings": "Настройки…",
   "tray.menu.check_updates": "Проверить обновления",
+  "tray.menu.open_logs": "Открыть папку журналов",
+  "tray.menu.diagnostics": "Запустить диагностику…",
   "tray.menu.about": "О программе",
   "tray.menu.quit": "Выход",
 
@@ -30,6 +33,10 @@
   "tray.update.up_to_date": "У вас последняя версия ({version}).",
   "tray.update.confirm": "Доступна версия {latest} — у вас {current}.{notes}\n\nОбновление никогда не меняет ни ваши настройки, ни конфигурацию хуков ваших агентов.\n\nУстановить сейчас?",
   "tray.update.failed": "Обновление не завершилось. Запустите `tintaview update` в терминале, чтобы увидеть причину.",
+  "tray.diagnostics.title": "Диагностика TintaView",
+  "tray.diagnostics.running": "Выполняется диагностика, это может занять несколько секунд…",
+  "tray.diagnostics.failed": "Не удалось запустить диагностику. Выполните `tintaview doctor` в терминале.",
+  "tray.logs.open_failed": "Не удалось открыть папку журналов ({path}).",
 
   "flyout.no_agents": "Ни один агент не включён.",
   "flyout.no_usage_data": "Нет данных о расходе.",
@@ -45,6 +52,7 @@
   "settings.poll": "Интервал обновления расхода:",
   "settings.poll.suffix": "с",
   "settings.update_check": "Проверять обновления при запуске",
+  "settings.update_beta": "Включать предварительные версии (бета)",
   "settings.language": "Язык интерфейса:",
   "settings.language.hint": "Мастер настройки остаётся на английском, а данные, которые возвращает API самого агента, сохраняют исходные формулировки.",
   "settings.engine": "Движок подсветки:",
@@ -108,6 +116,7 @@
   "usage.claude.header": "Ваши лимиты расхода",
   "usage.claude.header_tier": "Ваши лимиты расхода · {tier}",
   "usage.claude.header_estimate": "Расход Claude — оценка (официальные % недоступны)",
+  "usage.claude.header_estimate_unpriced": "Использование Claude — оценка (официальные % недоступны; неизвестная модель по тарифу по умолчанию)",
   "usage.claude.session": "5-часовой лимит",
   "usage.claude.weekly_all": "Неделя · все модели",
   "usage.claude.weekly_model": "Неделя · {model}",

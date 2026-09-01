@@ -46,11 +46,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     server = StatusServer(cfg)
     if not server.start():
-        # Another instance owns the port. For the tray that's a reason to stop (two
-        # tray icons would be confusing); headless can just exit quietly.
-        print(f"TintaView is already running on {cfg.server.host}:{cfg.server.port}.",
-              file=sys.stderr)
-        return 0
+        return _defer_to_running_instance(cfg, headless=args.headless)
 
     if args.headless:
         print(f"TintaView status broker listening on {server.url}")
@@ -76,6 +72,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return run_tray(cfg, server)
     finally:
         server.stop()
+
+
+def _defer_to_running_instance(cfg, headless: bool) -> int:
+    """Another process owns the port, so this one steps aside.
+
+    Two tray icons would be confusing, but exiting in silence is worse: launched from a
+    Start-menu shortcut there is no console to read the message in, so a second launch
+    looks like nothing happened at all. Asking the running instance to open its usage
+    panel is what the user meant by launching the app again, so do that — the running
+    instance is TintaView's own `/show`, on loopback, and the worst it can do is pop a
+    window a tray click already opens. A headless daemon has no panel and no `on_show`,
+    so it answers `shown: false` and this falls back to the plain message.
+    """
+    from .core.server import request_show
+
+    host, port = cfg.server.host, cfg.server.port
+    if not headless and request_show(host, port):
+        print(f"TintaView is already running on {host}:{port} — showed its usage panel.")
+        return 0
+    print(f"TintaView is already running on {host}:{port}.", file=sys.stderr)
+    return 0
 
 
 def _cmd_setup(args: argparse.Namespace) -> int:

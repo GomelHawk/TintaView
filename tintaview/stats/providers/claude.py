@@ -49,13 +49,42 @@ OAUTH_BETA = "oauth-2025-04-20"
 # Best-effort and not kept perfectly in sync with pricing changes — the fallback path
 # is explicitly labelled "estimate" in the UI for this reason.
 PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-5": (5.0, 25.0),
     "claude-opus-4-8": (5.0, 25.0),
     "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
     "claude-fable-5": (10.0, 50.0),
-    "claude-sonnet-5": (3.0, 15.0),
+    "claude-mythos-5": (10.0, 50.0),
+    "claude-sonnet-5": (2.0, 10.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
 }
+
+#: What an unrecognised model costs. NOT (0.0, 0.0): a model released after this build
+#: would then contribute exactly nothing to the estimate, which reads as a plausible
+#: (just quietly low) number rather than as a gap — the failure mode nobody notices.
+#: The flagship rate is the safer guess, since a model this table has never heard of is
+#: far more likely to be a new top-tier one than a new cheap one. The estimate says so:
+#: any unpriced token switches the section header to `header_estimate_unpriced`.
+DEFAULT_PRICING: tuple[float, float] = (5.0, 25.0)
+
+#: Model ids already reported as unpriced, so a 30k-line transcript sweep logs each new
+#: model once instead of once per usage line.
+_warned_models: set[str] = set()
+
+
+def _rates_for(model: str | None) -> tuple[tuple[float, float], bool]:
+    """``((input_rate, output_rate), priced)`` for a transcript's model id."""
+    if model in PRICING:
+        return PRICING[model], True
+    if model and model not in _warned_models:
+        _warned_models.add(model)
+        log.info(
+            "no price for model %r; estimating it at the default $%.2f/$%.2f per MTok. "
+            "Add it to stats.providers.claude.PRICING to make the estimate exact.",
+            model, *DEFAULT_PRICING,
+        )
+    return DEFAULT_PRICING, False
 
 
 # --------------------------------------------------------------------------- paths
@@ -246,7 +275,10 @@ def _reconstruct_from_jsonl(home: Path) -> dict[str, dict[str, float]]:
     """Approximate 5h and 7d token totals + cost from transcript usage lines."""
     now = datetime.now(UTC)
     cutoffs = {"5h": now - timedelta(hours=5), "week": now - timedelta(days=7)}
-    acc = {k: {"in": 0, "out": 0, "cache_r": 0, "cache_w": 0, "cost": 0.0} for k in cutoffs}
+    acc = {
+        k: {"in": 0, "out": 0, "cache_r": 0, "cache_w": 0, "cost": 0.0, "unpriced": 0}
+        for k in cutoffs
+    }
 
     pattern = os.path.join(home, "projects", "**", "*.jsonl")
     for path in glob.glob(pattern, recursive=True):
@@ -269,7 +301,7 @@ def _reconstruct_from_jsonl(home: Path) -> dict[str, dict[str, float]]:
                     except ValueError:
                         continue
                     model = _norm_model(msg.get("model"))
-                    in_r, out_r = PRICING.get(model, (0.0, 0.0))
+                    (in_r, out_r), priced = _rates_for(model)
                     itok = usage.get("input_tokens", 0) or 0
                     otok = usage.get("output_tokens", 0) or 0
                     crd = usage.get("cache_read_input_tokens", 0) or 0
@@ -283,9 +315,20 @@ def _reconstruct_from_jsonl(home: Path) -> dict[str, dict[str, float]]:
                             a["cache_r"] += crd
                             a["cache_w"] += cwr
                             a["cost"] += cost
+                            if not priced:
+                                a["unpriced"] += itok + otok + crd + cwr
         except OSError:
             continue
     return acc
+
+
+def _has_unpriced(acc: dict[str, dict[str, float]]) -> bool:
+    """Did any window include tokens from a model `PRICING` doesn't know?
+
+    Drives the header wording — the cost is still shown (a guessed rate beats a silent
+    zero), but the panel says out loud that part of it was guessed.
+    """
+    return any(a.get("unpriced", 0) for a in acc.values())
 
 
 def _fallback_rows(acc: dict[str, dict[str, float]]) -> list[UsageRow]:
@@ -359,6 +402,8 @@ class ClaudeUsageProvider(UsageProvider):
         except OSError as e:
             return UsageResult(agent=self.key, header=header, source="estimate",
                                 error=t("usage.claude.error.unavailable", detail=repr(e)))
+        if _has_unpriced(acc):
+            header = t("usage.claude.header_estimate_unpriced")
         rows = _fallback_rows(acc)
         if not rows:
             return UsageResult(agent=self.key, header=header, source="estimate",

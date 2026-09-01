@@ -137,17 +137,38 @@ tool-start, tool-end`.
 | `GET` | `/{session-start,session-end,working,idle,confirm}` | Agent-less aliases defaulting to `agent=claude`, so a hand-written one-line `curl` hook keeps working |
 | `GET` | `/state` | Read-only status for the tray and `doctor` |
 | `GET` | `/healthz` | Liveness for `doctor` |
+| `GET` | `/show` | A second launch asks the running instance to surface its usage panel |
 
 Two invariants in the ingress path:
 
 - **Acknowledge before any lighting I/O.** A slow Chroma or OpenRGB call must never be able to
   stall an agent.
-- **`/state` must never touch `last_ping`.** Polling it would otherwise keep the watchdog alive
-  forever and defeat the crash-safety release.
+- **`/state` must never touch a session's last-seen stamp.** Polling it would otherwise keep the
+  watchdog from ever expiring anything and defeat the crash-safety release.
+
+`/show` exists because a second `tintaview` launch used to print "already running" to a console
+that a Start-menu shortcut doesn't have, so it looked like nothing happened. The tray registers
+`StatusServer.on_show`; headless registers nothing and the endpoint answers `shown: false`, which
+is what makes the second process fall back to the message instead of claiming a window appeared.
+It runs on an HTTP worker thread, so a GUI callback **must** marshal to its own thread (the tray
+uses a Qt signal).
 
 **State model.** Sessions are keyed by `(agent, sid)`, not `sid` alone. Colour priority is global
 and unchanged: `confirm > working > idle > none`. `/state` also reports a per-agent breakdown,
-which the usage flyout renders as a status dot per agent. The tray tooltip deliberately
+which the usage flyout renders as a status dot per agent.
+
+**Every session carries its own last-seen stamp, and the watchdog expires sessions individually**
+(`StateStore.expired` / `end_many`). A single store-wide clock — which is what this was — is wrong
+in both directions once more than one agent is running: a chatty session vouches for every stale
+one (so a crashed agent's colour never gets released, defeating the only thing the watchdog is
+for), and when the timeout finally fires it clears *everything* (so one quiet-but-alive session
+takes every other session's lighting down with it). Don't collapse it back to one timestamp.
+
+**`tool=` is display-only.** `tool-start` records the tool name on its session and `tool-end`
+clears it; `/state` reports one `tool` per agent, picked from a session that is actually
+`working`, and the flyout draws it beside the agent's name. It must never influence the effective
+status or the lighting — a plain `working` ping carries no tool name and so deliberately leaves
+the last one alone (`StateStore.set(tool=None)` means "unchanged", `tool=""` means "cleared"). The tray tooltip deliberately
 does **not** use it: Shell_NotifyIcon's `szTip` is a fixed `WCHAR[128]`, so the tooltip is
 the aggregate session count and nothing else — no per-agent lines, no engine note. A
 lighting-engine problem is announced by a tray balloon instead.
@@ -291,7 +312,13 @@ rate-limited response replace good data with an estimate.
 
 - **Claude** — `GET https://api.anthropic.com/api/oauth/usage` with the OAuth token from
   `~/.claude/.credentials.json`; falls back to an estimate reconstructed from
-  `~/.claude/projects/**/*.jsonl`, labelled as an estimate.
+  `~/.claude/projects/**/*.jsonl`, labelled as an estimate. The fallback prices transcripts from
+  `PRICING` in the provider, which **will** go stale as models ship. An unrecognised model is
+  charged at `DEFAULT_PRICING` (the flagship rate) and flips the section header to
+  `usage.claude.header_estimate_unpriced`, never at zero: a model priced at nothing produces a
+  plausible-but-quietly-low total that nobody notices, which is exactly how `claude-opus-5` — the
+  model most sessions actually run — contributed $0.00 to the estimate for a whole release.
+  `tests/test_stats.py` pins the current models' rates per model.
 - **Codex** — entirely local: `token_count` records in `~/.codex/sessions/**/rollout-*.jsonl`.
   `info.total_token_usage` is always present; `rate_limits.primary/secondary` only on
   ChatGPT-plan sessions (`null` on API-key sessions). Show official percentages when present,
@@ -459,6 +486,15 @@ the release's own install script, **verifies its SHA-256** against the release's
 and re-runs it: `install.ps1 -Silent` on Windows (detached, since it stops the interpreter running
 out of the venv it is about to replace), `sh install.sh` on Linux/macOS. `-Prefix` is derived from
 `sys.prefix` so a non-default install upgrades itself instead of spawning a second copy.
+
+`update.channel` picks what counts as an update. `stable` (the default) asks GitHub for
+`/releases/latest`, which already excludes drafts and pre-releases. `beta` reads the release
+*list* and takes the highest version on it, pre-releases included but drafts never — by parsed
+version, not by position, since GitHub returns publication order and that stops being version
+order the moment a patch to an older line ships after a newer pre-release. This is why
+`compare_versions` **orders** pre-release suffixes (`1.2.0-rc1 < 1.2.0-rc2 < 1.2.0`) instead of
+stripping them as it once did: treating the suffix as noise pins a beta user to whichever rc they
+installed, because every later rc *and* the final release then compare equal to it.
 
 ### CI and release
 

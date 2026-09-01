@@ -36,6 +36,9 @@ if TYPE_CHECKING:  # pragma: no cover - types only, no runtime import of the sta
 CARD_BG = QtGui.QColor("#242427")
 TEXT = QtGui.QColor("#e7e7ea")
 SUBTLE = QtGui.QColor("#9b9ba3")
+#: Secondary header ink, for the running-tool name beside an agent's title — it has to
+#: read as an annotation on the agent, not as a second agent.
+FAINT = QtGui.QColor("#75757e")
 TRACK = QtGui.QColor("#3b3b42")
 FILL = QtGui.QColor("#6c8cff")
 WARN = QtGui.QColor("#e0a63a")
@@ -314,6 +317,7 @@ class Flyout(QtWidgets.QWidget):
         self._on_settings = on_settings
         self._results: dict[str, UsageResult] = {}
         self._status: dict[str, str] = {}  # agent key -> effective session status
+        self._tools: dict[str, str] = {}  # agent key -> name of the tool it's running
         self._collapsed: set[str] = set(collapsed or ())
         self._on_toggle = on_toggle
         self.hidden_at = 0.0
@@ -369,12 +373,18 @@ class Flyout(QtWidgets.QWidget):
         self._resize_to_content()
         self.update()
 
-    def set_status(self, status: dict[str, str]) -> None:
+    def set_status(self, status: dict[str, str], tools: dict[str, str] | None = None) -> None:
         """`status`: dict[str, str] of agent key -> effective session status, from
         `StateStore.snapshot()`'s `agents[key]["effective"]` (or absent entirely for
         an agent with no open session). Drives each section's status dot — no resize
-        needed, since the dot doesn't change a section's height."""
+        needed, since the dot doesn't change a section's height.
+
+        `tools`: the matching `agents[key]["tool"]`, the name of what that agent is
+        running right now ("Bash", "Edit"), "" when it isn't running anything nameable.
+        Drawn beside the title, so it needs no resize either.
+        """
         self._status = dict(status or {})
+        self._tools = dict(tools or {})
         self.update()
 
     def _status_dot_color(self, agent: str) -> QtGui.QColor | None:
@@ -558,13 +568,32 @@ class Flyout(QtWidgets.QWidget):
             # `_status_dot_color`) — the same colours the tray icon and hardware
             # lighting use, read from `cfg.colors` rather than hardcoded here.
             dot_color = self._status_dot_color(result.agent)
+            tool = self._tools.get(result.agent, "")
+            after_name_x = name_x + QtGui.QFontMetrics(f).horizontalAdvance(name)
             if dot_color is not None:
-                text_w = QtGui.QFontMetrics(f).horizontalAdvance(name)
                 dot_r = 3.5
                 dot_gap = 12
                 p.setPen(Qt.NoPen)
                 p.setBrush(dot_color)
-                p.drawEllipse(QtCore.QPointF(name_x + text_w + dot_gap, header.center().y()), dot_r, dot_r)
+                p.drawEllipse(QtCore.QPointF(after_name_x + dot_gap, header.center().y()), dot_r, dot_r)
+                after_name_x += dot_gap + dot_r
+
+            if tool:
+                # What the agent is busy *with*, after the status dot: the dot says it
+                # is working, this says on what. Elided into whatever the title and dot
+                # left, so a long tool name can never reach the chevron or spill out of
+                # the card — the section's height is fixed by this point.
+                tool_x = after_name_x + 8
+                tool_w = (header.x() + header.width()
+                          - (CHEVRON_W if section.collapsible else 0) - tool_x)
+                if tool_w > 16:
+                    p.setPen(FAINT)
+                    p.drawText(
+                        QRectF(tool_x, header.y(), tool_w, 20),
+                        Qt.AlignLeft | Qt.AlignVCenter,
+                        QtGui.QFontMetrics(f).elidedText(tool, Qt.ElideRight, int(tool_w)),
+                    )
+                    p.setPen(SUBTLE)
 
             if section.collapsible:
                 _draw_chevron(p, header, section.collapsed)

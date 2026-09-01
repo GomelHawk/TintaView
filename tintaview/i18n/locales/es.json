@@ -8,8 +8,11 @@
 
   "tray.menu.refresh_usage": "Actualizar el uso",
   "tray.menu.sound_on_confirm": "Sonido al pedir confirmación",
+  "tray.menu.pause_lighting": "Pausar la iluminación",
   "tray.menu.settings": "Ajustes…",
   "tray.menu.check_updates": "Buscar actualizaciones",
+  "tray.menu.open_logs": "Abrir la carpeta de registros",
+  "tray.menu.diagnostics": "Ejecutar diagnóstico…",
   "tray.menu.about": "Acerca de",
   "tray.menu.quit": "Salir",
 
@@ -29,6 +32,10 @@
   "tray.update.up_to_date": "Estás al día (versión {version}).",
   "tray.update.confirm": "La versión {latest} ya está disponible — tienes la {current}.{notes}\n\nUna actualización nunca cambia tus ajustes ni la configuración de hooks de tus agentes.\n\n¿Instalarla ahora?",
   "tray.update.failed": "La actualización no se completó. Ejecuta `tintaview update` en un terminal para ver por qué.",
+  "tray.diagnostics.title": "Diagnóstico de TintaView",
+  "tray.diagnostics.running": "Ejecutando el diagnóstico; puede tardar unos segundos…",
+  "tray.diagnostics.failed": "No se pudo ejecutar el diagnóstico. Ejecuta `tintaview doctor` en una terminal.",
+  "tray.logs.open_failed": "No se pudo abrir la carpeta de registros ({path}).",
 
   "flyout.no_agents": "Ningún agente activado.",
   "flyout.no_usage_data": "Sin datos de uso.",
@@ -44,6 +51,7 @@
   "settings.poll": "Intervalo de actualización del uso:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Buscar actualizaciones al iniciar",
+  "settings.update_beta": "Incluir versiones preliminares (beta)",
   "settings.language": "Idioma de la interfaz:",
   "settings.language.hint": "El asistente de configuración se mantiene en inglés, y las cifras que informa la API de cada agente conservan su redacción original.",
   "settings.engine": "Motor de iluminación:",
@@ -107,6 +115,7 @@
   "usage.claude.header": "Tus límites de uso",
   "usage.claude.header_tier": "Tus límites de uso · {tier}",
   "usage.claude.header_estimate": "Uso de Claude — estimación (el % oficial no está disponible)",
+  "usage.claude.header_estimate_unpriced": "Uso de Claude — estimación (% oficial no disponible; modelo desconocido con la tarifa predeterminada)",
   "usage.claude.session": "Límite de 5 horas",
   "usage.claude.weekly_all": "Semanal · todos los modelos",
   "usage.claude.weekly_model": "Semanal · {model}",

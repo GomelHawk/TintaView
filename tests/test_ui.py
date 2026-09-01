@@ -317,7 +317,7 @@ def test_tray_sound_toggle_persists(tray, tmp_path):
 def test_update_check_worker_emits_only_when_a_newer_release_exists(qapp, monkeypatch):
     from tintaview.install import update as update_mod
 
-    monkeypatch.setattr(update_mod, "latest_release", lambda: {"tag_name": "v9.9.9"})
+    monkeypatch.setattr(update_mod, "latest_release", lambda **kw: {"tag_name": "v9.9.9"})
     worker = tray_mod.UpdateCheckWorker()
     seen = []
     worker.update_available.connect(lambda tag, current: seen.append((tag, current)))
@@ -337,11 +337,11 @@ def test_update_check_worker_silent_when_already_current_or_unreachable(qapp, mo
     seen = []
     worker.update_available.connect(lambda tag, current: seen.append((tag, current)))
 
-    monkeypatch.setattr(update_mod, "latest_release", lambda: {"tag_name": f"v{__version__}"})
+    monkeypatch.setattr(update_mod, "latest_release", lambda **kw: {"tag_name": f"v{__version__}"})
     worker._run()
     assert seen == []
 
-    monkeypatch.setattr(update_mod, "latest_release", lambda: None)  # network/rate-limit/no-release
+    monkeypatch.setattr(update_mod, "latest_release", lambda **kw: None)  # network/rate-limit/no-release
     worker._run()
     assert seen == []
 
@@ -518,12 +518,14 @@ def test_brand_mark_shares_the_status_geometry_and_is_multicolour(qapp):
 
 
 class _FakeController:
-    """Only what `TrayApp._apply_settings` calls on a `LightController`."""
+    """Only what `TrayApp._apply_settings` and the pause action call on a
+    `LightController`."""
 
     def __init__(self) -> None:
         self.resets = 0
         self.applied: list[str] = []
         self.blinking = False
+        self.paused = False
 
     def reset_engine(self) -> None:
         self.resets += 1
@@ -531,8 +533,11 @@ class _FakeController:
     def apply(self, status: str) -> None:
         self.applied.append(status)
 
+    def set_paused(self, paused: bool) -> None:
+        self.paused = paused
+
     def engine_status(self) -> dict:
-        return {"name": "none", "active": False, "note": None}
+        return {"name": "none", "active": False, "note": None, "paused": self.paused}
 
 
 class _FakeState:
@@ -729,3 +734,161 @@ def test_apply_settings_survives_a_server_without_a_controller(tray):
     app_instance._apply_settings(_accepted_copy(app_instance, **{"engine.mode": "none"}))
 
     assert app_instance._cfg.engine.mode == "none"
+
+
+# --------------------------------------------------------------------------- menu actions
+
+
+def _action(app_instance, key: str):
+    """The menu action whose text is the English translation of `key`."""
+    from tintaview.i18n import t
+
+    label = t(key)
+    return next(a for a in app_instance._menu.actions() if a.text() == label)
+
+
+def test_the_menu_offers_pause_logs_and_diagnostics(tray):
+    """The two things a stuck user needs (where the logs are, what `doctor` says) plus
+    the one thing a user recording their screen needs."""
+    app_instance, _server = tray
+    for key in ("tray.menu.pause_lighting", "tray.menu.open_logs", "tray.menu.diagnostics"):
+        assert _action(app_instance, key) is not None
+
+
+def test_pause_action_drives_the_controller(tray_with_controller):
+    app_instance, server = tray_with_controller
+    app_instance._menu = app_instance._build_menu()  # rebuilt now the controller exists
+    action = _action(app_instance, "tray.menu.pause_lighting")
+    assert action.isCheckable()
+    assert action.isChecked() is False
+
+    action.setChecked(True)
+    assert server.controller.paused is True
+    action.setChecked(False)
+    assert server.controller.paused is False
+
+
+def test_pause_state_survives_a_menu_rebuild(tray_with_controller):
+    """The menu is rebuilt wholesale on a language change, so the check mark has to be
+    re-read from the controller rather than remembered by the old menu."""
+    from tintaview.i18n import t
+
+    app_instance, server = tray_with_controller
+    server.controller.paused = True
+
+    app_instance._menu = app_instance._build_menu()
+
+    assert _action(app_instance, "tray.menu.pause_lighting").isChecked() is True
+    assert t("tray.menu.pause_lighting") == "Pause lighting"  # the fixture runs in English
+
+
+def test_pause_is_a_no_op_without_a_controller(tray):
+    """`TrayApp` is documented as working against any stand-in for a StatusServer."""
+    app_instance, _server = tray
+    app_instance._set_paused(True)  # must not raise
+
+
+def test_open_logs_reports_a_failure_instead_of_raising(tray, monkeypatch):
+    app_instance, _server = tray
+    shown: list[str] = []
+    monkeypatch.setattr(
+        tray_mod.QtGui.QDesktopServices, "openUrl", staticmethod(lambda url: False)
+    )
+    monkeypatch.setattr(
+        tray_mod.QtWidgets.QMessageBox, "information",
+        staticmethod(lambda *a, **k: shown.append(a[-1])),
+    )
+
+    app_instance._open_logs()
+
+    assert shown and "logs" in shown[0].lower()
+
+
+def test_diagnostics_shows_a_placeholder_then_the_report(tray, monkeypatch):
+    """The dialog opens on "running…" rather than after the run: `doctor` probes the
+    daemon, the engine and every agent's hooks over the network, which takes seconds."""
+    app_instance, _server = tray
+    monkeypatch.setattr(tray_mod.DoctorWorker, "fetch", lambda self: None)
+
+    app_instance._run_diagnostics()
+    view = app_instance._doctor_dialog._view
+    assert "Running diagnostics" in view.toPlainText()
+
+    app_instance._show_doctor_report("DAEMON  ok\nENGINE  ok")
+    assert view.toPlainText() == "DAEMON  ok\nENGINE  ok"
+    app_instance._doctor_dialog.close()
+
+
+def test_diagnostics_says_so_when_the_run_failed(tray, monkeypatch):
+    app_instance, _server = tray
+    monkeypatch.setattr(tray_mod.DoctorWorker, "fetch", lambda self: None)
+
+    app_instance._run_diagnostics()
+    app_instance._show_doctor_report("")  # what DoctorWorker emits on an exception
+
+    assert "tintaview doctor" in app_instance._doctor_dialog._view.toPlainText()
+    app_instance._doctor_dialog.close()
+
+
+# --------------------------------------------------------------------------- second launch
+
+
+def test_the_server_gets_a_show_hook(tray):
+    """A second `tintaview` launch pops this instance's panel rather than exiting in
+    silence — from a Start-menu shortcut there is no console to read a message in."""
+    app_instance, server = tray
+    assert callable(server.on_show)
+
+    server.on_show()  # what StatusServer.request_show() calls, from an HTTP thread
+    app_instance.flyout.hide()
+
+
+def test_show_requested_opens_the_flyout(tray):
+    app_instance, _server = tray
+    assert not app_instance.flyout.isVisible()
+
+    app_instance._on_show_requested()
+
+    assert app_instance.flyout.isVisible()
+    app_instance.flyout.hide()
+
+
+# --------------------------------------------------------------------------- running tool
+
+
+def test_state_poll_passes_the_running_tool_to_the_flyout(tray):
+    app_instance, server = tray
+    server.set({
+        "effective": "working",
+        "agents": {"claude": {"effective": "working", "count": 1, "tool": "Bash"}},
+        "count": 1,
+    })
+
+    app_instance._poll_state()
+
+    assert app_instance.flyout._tools == {"claude": "Bash"}
+
+
+def test_flyout_paints_a_running_tool(qapp):
+    """The tool name is drawn beside the title, after the status dot — it must not
+    change the section's height, and a long one must not escape the card."""
+    flyout = Flyout()
+    flyout.set_results(_sample_results())
+    height_without = flyout.height()
+
+    flyout.set_status({"claude": "working"}, {"claude": "Bash"})
+    assert flyout.height() == height_without
+    flyout.render(QtGui.QPixmap(flyout.size()))  # must not raise
+
+    flyout.set_status({"claude": "working"}, {"claude": "A" * 300})
+    assert flyout.height() == height_without
+    flyout.render(QtGui.QPixmap(flyout.size()))
+
+
+def test_flyout_set_status_still_accepts_a_status_map_alone(qapp):
+    """The tools argument is optional — nothing that only knows about statuses breaks."""
+    flyout = Flyout()
+    flyout.set_results(_sample_results())
+    flyout.set_status({"claude": "idle"})
+    assert flyout._tools == {}
+    flyout.render(QtGui.QPixmap(flyout.size()))

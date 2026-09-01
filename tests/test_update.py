@@ -28,7 +28,16 @@ from tintaview.install import update as U
         ("2.0.0", "1.9.9", 1),
         ("v1.0.0", "1.0.0", 0),  # a leading "v" tag must not affect comparison
         ("1.0", "1.0.0", 0),  # missing components compare as zero
-        ("1.0.0-rc1", "1.0.0", 0),  # pre-release metadata is stripped before comparing
+        # Pre-releases are ordered, not discarded — the beta channel installs these
+        # tags, so an rc that compared equal to everything would pin an install to it.
+        ("1.0.0-rc1", "1.0.0", -1),  # a pre-release ranks below its own final release
+        ("1.0.0", "1.0.0-rc1", 1),
+        ("1.0.0-rc1", "1.0.0-rc2", -1),
+        ("1.0.0-rc2", "1.0.0-rc1", 1),
+        ("1.0.0-rc1", "1.0.0-rc1", 0),
+        ("1.0.0-beta.9", "1.0.0-beta.10", -1),  # numeric identifiers compare as numbers
+        ("1.0.0-rc1", "1.0.1", -1),  # release components still win over the suffix
+        ("1.0.0+build7", "1.0.0", 0),  # build metadata never affects precedence
     ],
 )
 def test_compare_versions(a: str, b: str, expected: int) -> None:
@@ -96,6 +105,117 @@ def test_latest_release_garbage_body_returns_none(monkeypatch):
     assert U.latest_release() is None
 
 
+# --------------------------------------------------------------------------- channels
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("stable", "stable"),
+        ("beta", "beta"),
+        ("BETA", "beta"),  # case and padding are forgiven, as elsewhere in config
+        ("  beta  ", "beta"),
+        ("nightly", "stable"),  # unrecognised means the safe channel, never an error
+        ("", "stable"),
+        (None, "stable"),
+    ],
+)
+def test_normalize_channel(raw, expected):
+    assert U.normalize_channel(raw) == expected
+
+
+def _capture_url(monkeypatch, payload: bytes) -> list[str]:
+    """Record which endpoint the updater actually asked for."""
+    seen: list[str] = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.full_url)
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(U.urllib.request, "urlopen", fake_urlopen)
+    return seen
+
+
+def test_stable_channel_asks_github_for_the_latest_release(monkeypatch):
+    """`/releases/latest` already excludes drafts and pre-releases — that is the whole
+    reason the stable channel keeps using it rather than filtering a list itself."""
+    seen = _capture_url(monkeypatch, _release_payload("v1.2.3"))
+    release = U.latest_release(channel="stable")
+    assert release["tag_name"] == "v1.2.3"
+    assert seen == [U.GITHUB_API_URL]
+
+
+def test_beta_channel_reads_the_release_list(monkeypatch):
+    seen = _capture_url(monkeypatch, json.dumps([{"tag_name": "v1.0.0"}]).encode("utf-8"))
+    U.latest_release(channel="beta")
+    assert seen == [U.GITHUB_RELEASES_URL]
+
+
+def test_beta_channel_picks_the_highest_version_not_the_first_listed(monkeypatch):
+    """GitHub returns releases in publication order, which stops being version order as
+    soon as a patch to an older line ships after a newer pre-release."""
+    payload = json.dumps([
+        {"tag_name": "v1.1.4"},  # published most recently, but an older line
+        {"tag_name": "v1.2.0-rc2"},
+        {"tag_name": "v1.2.0-rc1"},
+    ]).encode("utf-8")
+    _capture_url(monkeypatch, payload)
+    assert U.latest_release(channel="beta")["tag_name"] == "v1.2.0-rc2"
+
+
+def test_beta_channel_prefers_a_final_release_over_its_own_pre_releases(monkeypatch):
+    """Once 1.2.0 ships, a beta user must move onto it rather than being stranded on rc2."""
+    payload = json.dumps([
+        {"tag_name": "v1.2.0"},
+        {"tag_name": "v1.2.0-rc2"},
+    ]).encode("utf-8")
+    _capture_url(monkeypatch, payload)
+    assert U.latest_release(channel="beta")["tag_name"] == "v1.2.0"
+
+
+def test_beta_channel_skips_drafts(monkeypatch):
+    """Offering a pre-release is what this channel is for; offering an unpublished
+    draft is the one thing it must never do."""
+    payload = json.dumps([
+        {"tag_name": "v2.0.0-rc1", "draft": True},
+        {"tag_name": "v1.9.0"},
+    ]).encode("utf-8")
+    _capture_url(monkeypatch, payload)
+    assert U.latest_release(channel="beta")["tag_name"] == "v1.9.0"
+
+
+def test_beta_channel_with_no_published_releases_returns_none(monkeypatch):
+    _capture_url(monkeypatch, json.dumps([{"tag_name": "v1.0.0", "draft": True}]).encode("utf-8"))
+    assert U.latest_release(channel="beta") is None
+
+
+def test_beta_channel_ignores_a_non_list_body(monkeypatch):
+    _capture_url(monkeypatch, json.dumps({"tag_name": "v1.0.0"}).encode("utf-8"))
+    assert U.latest_release(channel="beta") is None
+
+
+def test_configured_channel_reads_the_config(monkeypatch, tmp_path):
+    # TINTAVIEW_HOME first: config.save() would otherwise write to the real install.
+    monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
+    from tintaview.core import config as config_mod
+
+    cfg = config_mod.Config()
+    cfg.update.channel = "beta"
+    config_mod.save(cfg)
+
+    assert U.configured_channel() == "beta"
+
+
+def test_configured_channel_falls_back_to_stable_when_config_is_unreadable(monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("config is on fire")
+
+    from tintaview.core import config as config_mod
+
+    monkeypatch.setattr(config_mod, "load", boom)
+    assert U.configured_channel() == "stable"
+
+
 # --------------------------------------------------------------------------- checksum verification
 
 
@@ -160,7 +280,7 @@ def test_download_and_verify_success_returns_path(tmp_path, monkeypatch):
 
 def test_check_only_never_downloads(monkeypatch, capsys):
     newer = f"{U._parse_version(__version__)[0]}.{U._parse_version(__version__)[1] + 1}.0"
-    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0: {"tag_name": newer, "assets": []})
+    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0, channel="stable": {"tag_name": newer, "assets": []})
 
     def boom(*args, **kwargs):
         raise AssertionError("check_only must never download anything")
@@ -168,15 +288,15 @@ def test_check_only_never_downloads(monkeypatch, capsys):
     monkeypatch.setattr(U, "_download", boom)
     monkeypatch.setattr(U, "_download_and_verify", boom)
 
-    rc = U.run_update(check_only=True)
+    rc = U.run_update(check_only=True, channel="stable")
     assert rc == 0
     out = capsys.readouterr().out
     assert "update is available" in out.lower()
 
 
 def test_up_to_date_reports_and_exits_zero(monkeypatch, capsys):
-    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0: {"tag_name": __version__, "assets": []})
-    rc = U.run_update(check_only=False)
+    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0, channel="stable": {"tag_name": __version__, "assets": []})
+    rc = U.run_update(check_only=False, channel="stable")
     assert rc == 0
     assert "up to date" in capsys.readouterr().out.lower()
 
@@ -184,7 +304,7 @@ def test_up_to_date_reports_and_exits_zero(monkeypatch, capsys):
 def test_failed_check_says_which_problem_it_was(monkeypatch, capsys):
     """"Network error, rate limit, or no releases" covers three problems with three
     different answers — and the most common one isn't the user's fault at all."""
-    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0: None)
+    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0, channel="stable": None)
 
     def fail_with(code: int):
         def _raise(req, timeout=None):
@@ -192,28 +312,28 @@ def test_failed_check_says_which_problem_it_was(monkeypatch, capsys):
         return _raise
 
     monkeypatch.setattr(U.urllib.request, "urlopen", fail_with(404))
-    assert U.run_update(check_only=False) == 1
+    assert U.run_update(check_only=False, channel="stable") == 1
     out = capsys.readouterr().out.lower()
     assert "no releases have been published" in out
     assert "isn't an error with your install" in out
 
     monkeypatch.setattr(U.urllib.request, "urlopen", fail_with(403))
-    assert U.run_update(check_only=False) == 1
+    assert U.run_update(check_only=False, channel="stable") == 1
     assert "rate-limiting" in capsys.readouterr().out.lower()
 
     def unreachable(req, timeout=None):
         raise urllib.error.URLError("no route to host")
 
     monkeypatch.setattr(U.urllib.request, "urlopen", unreachable)
-    assert U.run_update(check_only=False) == 1
+    assert U.run_update(check_only=False, channel="stable") == 1
     assert "could not reach github" in capsys.readouterr().out.lower()
 
 
 def test_run_update_never_raises_on_missing_assets(monkeypatch):
     newer = f"{U._parse_version(__version__)[0]}.{U._parse_version(__version__)[1] + 1}.0"
-    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0: {"tag_name": newer, "assets": []})
+    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0, channel="stable": {"tag_name": newer, "assets": []})
     monkeypatch.setattr(U.sys, "platform", "linux")
-    rc = U.run_update(check_only=False)
+    rc = U.run_update(check_only=False, channel="stable")
     assert rc == 1  # no install.sh asset found -> a clear failure, not a traceback
 
 
@@ -322,11 +442,11 @@ def test_windows_update_never_launches_an_unverified_script(monkeypatch, capsys)
 
 def test_run_update_dispatches_to_the_windows_path(monkeypatch):
     newer = f"{U._parse_version(__version__)[0]}.{U._parse_version(__version__)[1] + 1}.0"
-    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0: {"tag_name": newer, "assets": []})
+    monkeypatch.setattr(U, "latest_release", lambda timeout=10.0, channel="stable": {"tag_name": newer, "assets": []})
     monkeypatch.setattr(U.sys, "platform", "win32")
 
     seen: list[str] = []
     monkeypatch.setattr(U, "_update_windows", lambda v, a: seen.append(v) or 0)
 
-    assert U.run_update(check_only=False) == 0
+    assert U.run_update(check_only=False, channel="stable") == 0
     assert seen == [newer]

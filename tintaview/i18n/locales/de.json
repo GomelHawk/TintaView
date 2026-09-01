@@ -8,8 +8,11 @@
 
   "tray.menu.refresh_usage": "Verbrauch aktualisieren",
   "tray.menu.sound_on_confirm": "Ton bei Bestätigungsanfrage",
+  "tray.menu.pause_lighting": "Beleuchtung pausieren",
   "tray.menu.settings": "Einstellungen…",
   "tray.menu.check_updates": "Nach Updates suchen",
+  "tray.menu.open_logs": "Log-Ordner öffnen",
+  "tray.menu.diagnostics": "Diagnose ausführen…",
   "tray.menu.about": "Über",
   "tray.menu.quit": "Beenden",
 
@@ -29,6 +32,10 @@
   "tray.update.up_to_date": "Du bist auf dem neuesten Stand (Version {version}).",
   "tray.update.confirm": "Version {latest} ist verfügbar – du hast {current}.{notes}\n\nEin Update ändert weder deine Einstellungen noch die Hook-Konfiguration deiner Agenten.\n\nJetzt installieren?",
   "tray.update.failed": "Das Update wurde nicht abgeschlossen. Führe `tintaview update` in einem Terminal aus, um den Grund zu sehen.",
+  "tray.diagnostics.title": "TintaView-Diagnose",
+  "tray.diagnostics.running": "Diagnose läuft, das kann einige Sekunden dauern…",
+  "tray.diagnostics.failed": "Diagnose konnte nicht ausgeführt werden. Führen Sie `tintaview doctor` in einem Terminal aus.",
+  "tray.logs.open_failed": "Log-Ordner konnte nicht geöffnet werden ({path}).",
 
   "flyout.no_agents": "Keine Agenten aktiviert.",
   "flyout.no_usage_data": "Keine Verbrauchsdaten.",
@@ -44,6 +51,7 @@
   "settings.poll": "Aktualisierungsintervall für den Verbrauch:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Beim Start nach Updates suchen",
+  "settings.update_beta": "Vorabversionen (Beta) einbeziehen",
   "settings.language": "Sprache der Oberfläche:",
   "settings.language.hint": "Der Einrichtungsassistent bleibt auf Englisch, und Werte aus der API eines Agenten behalten ihren ursprünglichen Wortlaut.",
   "settings.engine": "Beleuchtungs-Engine:",
@@ -107,6 +115,7 @@
   "usage.claude.header": "Deine Verbrauchsgrenzen",
   "usage.claude.header_tier": "Deine Verbrauchsgrenzen · {tier}",
   "usage.claude.header_estimate": "Claude-Verbrauch — Schätzung (offizieller % nicht verfügbar)",
+  "usage.claude.header_estimate_unpriced": "Claude-Nutzung — Schätzung (offizielle % nicht verfügbar; unbekanntes Modell zum Standardtarif)",
   "usage.claude.session": "5-Stunden-Limit",
   "usage.claude.weekly_all": "Wöchentlich · alle Modelle",
   "usage.claude.weekly_model": "Wöchentlich · {model}",

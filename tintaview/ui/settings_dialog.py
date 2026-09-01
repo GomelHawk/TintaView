@@ -44,6 +44,7 @@ from ..engines.factory import ENGINE_DISPLAY, ENGINE_MODES, available_engines, e
 from ..i18n import LANGUAGES, t
 from ..i18n import normalize as normalize_language
 from ..install import detect
+from ..install import update as update_mod
 
 log = logging.getLogger(__name__)
 
@@ -265,6 +266,21 @@ class SettingsDialog(QtWidgets.QDialog):
         self._update_check.setChecked(self._cfg.update.check)
         form.addRow(self._update_check)  # spanning, same reason as the chime row
 
+        # `update.channel` as a checkbox rather than a combo: there are exactly two
+        # channels and one of them is the default, so a tick reads better than a picker
+        # with "stable" pre-selected. Anything else in a hand-edited config normalises
+        # to stable (see `install.update.normalize_channel`), so an unrecognised value
+        # shows here as unticked and is written back as "stable" on accept.
+        self._update_beta = QtWidgets.QCheckBox(t("settings.update_beta"))
+        self._update_beta.setChecked(
+            update_mod.normalize_channel(self._cfg.update.channel) == update_mod.CHANNEL_BETA
+        )
+        self._update_beta.setEnabled(self._update_check.isChecked())
+        # A channel is meaningless with checking switched off — grey it out rather than
+        # leaving a live-looking control that changes nothing.
+        self._update_check.toggled.connect(self._update_beta.setEnabled)
+        form.addRow(self._update_beta)
+
         return widget
 
     def _build_language_combo(self) -> QtWidgets.QComboBox:
@@ -447,6 +463,10 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.ui.language = self._language_combo.currentData()
         cfg.stats.poll_seconds = self._poll_spin.value()
         cfg.update.check = self._update_check.isChecked()
+        cfg.update.channel = (
+            update_mod.CHANNEL_BETA if self._update_beta.isChecked()
+            else update_mod.CHANNEL_STABLE
+        )
         cfg.engine.mode = self._engine_combo.currentData()
         for status, button in self._color_buttons.items():
             setattr(cfg.colors, status, button.hex_color())

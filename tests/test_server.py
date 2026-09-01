@@ -150,7 +150,7 @@ def test_full_session_lifecycle(server_engine):
     assert _wait_until(lambda: _get_state(server)["effective"] == "idle")
     state = _get_state(server)
     assert state["agents"]["claude"]["sessions"] == {"s1": "idle"}
-    assert state["engine"] == {"name": "fake", "active": True, "note": None}
+    assert state["engine"] == {"name": "fake", "active": True, "note": None, "paused": False}
     assert engine.opens == 1  # opened lazily on the first non-"none" status
 
     _event(server, "working", agent="claude", sid="s1")
@@ -175,7 +175,7 @@ def test_full_session_lifecycle(server_engine):
     _event(server, "session-end", agent="claude", sid="s1")
     assert _wait_until(lambda: _get_state(server)["effective"] == "none")
     state = _get_state(server)
-    assert state["engine"] == {"name": "fake", "active": False, "note": None}
+    assert state["engine"] == {"name": "fake", "active": False, "note": None, "paused": False}
     assert engine.closes == 1
 
 
@@ -417,6 +417,7 @@ def test_engine_status_surfaces_status_note_on_state():
         "name": "fake",
         "active": True,
         "note": "G HUB is ignoring lighting commands",
+        "paused": False,
     }
 
     server = StatusServer(cfg, controller=controller)
@@ -446,7 +447,8 @@ def test_reset_engine_rebuilds_from_current_config():
     controller.reset_engine()
 
     assert injected.closes == 1
-    assert controller.engine_status() == {"name": "none", "active": False, "note": None}
+    assert controller.engine_status() == {"name": "none", "active": False, "note": None,
+                                          "paused": False}
 
     controller.apply("working")
     # The old FakeEngine is never touched again — it was dropped, not reused. A real
@@ -573,3 +575,248 @@ def test_blank_device_colour_falls_back_to_the_brand_colour():
     cfg = make_cfg()
     cfg.colors.device.confirm = ""
     assert cfg.colors.device_rgb("confirm") == cfg.colors.rgb("confirm")
+
+
+def _make_watchdog_server(timeout: float):
+    cfg = make_cfg()
+    cfg.server.watchdog_timeout = timeout
+    return make_server(cfg)
+
+
+def test_watchdog_retires_only_the_silent_session():
+    """The multi-agent bug this exists for, from both directions at once.
+
+    A single store-wide "last event" clock got this wrong twice over: a chatty session
+    vouched for every other session (so a crashed agent's colour stayed on the lights
+    forever), and when the timeout finally did fire it cleared *everything* (so one
+    quiet session took every live one down with it). Here `claude/alive` keeps talking
+    while `cursor/dead` goes silent — exactly one of them may be retired.
+    """
+    server, _engine = _make_watchdog_server(0.3)
+    try:
+        _event(server, "working", agent="claude", sid="alive")
+        _event(server, "working", agent="cursor", sid="dead")
+        assert _wait_until(lambda: _get_state(server)["count"] == 2)
+
+        # Keep only `claude/alive` talking, for well over the timeout.
+        deadline = time.monotonic() + 0.9
+        while time.monotonic() < deadline:
+            _event(server, "working", agent="claude", sid="alive")
+            time.sleep(0.05)
+
+        state = _get_state(server)
+        assert "cursor" not in state["agents"], "the silent session should have been retired"
+        assert state["agents"]["claude"]["sessions"] == {"alive": "working"}
+        assert state["effective"] == "working"  # the survivor still drives the lights
+    finally:
+        server.stop()
+
+
+def test_watchdog_releases_the_lights_once_every_session_expires():
+    server, engine = _make_watchdog_server(0.2)
+    try:
+        _event(server, "working", agent="claude", sid="s1")
+        assert _wait_until(lambda: engine.opens == 1)
+
+        assert _wait_until(lambda: _get_state(server)["effective"] == "none", timeout=2.0)
+        assert _wait_until(lambda: engine.closes == 1)
+    finally:
+        server.stop()
+
+
+def test_end_many_reports_one_effective_change_for_the_whole_batch():
+    """Retiring several dead sessions must produce a single lighting update, and none
+    at all when the survivors still fold to the same colour."""
+    from tintaview.core.state import StateStore
+
+    state = StateStore()
+    state.set("claude", "a", "working")
+    state.set("cursor", "b", "working")
+    state.set("cursor", "c", "confirm")
+
+    # Dropping the only `confirm` demotes the fold from confirm to working: one change.
+    assert state.end_many([("cursor", "c")]) is True
+    assert state.effective() == "working"
+    # Dropping one of two equally-working sessions changes nothing anyone can see.
+    assert state.end_many([("cursor", "b")]) is False
+    assert state.effective() == "working"
+    # Dropping the last one releases the lights.
+    assert state.end_many([("claude", "a")]) is True
+    assert state.effective() == "none"
+
+
+def test_expired_is_per_session_not_per_store():
+    from tintaview.core.state import StateStore
+
+    state = StateStore()
+    state.set("cursor", "old", "working")
+    time.sleep(0.15)
+    state.set("claude", "new", "working")  # a later event on a *different* session
+
+    # The fresh session must not vouch for the stale one, which is exactly what a
+    # single store-wide timestamp did.
+    assert state.expired(0.1) == [("cursor", "old")]
+    assert state.expired(10.0) == []
+
+
+def test_watchdog_leaves_a_recently_seen_session_alone():
+    server, _engine = _make_watchdog_server(5.0)
+    try:
+        _event(server, "idle", agent="claude", sid="s1")
+        assert _wait_until(lambda: _get_state(server)["count"] == 1)
+        time.sleep(0.3)  # several watchdog polls, none of them past the timeout
+        assert _get_state(server)["count"] == 1
+    finally:
+        server.stop()
+
+
+# --------------------------------------------------------------------------- running tool
+
+
+def test_tool_start_records_the_tool_and_tool_end_clears_it(server_engine):
+    server, _engine = server_engine
+
+    _event(server, "tool-start", agent="claude", sid="s1", tool="Bash")
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["tool"] == "Bash")
+
+    _event(server, "tool-end", agent="claude", sid="s1", tool="Bash")
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["tool"] == "")
+
+
+def test_a_plain_working_ping_does_not_erase_the_running_tool(server_engine):
+    """`working` carries no tool name, so it must leave the last one alone — otherwise
+    a chatty PostToolUse stream would blank the label the flyout just showed."""
+    server, _engine = server_engine
+
+    _event(server, "tool-start", agent="claude", sid="s1", tool="Edit")
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["tool"] == "Edit")
+
+    _event(server, "working", agent="claude", sid="s1")
+    assert _get_state(server)["agents"]["claude"]["tool"] == "Edit"
+
+
+def test_a_finished_session_advertises_no_tool(server_engine):
+    """An idle session's leftover tool name is stale trivia, not status."""
+    server, _engine = server_engine
+
+    _event(server, "tool-start", agent="claude", sid="s1", tool="Bash")
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["tool"] == "Bash")
+
+    _event(server, "idle", agent="claude", sid="s1")
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["effective"] == "idle")
+    assert _get_state(server)["agents"]["claude"]["tool"] == ""
+
+
+def test_the_headline_tool_comes_from_a_working_session(server_engine):
+    """With two sessions open under one agent, the section shows the busy one's tool."""
+    server, _engine = server_engine
+
+    _event(server, "tool-start", agent="claude", sid="a", tool="Read")
+    _event(server, "idle", agent="claude", sid="a")  # 'a' finished, keeps a stale name
+    _event(server, "tool-start", agent="claude", sid="b", tool="Bash")
+
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["tool"] == "Bash")
+
+
+# --------------------------------------------------------------------------- /show
+
+
+def _get_show(server: StatusServer) -> dict:
+    with urllib.request.urlopen(f"{server.url}/show", timeout=2) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def test_show_reports_false_when_nothing_is_registered(server_engine):
+    """A headless daemon owning the port has no panel to show, and must say so rather
+    than let a second launch report a window that never appeared."""
+    server, _engine = server_engine
+    assert _get_show(server) == {"ok": True, "shown": False}
+
+
+def test_show_invokes_the_registered_callback(server_engine):
+    server, _engine = server_engine
+    calls: list[int] = []
+    server.on_show = lambda: calls.append(1)
+
+    assert _get_show(server)["shown"] is True
+    assert calls == [1]
+
+
+def test_show_survives_a_raising_callback(server_engine):
+    """It runs on an HTTP worker thread, where an exception would be logged and lost."""
+    server, _engine = server_engine
+
+    def boom() -> None:
+        raise RuntimeError("no window today")
+
+    server.on_show = boom
+    assert _get_show(server)["shown"] is False
+
+
+def test_request_show_helper_round_trips(server_engine):
+    from tintaview.core.server import request_show
+
+    server, _engine = server_engine
+    calls: list[int] = []
+    server.on_show = lambda: calls.append(1)
+
+    host, port = server._httpd.server_address[0], server._httpd.server_address[1]
+    assert request_show(host, port) is True
+    assert calls == [1]
+
+
+# --------------------------------------------------------------------------- pause
+
+
+def test_pausing_releases_the_device_and_ignores_later_events():
+    server, engine = make_server()
+    try:
+        _event(server, "working", agent="claude", sid="s1")
+        assert _wait_until(lambda: engine.opens == 1)
+
+        server.controller.set_paused(True)
+        assert engine.closes == 1
+        painted = len(engine.colors)
+
+        # Events keep flowing — the state model still tracks them, the device does not.
+        _event(server, "confirm", agent="claude", sid="s1")
+        assert _wait_until(lambda: _get_state(server)["effective"] == "confirm")
+        assert len(engine.colors) == painted
+        assert _get_state(server)["engine"]["paused"] is True
+    finally:
+        server.stop()
+
+
+def test_resuming_restores_what_is_actually_happening_now():
+    """Not the colour the device last showed: the status may have moved on while paused."""
+    cfg = make_cfg()
+    server, engine = make_server(cfg)
+    try:
+        _event(server, "working", agent="claude", sid="s1")
+        assert _wait_until(lambda: engine.opens == 1)
+        server.controller.set_paused(True)
+
+        _event(server, "idle", agent="claude", sid="s1")
+        assert _wait_until(lambda: _get_state(server)["effective"] == "idle")
+
+        server.controller.set_paused(False)
+        assert engine.colors[-1] == cfg.colors.device_rgb("idle")
+        assert _get_state(server)["engine"]["paused"] is False
+    finally:
+        server.stop()
+
+
+def test_pause_is_idempotent_and_never_raises():
+    server, engine = make_server()
+    try:
+        _event(server, "working", agent="claude", sid="s1")
+        assert _wait_until(lambda: engine.opens == 1)
+
+        server.controller.set_paused(True)
+        server.controller.set_paused(True)
+        assert engine.closes == 1  # the second call is a no-op, not a second close
+        server.controller.set_paused(False)
+        server.controller.set_paused(False)
+        assert server.controller.paused is False
+    finally:
+        server.stop()

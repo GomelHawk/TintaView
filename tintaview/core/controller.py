@@ -46,6 +46,17 @@ class LightController:
         self._blink_stop = threading.Event()
         self._blink_thread: threading.Thread | None = None
 
+        # "Pause lighting" from the tray menu. Deliberately enforced here rather than
+        # in the tray: `apply()` is driven by the HTTP handler and the stall detector,
+        # neither of which the tray sits in front of, so a flag anywhere else would let
+        # the next hook event repaint the device the user just asked to leave alone.
+        # Runtime-only, never persisted — quitting while paused and starting again to
+        # find the lights permanently dead is a worse bug than losing the setting.
+        self._paused = False
+        #: Last status `apply()` was asked for, replayed on unpause so the lights come
+        #: back to what is actually happening rather than to whatever they showed last.
+        self._wanted = STATUS_NONE
+
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
 
@@ -147,6 +158,9 @@ class LightController:
         """
         try:
             with self._lock:
+                self._wanted = effective_status
+                if self._paused:
+                    return
                 if effective_status == STATUS_NONE:
                     self._stop_blink_locked()
                     self._close_locked()
@@ -159,6 +173,32 @@ class LightController:
                     self._set_solid_locked(effective_status)
         except Exception:
             log.exception("controller.apply(%r) failed", effective_status)
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def set_paused(self, paused: bool) -> None:
+        """Release the lights and stop driving them (or resume). Never raises.
+
+        Pausing releases the device immediately — the point is to hand the hardware
+        back to Synapse/G HUB/OpenRGB while the user records, streams or screenshots,
+        not merely to freeze it on whatever colour it happened to be showing.
+        """
+        paused = bool(paused)
+        with self._lock:
+            if paused == self._paused:
+                return
+            self._paused = paused
+            wanted = self._wanted
+        if paused:
+            with self._lock:
+                self._stop_blink_locked()
+                self._close_locked()
+            log.info("lighting paused — device released")
+        else:
+            log.info("lighting resumed — restoring %r", wanted)
+            self.apply(wanted)
 
     def start_heartbeat(self) -> None:
         """Start the daemon thread that pings ``engine.heartbeat()`` every 4s.
@@ -178,6 +218,8 @@ class LightController:
     def _heartbeat_loop(self) -> None:
         while not self._heartbeat_stop.wait(4.0):
             with self._lock:
+                if self._paused:
+                    continue  # nothing to keep alive: the session was closed on pause
                 engine = self._engine
             if engine is None:
                 continue
@@ -204,7 +246,7 @@ class LightController:
         with self._lock:
             engine = self._engine
         if engine is None:
-            return {"name": "none", "active": False, "note": None}
+            return {"name": "none", "active": False, "note": None, "paused": self._paused}
         try:
             active = bool(engine.active)
         except Exception:
@@ -212,7 +254,7 @@ class LightController:
         note = getattr(engine, "status_note", None)
         if note is not None and not isinstance(note, str):
             note = None
-        return {"name": engine.name, "active": active, "note": note}
+        return {"name": engine.name, "active": active, "note": note, "paused": self._paused}
 
     def shutdown(self) -> None:
         """Stop background threads and release the lights.

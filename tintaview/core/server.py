@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -28,7 +29,6 @@ from .events import (
     SESSION_START,
     STATUS_CONFIRM,
     STATUS_IDLE,
-    STATUS_NONE,
     STATUS_WORKING,
     TOOL_END,
     TOOL_START,
@@ -56,7 +56,7 @@ def _first(query: dict[str, list[str]], key: str, default: str) -> str:
 
 
 def _watchdog_poll_seconds(timeout: float) -> float:
-    """How often the watchdog thread checks `idle_seconds()`.
+    """How often the watchdog thread re-checks sessions against the clock.
 
     Scales with the configured timeout so a short test timeout is still caught
     promptly, without polling a real (minutes-long) timeout needlessly often.
@@ -104,6 +104,14 @@ class _Handler(BaseHTTPRequestHandler):
 
         if path == "/healthz":
             self._send_json({"ok": True, "version": __version__})
+            return
+
+        if path == "/show":
+            # "Someone launched TintaView again" — a second process found the port
+            # taken, so it asks the instance that owns it to surface its usage panel
+            # instead of both of them exiting silently. Loopback only, and it can do
+            # nothing but pop a window that a tray click already opens.
+            self._send_json({"ok": True, "shown": status_server.request_show()})
             return
 
         if path == "/state":
@@ -175,6 +183,24 @@ def _is_tintaview_listening(host: str, port: int, timeout: float = 1.5) -> bool:
     return isinstance(payload, dict) and "ok" in payload
 
 
+def request_show(host: str, port: int, timeout: float = 1.5) -> bool:
+    """Ask the TintaView already listening on `host:port` to show its usage panel.
+
+    True only if that instance confirms it actually showed something — a headless
+    daemon owning the port has no panel to show, and the caller needs to be able to say
+    so rather than exiting with no window and no message.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/show", timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("shown"))
+
+
 class StatusServer:
     """Owns the HTTP server, the state store, the controller, the stall detector and
     the watchdog thread. Embeddable in-process by the tray/CLI, or run headless.
@@ -190,6 +216,12 @@ class StatusServer:
         self.state = state if state is not None else StateStore()
         self.controller = controller if controller is not None else LightController(cfg)
         self._stall = StallDetector(self._on_stall)
+
+        #: Set by the tray to its "show the flyout" slot. Left None headless, which is
+        #: what makes `/show` answer `shown: false` there instead of pretending.
+        #: Called on an HTTP worker thread — a GUI implementation has to marshal to its
+        #: own thread (the tray does, via a Qt signal).
+        self.on_show: Callable[[], None] | None = None
 
         self._httpd: _StatusHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
@@ -279,8 +311,6 @@ class StatusServer:
         `StateStore`'s mutators report that so a chatty PostToolUse stream doesn't
         hammer the lighting SDK with redundant, identical colours.
         """
-        del tool  # not needed for status tracking; kept for future per-tool logging
-
         # `agents.enabled` has to be enforced *here*, not only where hooks are installed.
         # Unticking an agent in the wizard stops TintaView managing its hooks, but any
         # entry already sitting in that agent's config file keeps firing — installed by an
@@ -311,9 +341,13 @@ class StatusServer:
                 stall_seconds = self._stall_seconds_for(agent)
                 if stall_seconds is not None:
                     self._stall.tool_start(agent, sid, stall_seconds)
-                changed = self.state.set(agent, sid, STATUS_WORKING)
+                # The tool name rides along for display only (the flyout shows what an
+                # agent is busy *with*); it never influences the status or the lights.
+                changed = self.state.set(agent, sid, STATUS_WORKING, tool=tool)
             elif event == TOOL_END:
-                changed = self.state.set(agent, sid, STATUS_WORKING)
+                # "" rather than leaving it: the tool has finished, so the session is
+                # still working but no longer on anything we can name.
+                changed = self.state.set(agent, sid, STATUS_WORKING, tool="")
             else:
                 log.warning("unhandled event %r for %s/%s", event, agent, sid)
                 return
@@ -345,6 +379,19 @@ class StatusServer:
         except Exception:
             log.exception("failed applying stall promotion for %s/%s", agent, sid)
 
+    def request_show(self) -> bool:
+        """Invoke the registered show-the-panel callback. Never raises: this runs on an
+        HTTP worker thread, where an exception would be logged and lost anyway."""
+        callback = self.on_show
+        if callback is None:
+            return False
+        try:
+            callback()
+        except Exception:
+            log.exception("on_show callback failed")
+            return False
+        return True
+
     # --- reads for the tray ------------------------------------------------------
 
     def state_payload(self) -> dict:
@@ -363,22 +410,29 @@ class StatusServer:
     # --- watchdog ------------------------------------------------------------------
 
     def _watchdog_loop(self) -> None:
-        """Force-release the lights if no hook has fired in `watchdog_timeout`
-        seconds — the case this exists for: an agent that
-        crashed or was killed without ever sending its SessionEnd hook.
+        """Retire sessions that have gone silent for `watchdog_timeout` seconds — the
+        case this exists for: an agent that crashed or was killed without ever sending
+        its SessionEnd hook.
+
+        Expiry is per session, not per store (see `StateStore.expired`). Retiring only
+        the silent sessions is what makes the watchdog correct with more than one agent
+        running: a busy Claude session no longer keeps a long-dead Cursor session's
+        colour on the lights, and an idle-but-alive session that trips the timeout no
+        longer takes every other session down with it.
         """
-        poll = _watchdog_poll_seconds(self._cfg.server.watchdog_timeout)
+        timeout = self._cfg.server.watchdog_timeout
+        poll = _watchdog_poll_seconds(timeout)
         while not self._watchdog_stop.wait(poll):
             try:
-                if (
-                    not self.state.empty()
-                    and self.state.idle_seconds() > self._cfg.server.watchdog_timeout
-                ):
-                    log.warning(
-                        "watchdog: forcing release after %.0fs of silence",
-                        self.state.idle_seconds(),
-                    )
-                    self.state.clear()
-                    self.controller.apply(STATUS_NONE)
+                stale = self.state.expired(timeout)
+                if not stale:
+                    continue
+                log.warning(
+                    "watchdog: releasing %d session(s) after %.0fs of silence: %s",
+                    len(stale), timeout,
+                    ", ".join(f"{agent}/{sid}" for agent, sid in stale),
+                )
+                if self.state.end_many(stale):
+                    self.controller.apply(self.state.effective())
             except Exception:
                 log.exception("watchdog tick failed")

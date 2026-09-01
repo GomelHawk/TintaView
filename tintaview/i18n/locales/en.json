@@ -8,8 +8,11 @@
 
   "tray.menu.refresh_usage": "Refresh usage",
   "tray.menu.sound_on_confirm": "Sound on confirm",
+  "tray.menu.pause_lighting": "Pause lighting",
   "tray.menu.settings": "Settings…",
   "tray.menu.check_updates": "Check for updates",
+  "tray.menu.open_logs": "Open logs folder",
+  "tray.menu.diagnostics": "Run diagnostics…",
   "tray.menu.about": "About",
   "tray.menu.quit": "Quit",
 
@@ -29,6 +32,10 @@
   "tray.update.up_to_date": "You're up to date (version {version}).",
   "tray.update.confirm": "Version {latest} is available — you have {current}.{notes}\n\nYour settings and your agents' hook configuration are never changed by an update.\n\nInstall it now?",
   "tray.update.failed": "The update didn't complete. Run `tintaview update` from a terminal to see why.",
+  "tray.diagnostics.title": "TintaView diagnostics",
+  "tray.diagnostics.running": "Running diagnostics — this can take a few seconds…",
+  "tray.diagnostics.failed": "Could not run diagnostics. Run `tintaview doctor` in a terminal instead.",
+  "tray.logs.open_failed": "Could not open the logs folder ({path}).",
 
   "flyout.no_agents": "No agents enabled.",
   "flyout.no_usage_data": "No usage data.",
@@ -44,6 +51,7 @@
   "settings.poll": "Usage refresh interval:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Check for updates on startup",
+  "settings.update_beta": "Include pre-release (beta) versions",
   "settings.language": "Interface language:",
   "settings.language.hint": "The setup wizard stays in English, and figures an agent's own API reports keep their original wording.",
   "settings.engine": "Lighting engine:",
@@ -107,6 +115,7 @@
   "usage.claude.header": "Your usage limits",
   "usage.claude.header_tier": "Your usage limits · {tier}",
   "usage.claude.header_estimate": "Claude usage — estimate (official % unavailable)",
+  "usage.claude.header_estimate_unpriced": "Claude usage — estimate (official % unavailable; unknown model priced at the default rate)",
   "usage.claude.session": "5-hour limit",
   "usage.claude.weekly_all": "Weekly · all models",
   "usage.claude.weekly_model": "Weekly · {model}",
