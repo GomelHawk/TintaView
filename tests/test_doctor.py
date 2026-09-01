@@ -510,3 +510,117 @@ def test_invalid_toml_is_fail(capsys):
 
     assert "[FAIL] CONFIG" in out
     assert "not valid TOML" in out
+
+
+# --------------------------------------------------------------------------- windowed callers
+
+
+def test_can_prompt_is_false_without_a_console(monkeypatch):
+    """`sys.stdin` is None under `pythonw.exe`, so `sys.stdin.isatty()` raises rather
+    than returning False — which is what broke the tray's Run diagnostics."""
+    monkeypatch.setattr(D.sys, "stdin", None)
+    assert D._can_prompt() is False
+
+
+def test_can_prompt_is_false_on_a_closed_handle(monkeypatch):
+    class _Closed:
+        def isatty(self):
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr(D.sys, "stdin", _Closed())
+    assert D._can_prompt() is False
+
+
+def test_can_prompt_is_true_on_a_tty(monkeypatch):
+    class _Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(D.sys, "stdin", _Tty())
+    assert D._can_prompt() is True
+
+
+def test_live_hook_test_never_prompts_when_not_interactive(monkeypatch):
+    """The regression: with a reachable daemon (always true when run *from* the tray,
+    which is itself the daemon) the verbose run reached a prompt it could not answer."""
+    def boom(*args, **kwargs):
+        raise AssertionError("must not prompt")
+
+    monkeypatch.setattr("builtins.input", boom)
+    reporter = D._Reporter(verbose=True)
+
+    D._live_hook_test(reporter, Config(), daemon_ok=True, interactive=False)  # must not raise
+
+
+def test_run_doctor_auto_detects_a_missing_console(monkeypatch):
+    """A windowed caller that forgets to pass `interactive` must still not prompt."""
+    monkeypatch.setattr(D.sys, "stdin", None)
+    seen: list[bool] = []
+    monkeypatch.setattr(D, "_live_hook_test",
+                        lambda r, c, d, interactive=True: seen.append(interactive))
+    monkeypatch.setattr(D, "_check_daemon", lambda r, c: True)
+
+    D.run_doctor(verbose=True, paint=False)
+
+    assert seen == [False]
+
+
+def test_run_doctor_forbids_prompting_when_asked_to(monkeypatch):
+    """An explicit False has to beat a perfectly usable tty: a tray started from a
+    terminal has a stdin the user cannot see, and would hang on a prompt."""
+    class _Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(D.sys, "stdin", _Tty())
+    seen: list[bool] = []
+    monkeypatch.setattr(D, "_live_hook_test",
+                        lambda r, c, d, interactive=True: seen.append(interactive))
+    monkeypatch.setattr(D, "_check_daemon", lambda r, c: True)
+
+    D.run_doctor(verbose=True, paint=False, interactive=False)
+
+    assert seen == [False]
+
+
+def test_paint_selftest_warns_instead_of_claiming_an_unconfirmed_pass(monkeypatch, capsys):
+    """Without a prompt the one thing this check proves — a human saw light — is
+    unestablished, so it must not report OK."""
+    from tintaview.engines import factory as factory_mod
+    from tintaview.engines.base import LightingEngine
+
+    class _PaintEngine(LightingEngine):
+        name = "fake"
+        display_name = "Fake Paint"
+
+        def probe(self) -> bool:
+            return True
+
+        def open(self) -> bool:
+            return True
+
+        def set_color(self, r: int, g: int, b: int) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        @property
+        def active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(factory_mod, "make_engine", lambda cfg: _PaintEngine())
+    monkeypatch.setattr(D.time, "sleep", lambda s: None)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("must not prompt")
+
+    monkeypatch.setattr("builtins.input", boom)
+    reporter = D._Reporter(verbose=True)
+
+    D._paint_selftest(reporter, Config(), interactive=False)
+
+    out = capsys.readouterr().out
+    assert reporter.warns == 1
+    assert reporter.fails == 0
+    assert "could not ask whether you saw it" in out

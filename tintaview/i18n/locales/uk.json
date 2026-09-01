@@ -36,6 +36,7 @@
   "tray.diagnostics.title": "Діагностика TintaView",
   "tray.diagnostics.running": "Виконується діагностика, це може зайняти кілька секунд…",
   "tray.diagnostics.failed": "Не вдалося запустити діагностику. Виконайте `tintaview doctor` у терміналі.",
+  "tray.diagnostics.crashed": "Діагностику перервано — подробиці помилки нижче. Також можна виконати `tintaview doctor` у терміналі.",
   "tray.logs.open_failed": "Не вдалося відкрити теку журналів ({path}).",
 
   "flyout.no_agents": "Жодного агента не ввімкнено.",

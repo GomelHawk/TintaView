@@ -241,7 +241,7 @@ Right-click the tray icon for:
 | **Settings…** | The settings window (agents, language, colours, engine, update options). |
 | **Check for updates** | Run the update check now and offer to install. |
 | **Open logs folder** | Open the log directory in your file manager — on Windows that's inside `%LOCALAPPDATA%\TintaView`, which is worth a menu item because nothing else tells you where it is. |
-| **Run diagnostics** | Run the same checks as `tintaview doctor -v` and show the report in a window you can select and copy from — handy when there's no terminal to hand, which on Windows is the normal case. |
+| **Run diagnostics** | Run the same checks as `tintaview doctor -v` and show the report in a window you can select and copy from — handy when there's no terminal to hand, which on Windows is the normal case. The two steps that ask you a question (the live hook test, the paint self-test) are skipped here — there's nowhere to answer them; run `tintaview doctor -v --paint` in a terminal for those. |
 | **About** / **Quit** | Version information; exit (this also releases your lighting). |
 
 Launching TintaView a second time while it's already running doesn't start a second copy

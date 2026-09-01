@@ -35,6 +35,7 @@
   "tray.diagnostics.title": "TintaView-Diagnose",
   "tray.diagnostics.running": "Diagnose läuft, das kann einige Sekunden dauern…",
   "tray.diagnostics.failed": "Diagnose konnte nicht ausgeführt werden. Führen Sie `tintaview doctor` in einem Terminal aus.",
+  "tray.diagnostics.crashed": "Die Diagnose wurde vorzeitig abgebrochen — die Einzelheiten des Fehlers stehen unten. Sie können auch `tintaview doctor` in einem Terminal ausführen.",
   "tray.logs.open_failed": "Log-Ordner konnte nicht geöffnet werden ({path}).",
 
   "flyout.no_agents": "Keine Agenten aktiviert.",

@@ -35,6 +35,7 @@
   "tray.diagnostics.title": "TintaView diagnostics",
   "tray.diagnostics.running": "Running diagnostics — this can take a few seconds…",
   "tray.diagnostics.failed": "Could not run diagnostics. Run `tintaview doctor` in a terminal instead.",
+  "tray.diagnostics.crashed": "Diagnostics stopped early — the details below are what went wrong. You can also run `tintaview doctor` in a terminal.",
   "tray.logs.open_failed": "Could not open the logs folder ({path}).",
 
   "flyout.no_agents": "No agents enabled.",

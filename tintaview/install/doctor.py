@@ -55,6 +55,24 @@ _LIVE_TEST_SECONDS = 30.0
 # --------------------------------------------------------------------------- reporting
 
 
+def _can_prompt() -> bool:
+    """Is there a console this process can actually ask a question on?
+
+    `sys.stdin.isatty()` is not enough on its own: a windowed build has no standard
+    handles at all, so `sys.stdin` is **None** under `pythonw.exe` and the attribute
+    lookup raises. `doctor` is reachable from the tray (Run diagnostics) as well as from
+    a terminal, so every interactive step has to go through this.
+    """
+    stdin = getattr(sys, "stdin", None)
+    if stdin is None:
+        return False
+    try:
+        return bool(stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        # ValueError: the handle was closed under us. OSError: a detached console.
+        return False
+
+
 class _Reporter:
     """Prints the checklist and keeps score. Never raises — a bug in one check must
     not stop the rest of the report, or crash the very tool a confused user was
@@ -548,7 +566,8 @@ def _sessions_snapshot(state: object) -> frozenset[tuple[str, str, str]]:
     return frozenset(out)
 
 
-def _live_hook_test(reporter: _Reporter, cfg: Config, daemon_ok: bool) -> None:
+def _live_hook_test(reporter: _Reporter, cfg: Config, daemon_ok: bool,
+                    interactive: bool = True) -> None:
     if not daemon_ok:
         return
 
@@ -557,14 +576,21 @@ def _live_hook_test(reporter: _Reporter, cfg: Config, daemon_ok: bool) -> None:
     curl_cmd = f'curl -s "{base}/v1/event/working?agent=claude&sid=doctor-test"'
     reporter.ok("LIVE HOOK TEST", f"to fire a synthetic event by hand, run: {curl_cmd}")
 
-    if not sys.stdin.isatty():
-        return  # never block a non-interactive run (CI, tests, a piped invocation)
+    if not interactive:
+        # Never block a run that cannot answer: CI, a piped invocation, or the tray's
+        # Run diagnostics — which is a *windowed* caller, so it has no stdin to prompt
+        # on and nowhere to show the prompt even if it did. `run_doctor` decides this;
+        # see `_can_prompt`.
+        return
 
     try:
         answer = input(
             "Wait ~30s for a real hook event from a live agent session? [y/N] "
         ).strip().lower()
-    except EOFError:
+    except (EOFError, RuntimeError, OSError):
+        # RuntimeError is "input(): lost sys.stdin" — reachable only if a caller forces
+        # `interactive=True` without a console. `doctor` must degrade, never crash: it
+        # is the tool a confused user was pointed at.
         return
     if answer not in ("y", "yes"):
         return
@@ -596,7 +622,7 @@ def _live_hook_test(reporter: _Reporter, cfg: Config, daemon_ok: bool) -> None:
 # --------------------------------------------------------------------------- 9. paint self-test
 
 
-def _paint_selftest(reporter: _Reporter, cfg: Config) -> None:
+def _paint_selftest(reporter: _Reporter, cfg: Config, interactive: bool = True) -> None:
     """Drive the configured engine through a short colour cycle and ask the user.
 
     SDK success and "the user saw light" are not the same thing — G HUB in particular
@@ -635,7 +661,20 @@ def _paint_selftest(reporter: _Reporter, cfg: Config) -> None:
         except Exception as e:
             log.debug("doctor paint: close failed: %r", e)
 
-    answer = input("  Did your lights change colour? [Y/n] ").strip().lower()
+    if not interactive:
+        # The cycle ran, but the only thing this check actually proves — that a human
+        # saw light — can't be established without asking. Say that rather than
+        # claiming a pass nobody confirmed.
+        reporter.warn(
+            "PAINT", "ran the colour cycle but could not ask whether you saw it",
+            "run `tintaview doctor --paint` from a terminal to confirm it by eye",
+        )
+        return
+
+    try:
+        answer = input("  Did your lights change colour? [Y/n] ").strip().lower()
+    except (EOFError, RuntimeError, OSError):
+        answer = ""  # same reasoning as _live_hook_test's prompt
     if answer in ("", "y", "yes"):
         reporter.ok("PAINT", "user confirmed the lights moved")
     else:
@@ -649,8 +688,17 @@ def _paint_selftest(reporter: _Reporter, cfg: Config) -> None:
 # --------------------------------------------------------------------------- entry point
 
 
-def run_doctor(verbose: bool = False, paint: bool = False) -> int:
-    """Run every check and print a report. 0 if everything essential is healthy, else 1."""
+def run_doctor(verbose: bool = False, paint: bool = False,
+               interactive: bool | None = None) -> int:
+    """Run every check and print a report. 0 if everything essential is healthy, else 1.
+
+    `interactive` gates the two steps that ask the user a question. None (the default)
+    auto-detects a console; False forbids prompting even when one exists — which is what
+    a GUI caller must pass, since a tray started from a terminal *does* have a usable
+    stdin and would otherwise block on a prompt nobody can see.
+    """
+    if interactive is None:
+        interactive = _can_prompt()
     reporter = _Reporter(verbose)
 
     env = _check_environment(reporter)
@@ -661,9 +709,9 @@ def run_doctor(verbose: bool = False, paint: bool = False) -> int:
     _check_agent_hooks(reporter, cfg)
     _check_stats(reporter, cfg)
     if verbose:
-        _live_hook_test(reporter, cfg, daemon_ok)
+        _live_hook_test(reporter, cfg, daemon_ok, interactive)
     if paint:
-        _paint_selftest(reporter, cfg)
+        _paint_selftest(reporter, cfg, interactive)
 
     print()
     if reporter.fails:

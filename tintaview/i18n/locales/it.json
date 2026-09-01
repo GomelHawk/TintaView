@@ -35,6 +35,7 @@
   "tray.diagnostics.title": "Diagnostica di TintaView",
   "tray.diagnostics.running": "Diagnostica in corso, può richiedere qualche secondo…",
   "tray.diagnostics.failed": "Impossibile eseguire la diagnostica. Esegui `tintaview doctor` in un terminale.",
+  "tray.diagnostics.crashed": "La diagnostica si è interrotta in anticipo; di seguito i dettagli dell'errore. Puoi anche eseguire `tintaview doctor` in un terminale.",
   "tray.logs.open_failed": "Impossibile aprire la cartella dei log ({path}).",
 
   "flyout.no_agents": "Nessun agente attivo.",

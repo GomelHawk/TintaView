@@ -35,6 +35,7 @@
   "tray.diagnostics.title": "Diagnóstico de TintaView",
   "tray.diagnostics.running": "Ejecutando el diagnóstico; puede tardar unos segundos…",
   "tray.diagnostics.failed": "No se pudo ejecutar el diagnóstico. Ejecuta `tintaview doctor` en una terminal.",
+  "tray.diagnostics.crashed": "El diagnóstico se detuvo antes de tiempo; abajo están los detalles del fallo. También puedes ejecutar `tintaview doctor` en una terminal.",
   "tray.logs.open_failed": "No se pudo abrir la carpeta de registros ({path}).",
 
   "flyout.no_agents": "Ningún agente activado.",

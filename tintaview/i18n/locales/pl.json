@@ -36,6 +36,7 @@
   "tray.diagnostics.title": "Diagnostyka TintaView",
   "tray.diagnostics.running": "Trwa diagnostyka, może to potrwać kilka sekund…",
   "tray.diagnostics.failed": "Nie udało się uruchomić diagnostyki. Uruchom `tintaview doctor` w terminalu.",
+  "tray.diagnostics.crashed": "Diagnostyka przerwana przedwcześnie — szczegóły błędu znajdują się poniżej. Możesz też uruchomić `tintaview doctor` w terminalu.",
   "tray.logs.open_failed": "Nie udało się otworzyć folderu dzienników ({path}).",
 
   "flyout.no_agents": "Nie włączono żadnego agenta.",

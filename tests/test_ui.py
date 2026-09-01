@@ -819,15 +819,72 @@ def test_diagnostics_shows_a_placeholder_then_the_report(tray, monkeypatch):
     app_instance._doctor_dialog.close()
 
 
-def test_diagnostics_says_so_when_the_run_failed(tray, monkeypatch):
+def test_diagnostics_says_so_when_the_report_is_empty(tray, monkeypatch):
     app_instance, _server = tray
     monkeypatch.setattr(tray_mod.DoctorWorker, "fetch", lambda self: None)
 
     app_instance._run_diagnostics()
-    app_instance._show_doctor_report("")  # what DoctorWorker emits on an exception
+    app_instance._show_doctor_report("")
 
     assert "tintaview doctor" in app_instance._doctor_dialog._view.toPlainText()
     app_instance._doctor_dialog.close()
+
+
+def test_doctor_worker_runs_non_interactively(monkeypatch):
+    """The regression behind "Could not run diagnostics": `doctor -v` offers a live
+    hook test, and with the daemon reachable — always true from the tray, which *is*
+    the daemon — it reached a prompt. Under pythonw `sys.stdin` is None, so that raised;
+    from a terminal-launched tray it would have hung instead."""
+    seen: dict = {}
+
+    def fake_run_doctor(verbose=False, paint=False, interactive=None):
+        seen.update(verbose=verbose, paint=paint, interactive=interactive)
+        print("ENGINE  ok")
+        return 0
+
+    monkeypatch.setattr("tintaview.install.doctor.run_doctor", fake_run_doctor)
+    worker = tray_mod.DoctorWorker()
+    reports: list[str] = []
+    worker.report_ready.connect(reports.append)
+
+    worker._run()  # synchronous, no thread
+
+    assert seen == {"verbose": True, "paint": False, "interactive": False}
+    assert reports == ["ENGINE  ok"]
+
+
+def test_doctor_worker_reports_what_actually_broke(monkeypatch):
+    """A generic "couldn't run it" sends the user to a log they have to find first —
+    the same problem the Open logs folder item exists to solve."""
+    def boom(**kwargs):
+        raise RuntimeError("input(): lost sys.stdin")
+
+    monkeypatch.setattr("tintaview.install.doctor.run_doctor", boom)
+    worker = tray_mod.DoctorWorker()
+    reports: list[str] = []
+    worker.report_ready.connect(reports.append)
+
+    worker._run()
+
+    assert len(reports) == 1
+    assert "lost sys.stdin" in reports[0]  # the real cause, not a shrug
+    assert "RuntimeError" in reports[0]
+
+
+def test_doctor_worker_keeps_a_partial_report_when_it_breaks_midway(monkeypatch):
+    def half_then_boom(**kwargs):
+        print("ENVIRONMENT  ok")
+        raise RuntimeError("fell over")
+
+    monkeypatch.setattr("tintaview.install.doctor.run_doctor", half_then_boom)
+    worker = tray_mod.DoctorWorker()
+    reports: list[str] = []
+    worker.report_ready.connect(reports.append)
+
+    worker._run()
+
+    assert "ENVIRONMENT  ok" in reports[0]  # whatever it managed before breaking
+    assert "fell over" in reports[0]
 
 
 # --------------------------------------------------------------------------- second launch

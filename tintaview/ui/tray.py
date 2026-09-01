@@ -247,23 +247,31 @@ class DoctorWorker(QtCore.QObject):
         threading.Thread(target=self._run, daemon=True, name="tv-tray-doctor").start()
 
     def _run(self) -> None:
-        import contextlib
         import io
+        import traceback
 
+        buffer = io.StringIO()
         try:
             from tintaview.install.doctor import run_doctor
 
-            buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
-                # paint=False: the paint self-test is interactive ("did the lights go
-                # red?") and would block forever with no terminal to answer from.
-                run_doctor(verbose=True, paint=False)
-            report = buffer.getvalue().strip()
+                # interactive=False, not just paint=False: `doctor -v` also offers a
+                # live hook test, and *both* prompts are unanswerable here. A windowed
+                # process has no stdin at all (`sys.stdin` is None under pythonw), and a
+                # tray started from a terminal has one the user cannot see — so this
+                # would either raise or hang on "Running diagnostics…" forever.
+                run_doctor(verbose=True, paint=False, interactive=False)
         except Exception:
             log.exception("doctor run failed")
-            self.report_ready.emit("")
+            # Emit what actually went wrong, plus whatever the report managed before it
+            # broke. A generic "couldn't run it" tells the user nothing and sends them
+            # to a log they have to find first — which is the same problem the logs menu
+            # item exists to solve.
+            partial = buffer.getvalue().strip()
+            detail = t("tray.diagnostics.crashed") + "\n\n" + traceback.format_exc()
+            self.report_ready.emit(f"{partial}\n\n{detail}" if partial else detail)
             return
-        self.report_ready.emit(report)
+        self.report_ready.emit(buffer.getvalue().strip())
 
 
 class TrayApp(QtCore.QObject):
