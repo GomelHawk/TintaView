@@ -514,14 +514,20 @@ def test_blink_picks_up_a_confirm_colour_changed_mid_blink():
     controller = LightController(cfg, engine=injected)
 
     controller.apply("confirm")
-    time.sleep(cfg.colors.blink_ms / 1000.0 * 4)
-    assert (255, 0, 0) in injected.colors
+    try:
+        assert _wait_until(lambda: (255, 0, 0) in injected.colors, timeout=2.0)
 
-    cfg.colors.device.confirm = "#00FF00"  # what _apply_settings would have written
-    time.sleep(cfg.colors.blink_ms / 1000.0 * 6)
+        cfg.colors.device.confirm = "#00FF00"  # what _apply_settings would have written
 
-    controller.shutdown()
-    assert (0, 255, 0) in injected.colors, "the blink kept sending the old colour"
+        # Polled rather than slept for a fixed number of half-periods. The property under
+        # test is that the loop *re-reads* the colour — not how many times a daemon
+        # thread gets scheduled inside a wall-clock window. A macOS CI runner stretched
+        # each 20 ms `Event.wait()` to roughly 50 ms, so the old fixed sleeps returned
+        # after only four ticks, all of them from before the change.
+        assert _wait_until(lambda: (0, 255, 0) in injected.colors, timeout=2.0), \
+            "the blink kept sending the old colour"
+    finally:
+        controller.shutdown()  # in a finally: a failure must not leak the blink thread
 
 
 def test_disabled_agent_events_are_ignored():
@@ -592,23 +598,37 @@ def test_watchdog_retires_only_the_silent_session():
     quiet session took every live one down with it). Here `claude/alive` keeps talking
     while `cursor/dead` goes silent — exactly one of them may be retired.
     """
-    server, _engine = _make_watchdog_server(0.3)
+    # A 1s timeout pinged every 0.1s is a 10x margin. A tighter one races the CI
+    # scheduler: a single stalled HTTP round trip would silently retire the session
+    # this test needs kept alive, and the failure would read as a real regression.
+    server, _engine = _make_watchdog_server(1.0)
+    stop_pinging = threading.Event()
+
+    def keep_alive() -> None:
+        while not stop_pinging.wait(0.1):
+            try:
+                _event(server, "working", agent="claude", sid="alive")
+            except Exception:
+                return  # the server is shutting down; nothing left to keep alive
+
     try:
         _event(server, "working", agent="claude", sid="alive")
         _event(server, "working", agent="cursor", sid="dead")
         assert _wait_until(lambda: _get_state(server)["count"] == 2)
 
-        # Keep only `claude/alive` talking, for well over the timeout.
-        deadline = time.monotonic() + 0.9
-        while time.monotonic() < deadline:
-            _event(server, "working", agent="claude", sid="alive")
-            time.sleep(0.05)
+        pinger = threading.Thread(target=keep_alive, daemon=True, name="test-pinger")
+        pinger.start()
 
+        # The silent session must be retired...
+        assert _wait_until(
+            lambda: "cursor" not in _get_state(server)["agents"], timeout=10.0
+        ), "the silent session should have been retired"
+        # ...and the chatty one must not have gone with it.
         state = _get_state(server)
-        assert "cursor" not in state["agents"], "the silent session should have been retired"
         assert state["agents"]["claude"]["sessions"] == {"alive": "working"}
         assert state["effective"] == "working"  # the survivor still drives the lights
     finally:
+        stop_pinging.set()
         server.stop()
 
 
@@ -645,18 +665,23 @@ def test_end_many_reports_one_effective_change_for_the_whole_batch():
     assert state.effective() == "none"
 
 
-def test_expired_is_per_session_not_per_store():
-    from tintaview.core.state import StateStore
+def test_expired_is_per_session_not_per_store(monkeypatch):
+    """Driven by a fake clock, not sleeps: the semantics under test are exact, and a
+    loaded runner stalling between two real `sleep`s would make this lie either way."""
+    from tintaview.core import state as state_mod
 
-    state = StateStore()
+    now = [1_000.0]
+    monkeypatch.setattr(state_mod.time, "monotonic", lambda: now[0])
+
+    state = state_mod.StateStore()
     state.set("cursor", "old", "working")
-    time.sleep(0.15)
+    now[0] += 100.0
     state.set("claude", "new", "working")  # a later event on a *different* session
 
     # The fresh session must not vouch for the stale one, which is exactly what a
     # single store-wide timestamp did.
-    assert state.expired(0.1) == [("cursor", "old")]
-    assert state.expired(10.0) == []
+    assert state.expired(10.0) == [("cursor", "old")]
+    assert state.expired(1_000.0) == []
 
 
 def test_watchdog_leaves_a_recently_seen_session_alone():
