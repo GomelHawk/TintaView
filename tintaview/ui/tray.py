@@ -435,6 +435,7 @@ class TrayApp(QtCore.QObject):
         # partial fetch must not blank a section), so dropping it has to happen here.
         for key in [k for k in self._usage_results if k not in self._cfg.enabled_agents]:
             del self._usage_results[key]
+        self._reorder_results()
         self.flyout.set_results(self._usage_results)
 
         if engine_changed:
@@ -686,8 +687,22 @@ class TrayApp(QtCore.QObject):
         # individual results are already resolved to cached-good ones inside
         # StatsService, so whatever comes back here is the best we currently have.
         self._usage_results.update(results)
+        self._reorder_results()
         self._last_usage_fetch = time.monotonic()
         self.flyout.set_results(self._usage_results)
+
+    def _reorder_results(self) -> None:
+        """Re-key `_usage_results` into `cfg.enabled_agents` order.
+
+        The flyout renders dict order as section order, and `dict.update` keeps an
+        existing key where it already was — so after the settings dialog reorders the
+        agents, a merge alone would leave the flyout in the *old* order until the next
+        restart. Anything not in `enabled_agents` (there only until the next
+        `_apply_settings` prune) keeps its relative position at the end.
+        """
+        keys = [k for k in self._cfg.enabled_agents if k in self._usage_results]
+        keys += [k for k in self._usage_results if k not in keys]
+        self._usage_results = {k: self._usage_results[k] for k in keys}
 
     def _on_activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
         if reason == QtWidgets.QSystemTrayIcon.Context:

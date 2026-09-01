@@ -661,6 +661,43 @@ def test_apply_settings_drops_a_disabled_agents_usage_section(tray_with_controll
     assert set(app_instance._usage_results) == {"claude"}
 
 
+def test_apply_settings_reorders_the_flyout_sections(tray_with_controller):
+    """Dragging an agent up the settings list has to move its flyout card too.
+
+    The flyout renders dict order as section order, and `dict.update` leaves an
+    existing key where it already was — so a merge alone kept the *old* order until
+    the next restart, which is exactly what the settings list stopped agreeing with.
+    """
+    app_instance, _server = tray_with_controller
+    app_instance._cfg.enabled_agents = ["claude", "codex", "cursor"]
+    app_instance._apply_results({
+        "claude": UsageResult(agent="claude", rows=[UsageRow(label="5-hour", pct=10.0)]),
+        "codex": UsageResult(agent="codex", rows=[UsageRow(label="weekly", pct=20.0)]),
+        "cursor": UsageResult(agent="cursor", rows=[UsageRow(label="monthly", pct=30.0)]),
+    })
+    assert list(app_instance._usage_results) == ["claude", "codex", "cursor"]
+
+    app_instance._apply_settings(
+        _accepted_copy(app_instance, enabled_agents=["claude", "cursor", "codex"])
+    )
+
+    assert list(app_instance._usage_results) == ["claude", "cursor", "codex"]
+
+
+def test_apply_results_keeps_the_configured_agent_order(tray_with_controller):
+    """A later partial fetch must not append a re-fetched agent to the end."""
+    app_instance, _server = tray_with_controller
+    app_instance._cfg.enabled_agents = ["claude", "codex"]
+    app_instance._apply_results({
+        "codex": UsageResult(agent="codex", rows=[UsageRow(label="weekly", pct=20.0)]),
+    })
+    app_instance._apply_results({
+        "claude": UsageResult(agent="claude", rows=[UsageRow(label="5-hour", pct=10.0)]),
+    })
+
+    assert list(app_instance._usage_results) == ["claude", "codex"]
+
+
 def test_apply_settings_reapplies_lighting_after_an_engine_change(tray_with_controller):
     """`reset_engine()` only drops the old engine. Without a re-apply, nothing calls
     `apply()` until the *next* status transition, so a mid-session engine switch leaves
