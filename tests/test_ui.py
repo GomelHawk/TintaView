@@ -240,12 +240,11 @@ def test_tray_reflects_idle_working_confirm_none(tray):
     })
     app_instance._poll_state()
     idle_icon = app_instance.tray.icon().cacheKey()
-    tooltip = app_instance.tray.toolTip()
-    assert "Claude Code: idle (1 session)" in tooltip
-    assert "Codex CLI: no session" in tooltip
-    # One agent per line: joined into a single line, three enabled agents wrapped
-    # mid-entry and stranded an agent's name away from its status.
-    assert tooltip.splitlines() == ["Claude Code: idle (1 session)", "Codex CLI: no session"]
+    # The tooltip is a single aggregate count, not one line per agent: a per-agent
+    # breakdown is unbounded as more agents are enabled (that used to overflow
+    # Windows' tray tooltip buffer outright) and duplicates the flyout's per-agent
+    # status dots, so it isn't repeated here.
+    assert app_instance.tray.toolTip() == "1 active session"
     assert not app_instance.blink_timer.isActive()
 
     server.set({
@@ -256,7 +255,7 @@ def test_tray_reflects_idle_working_confirm_none(tray):
     })
     app_instance._poll_state()
     working_icon = app_instance.tray.icon().cacheKey()
-    assert "Claude Code: working (2 sessions)" in app_instance.tray.toolTip()
+    assert app_instance.tray.toolTip() == "2 active sessions"
     assert working_icon != idle_icon
 
     server.set({
@@ -266,7 +265,7 @@ def test_tray_reflects_idle_working_confirm_none(tray):
         "count": 1,
     })
     app_instance._poll_state()
-    assert "Claude Code: needs confirmation" in app_instance.tray.toolTip()
+    assert app_instance.tray.toolTip() == "1 active session"
     assert app_instance.blink_timer.isActive()
     assert app_instance.tray.icon().cacheKey() == icons.state_icon(confirm_rgb, 128).cacheKey()
     assert app_instance.tray.icon().cacheKey() != working_icon
@@ -274,7 +273,7 @@ def test_tray_reflects_idle_working_confirm_none(tray):
     server.set({"effective": "none", "agents": {}, "count": 0})
     app_instance._poll_state()
     assert not app_instance.blink_timer.isActive()
-    assert "no session" in app_instance.tray.toolTip().lower()
+    assert app_instance.tray.toolTip() == "No active sessions"
     # "no session" is the mark in the LOGO's colours, not a fourth status tint: at rest
     # the tray is just the TintaView logo, and any single-colour icon means something is
     # happening. It shares the status icons' geometry exactly, so it still reads as the
@@ -282,6 +281,22 @@ def test_tray_reflects_idle_working_confirm_none(tray):
     assert app_instance.tray.icon().cacheKey() == icons.brand_icon(128).cacheKey()
     none_rgb = app_instance._cfg.colors.rgb("none")
     assert app_instance.tray.icon().cacheKey() != icons.state_icon(none_rgb, 128).cacheKey()
+
+
+def test_tray_tooltip_stays_a_short_aggregate_regardless_of_enabled_agent_count(tray):
+    # A one-line-per-agent tooltip grows with every agent TintaView adds support for
+    # (JetBrains and Copilot already joined the original three) and eventually overflows
+    # Windows' tray tooltip buffer outright. The aggregate count has no such ceiling:
+    # it's the same short string whether one agent is enabled or five.
+    app_instance, server = tray
+    app_instance._cfg.enabled_agents = ["claude", "codex", "cursor", "jetbrains", "copilot"]
+    server.set({
+        "effective": "idle",
+        "agents": {"claude": {"effective": "idle", "count": 1}},
+        "count": 1,
+    })
+    app_instance._poll_state()
+    assert app_instance.tray.toolTip() == "1 active session"
 
 
 def test_tray_sound_toggle_persists(tray, tmp_path):
@@ -597,9 +612,7 @@ def test_apply_settings_switches_the_interface_language(tray_with_controller):
         texts = [a.text() for a in app_instance.tray.contextMenu().actions()]
         assert "Выход" in texts
         assert "Quit" not in texts
-        # Agent display names stay as they are ("Claude Code" is a product name); the
-        # status word beside each is what gets translated.
-        assert app_instance.tray.toolTip().startswith("Claude Code: нет сессии")
+        assert app_instance.tray.toolTip() == "Нет активных сессий"
     finally:
         # Global state: the rest of this module asserts English text.
         i18n.set_language("en")

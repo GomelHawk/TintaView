@@ -19,7 +19,7 @@ Usage::
     from tintaview.i18n import t
     t("tray.menu.quit")                        # "Quit"
     t("usage.reset.in_minutes", minutes=12)    # "Resets in 12 min"
-    t("tray.tooltip.session_count", count=2)   # plural-aware, see below
+    t("tray.tooltip.active_sessions", count=2) # plural-aware, see below
 
 Contract for callers:
 

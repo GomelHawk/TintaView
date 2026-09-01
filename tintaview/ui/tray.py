@@ -39,14 +39,6 @@ CLICK_REOPEN_GUARD_S = 0.25  # guards against "the click that just closed it" re
 ICON_SIZE = 128
 FIRST_COPYRIGHT_YEAR = 2026
 
-#: Statuses with a translated tooltip label. A status outside this set (a payload from a
-#: newer build) is shown verbatim rather than as a missing translation key.
-_STATUS_KEYS = ("idle", "working", "confirm", "none")
-
-
-def _status_label(status: str) -> str:
-    return t(f"status.{status}") if status in _STATUS_KEYS else status
-
 
 def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]:
     """A darkened variant of `rgb`, used for the "off" half of the confirm blink.
@@ -662,40 +654,16 @@ class TrayApp(QtCore.QObject):
         self.tray.setIcon(icons.pulse_icon(self._cfg.colors.rgb("working"), t, ICON_SIZE))
 
     def _tooltip_for(self, payload: dict) -> str:
-        agents = payload.get("agents", {})
-        parts = []
-        for key in self._cfg.enabled_agents:
-            info = agents.get(key, {})
-            status = info.get("effective", "none")
-            count = info.get("count", 0)
-            name, label = self._agent_display_name(key), _status_label(status)
-            if count:
-                # Two keys rather than a suffix glued on: the session count is
-                # plural-sensitive (Russian, Ukrainian, Belarusian and Polish each need
-                # three forms), and where it sits in the line is the translator's call.
-                sessions = t("tray.tooltip.session_count", count=count)
-                parts.append(t("tray.tooltip.agent_sessions", agent=name, status=label,
-                                sessions=sessions))
-            else:
-                parts.append(t("tray.tooltip.agent", agent=name, status=label))
-        # One line per agent. Joined with " · " this wrapped mid-entry once three agents
-        # were enabled, so a status could end up split across two lines with the agent
-        # name stranded on the first — the exact thing a glanceable tooltip must not do.
-        # Windows' tray tooltip honours "\n" and sizes itself to the longest line.
-        text = "\n".join(parts) if parts else "TintaView"
-        engine = payload.get("engine") or {}
-        note = engine.get("note") if isinstance(engine, dict) else None
-        if note:
-            text = f"{text}\n{note}"
-        return text
-
-    def _agent_display_name(self, key: str) -> str:
-        try:
-            from tintaview.agents import base as agents_base
-
-            return agents_base.display_name(key)
-        except Exception:
-            return key.title()
+        # One line per agent used to run here, but that list can only grow (JetBrains
+        # and Copilot already joined the original three) while Windows' tray tooltip
+        # cannot: Shell_NotifyIcon's szTip buffer is a fixed WCHAR[128], and enough
+        # enabled agents silently hard-truncated it mid-word. A single aggregate count
+        # has no such ceiling and needs nothing added when a new agent shows up — the
+        # per-agent breakdown (with its per-status dots) lives in the flyout instead.
+        count = payload.get("count", 0)
+        if not count:
+            return t("tray.tooltip.no_sessions")
+        return t("tray.tooltip.active_sessions", count=count)
 
     def _chime(self) -> None:
         if not self._cfg.ui.chime_on_confirm:

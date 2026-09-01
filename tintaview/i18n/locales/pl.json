@@ -1,16 +1,10 @@
 {
-  "status.idle": "bezczynny",
-  "status.working": "pracuje",
-  "status.confirm": "czeka na potwierdzenie",
-  "status.none": "brak sesji",
-
   "tray.tooltip.connecting": "TintaView: łączenie…",
-  "tray.tooltip.agent": "{agent}: {status}",
-  "tray.tooltip.agent_sessions": "{agent}: {status} ({sessions})",
-  "tray.tooltip.session_count": {
-    "one": "{count} sesja",
-    "few": "{count} sesje",
-    "many": "{count} sesji"
+  "tray.tooltip.no_sessions": "Brak aktywnych sesji",
+  "tray.tooltip.active_sessions": {
+    "one": "{count} aktywna sesja",
+    "few": "{count} aktywne sesje",
+    "many": "{count} aktywnych sesji"
   },
 
   "tray.menu.refresh_usage": "Odśwież zużycie",

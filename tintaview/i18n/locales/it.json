@@ -1,15 +1,9 @@
 {
-  "status.idle": "inattivo",
-  "status.working": "al lavoro",
-  "status.confirm": "richiede conferma",
-  "status.none": "nessuna sessione",
-
   "tray.tooltip.connecting": "TintaView: connessione…",
-  "tray.tooltip.agent": "{agent}: {status}",
-  "tray.tooltip.agent_sessions": "{agent}: {status} ({sessions})",
-  "tray.tooltip.session_count": {
-    "one": "{count} sessione",
-    "other": "{count} sessioni"
+  "tray.tooltip.no_sessions": "Nessuna sessione attiva",
+  "tray.tooltip.active_sessions": {
+    "one": "{count} sessione attiva",
+    "other": "{count} sessioni attive"
   },
 
   "tray.menu.refresh_usage": "Aggiorna l'utilizzo",

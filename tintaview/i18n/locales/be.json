@@ -1,16 +1,10 @@
 {
-  "status.idle": "чакае",
-  "status.working": "працуе",
-  "status.confirm": "патрэбна пацвярджэнне",
-  "status.none": "няма сесіі",
-
   "tray.tooltip.connecting": "TintaView: злучэнне…",
-  "tray.tooltip.agent": "{agent}: {status}",
-  "tray.tooltip.agent_sessions": "{agent}: {status} ({sessions})",
-  "tray.tooltip.session_count": {
-    "one": "{count} сесія",
-    "few": "{count} сесіі",
-    "many": "{count} сесій"
+  "tray.tooltip.no_sessions": "Няма актыўных сесій",
+  "tray.tooltip.active_sessions": {
+    "one": "{count} актыўная сесія",
+    "few": "{count} актыўныя сесіі",
+    "many": "{count} актыўных сесій"
   },
 
   "tray.menu.refresh_usage": "Абнавіць выдатак",

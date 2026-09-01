@@ -1,16 +1,10 @@
 {
-  "status.idle": "очікує",
-  "status.working": "працює",
-  "status.confirm": "потрібне підтвердження",
-  "status.none": "немає сеансу",
-
   "tray.tooltip.connecting": "TintaView: з'єднання…",
-  "tray.tooltip.agent": "{agent}: {status}",
-  "tray.tooltip.agent_sessions": "{agent}: {status} ({sessions})",
-  "tray.tooltip.session_count": {
-    "one": "{count} сеанс",
-    "few": "{count} сеанси",
-    "many": "{count} сеансів"
+  "tray.tooltip.no_sessions": "Немає активних сеансів",
+  "tray.tooltip.active_sessions": {
+    "one": "{count} активний сеанс",
+    "few": "{count} активні сеанси",
+    "many": "{count} активних сеансів"
   },
 
   "tray.menu.refresh_usage": "Оновити витрати",

@@ -28,7 +28,7 @@ import pytest
 
 from tintaview import i18n
 from tintaview.core import config as config_mod
-from tintaview.core.events import STATUS_CONFIRM, STATUS_IDLE, STATUS_NONE, STATUS_WORKING
+from tintaview.core.events import STATUS_CONFIRM, STATUS_IDLE, STATUS_WORKING
 from tintaview.engines.factory import ENGINE_MODES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -141,11 +141,11 @@ def test_slavic_plural_rule_picks_the_right_forms():
     assert i18n._plural_form("de", 2) == "other"
 
 
-def test_russian_session_count_uses_all_three_forms():
+def test_russian_active_sessions_uses_all_three_forms():
     i18n.set_language("ru")
-    assert i18n.t("tray.tooltip.session_count", count=1) == "1 сессия"
-    assert i18n.t("tray.tooltip.session_count", count=3) == "3 сессии"
-    assert i18n.t("tray.tooltip.session_count", count=7) == "7 сессий"
+    assert i18n.t("tray.tooltip.active_sessions", count=1) == "1 активная сессия"
+    assert i18n.t("tray.tooltip.active_sessions", count=3) == "3 активные сессии"
+    assert i18n.t("tray.tooltip.active_sessions", count=7) == "7 активных сессий"
 
 
 # --------------------------------------------------------------------------- key coverage
@@ -154,7 +154,6 @@ def test_russian_session_count_uses_all_three_forms():
 #: `t()` calls whose key is built at runtime. Each family is asserted explicitly below,
 #: since the source scan can only see literal keys.
 _DYNAMIC_PREFIXES = (
-    "status.",
     "settings.colors.",
     "engine.mode.",
     "usage.weekday.",
@@ -190,8 +189,6 @@ def test_no_unused_keys(english: dict):
 
 
 def test_status_and_engine_key_families_are_complete(english: dict):
-    for status in (STATUS_IDLE, STATUS_WORKING, STATUS_CONFIRM, STATUS_NONE):
-        assert f"status.{status}" in english
     for status in (STATUS_IDLE, STATUS_WORKING, STATUS_CONFIRM):
         assert f"settings.colors.{status}" in english
     for mode in ENGINE_MODES:
@@ -289,7 +286,7 @@ def test_tray_tooltip_and_usage_rows_follow_the_language():
     from tintaview.stats.providers.codex import _window_label
 
     i18n.set_language("ru")
-    assert i18n.t("status.working") == "работает"
+    assert i18n.t("tray.tooltip.active_sessions", count=1) == "1 активная сессия"
     assert _window_label({"window_minutes": 10080}, "fallback") == "Лимит на неделю"
 
 

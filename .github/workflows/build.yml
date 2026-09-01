@@ -87,6 +87,12 @@ jobs:
         with:
           name: tintaview-${{ github.ref_name }}
           path: dist/release/*
+          # These files are also attached permanently to the GitHub Release below;
+          # the workflow-artifact copy is only useful for the few days after a run,
+          # e.g. to inspect a workflow_dispatch build before it's tagged. Left at the
+          # default 90 days, they pile up (14+ tags so far) and blow the account's
+          # Actions storage cap.
+          retention-days: 3
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')

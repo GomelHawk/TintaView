@@ -1,16 +1,10 @@
 {
-  "status.idle": "ожидает",
-  "status.working": "работает",
-  "status.confirm": "нужно подтверждение",
-  "status.none": "нет сессии",
-
   "tray.tooltip.connecting": "TintaView: подключение…",
-  "tray.tooltip.agent": "{agent}: {status}",
-  "tray.tooltip.agent_sessions": "{agent}: {status} ({sessions})",
-  "tray.tooltip.session_count": {
-    "one": "{count} сессия",
-    "few": "{count} сессии",
-    "many": "{count} сессий"
+  "tray.tooltip.no_sessions": "Нет активных сессий",
+  "tray.tooltip.active_sessions": {
+    "one": "{count} активная сессия",
+    "few": "{count} активные сессии",
+    "many": "{count} активных сессий"
   },
 
   "tray.menu.refresh_usage": "Обновить расход",
