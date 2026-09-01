@@ -93,15 +93,24 @@ class GHubSidecar:
         self._lock = threading.Lock()
         self._next_id = 1
         self._stderr_thread: threading.Thread | None = None
+        # Set when an RPC leaves the pipe in an unknown state (see `_discard`). The
+        # process is killed at the same time, but `poll()` can lag a moment behind the
+        # kill, and until it catches up `alive` must already read False.
+        self._broken = False
 
     @property
     def alive(self) -> bool:
+        if self._broken:
+            return False
         return self._proc is not None and self._proc.poll() is None
 
     def start(self) -> None:
         with self._lock:
             if self.alive:
                 return
+            # A worker that crashed or was discarded still has to be buried, or every
+            # respawn would leak a zombie plus its three pipes.
+            self._reap_locked()
             python = _python_exe_for_worker()
             if python is None:
                 raise RuntimeError("python.exe sibling of the tray interpreter not found")
@@ -121,8 +130,10 @@ class GHubSidecar:
                 env=env,
                 creationflags=creationflags,
             )
+            self._broken = False
             self._stderr_thread = threading.Thread(
-                target=self._pump_stderr, daemon=True, name="tv-ghub-sidecar-err",
+                target=self._pump_stderr, args=(self._proc,), daemon=True,
+                name="tv-ghub-sidecar-err",
             )
             self._stderr_thread.start()
             log.info("G HUB sidecar started (pid=%s via %s)", self._proc.pid, python)
@@ -169,9 +180,11 @@ class GHubSidecar:
         except Exception as e:
             log.debug("ghub sidecar close failed: %r", e)
 
-    def _pump_stderr(self) -> None:
-        proc = self._proc
-        if proc is None or proc.stderr is None:
+    def _pump_stderr(self, proc: subprocess.Popen[str]) -> None:
+        # The process is passed in rather than read off `self`: a respawn swaps
+        # `self._proc` underneath this thread, and it must keep draining the pipe it
+        # was started for, not the new one's.
+        if proc.stderr is None:
             return
         try:
             for line in proc.stderr:
@@ -184,9 +197,43 @@ class GHubSidecar:
     def _request(self, cmd: str, fields: dict[str, Any], timeout: float = _RPC_TIMEOUT) -> dict:
         with self._lock:
             proc = self._proc
-            if proc is None or proc.poll() is not None:
+            if proc is None or self._broken or proc.poll() is not None:
                 raise RuntimeError("G HUB sidecar is not running")
             return self._request_unlocked(proc, cmd, fields, timeout=timeout)
+
+    def _discard(self, proc: subprocess.Popen[str], reason: str) -> None:
+        """Abandon a worker whose response stream is no longer trustworthy.
+
+        Every RPC failure below leaves the pipe in an unknown state — a reply may still
+        be in flight, and a reader thread may still be parked in ``readline()``. Left
+        running, that thread would consume the *next* request's response line, so from
+        then on every call would be answered with the wrong id: a silent, permanent
+        desync that no amount of retrying recovers from. Killing the worker ends both
+        problems at once (the parked reader gets an EOF), and ``alive`` going False is
+        what makes ``GHubEngine.active`` report the session closed, so the controller's
+        next ``open()`` spawns a clean one.
+
+        Never raises: it runs on the failure path of every RPC, including ``stop()``'s.
+        """
+        self._broken = True
+        log.info("G HUB sidecar discarded (%s)", reason)
+        with contextlib.suppress(Exception):
+            proc.kill()
+
+    def _reap_locked(self) -> None:
+        """Bury the previous worker and its pipes. Caller holds ``self._lock``."""
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        with contextlib.suppress(Exception):
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=2.0)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
 
     def _request_unlocked(
         self,
@@ -218,14 +265,22 @@ class GHubSidecar:
         t.start()
         t.join(timeout)
         if t.is_alive():
+            self._discard(proc, f"timed out on {cmd!r}")
             raise TimeoutError(f"G HUB sidecar timed out on {cmd!r}")
         if error:
+            self._discard(proc, f"stdout read failed during {cmd!r}")
             raise error[0]
         line = holder.get("line") or ""
         if not line:
+            self._discard(proc, f"closed stdout during {cmd!r}")
             raise RuntimeError(f"G HUB sidecar closed stdout during {cmd!r}")
-        resp = json.loads(line)
+        try:
+            resp = json.loads(line)
+        except ValueError:
+            self._discard(proc, f"unparseable reply to {cmd!r}")
+            raise
         if resp.get("id") != req_id:
+            self._discard(proc, f"id mismatch on {cmd!r}")
             raise RuntimeError(f"G HUB sidecar id mismatch: sent {req_id}, got {resp!r}")
         return resp
 

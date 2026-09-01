@@ -386,7 +386,11 @@ def test_tray_shows_a_balloon_when_an_update_is_found(tray, monkeypatch):
 
 
 def test_tray_balloons_once_when_engine_note_appears(tray, monkeypatch):
-    """Silent G HUB refusals surface via /state's engine.note — balloon once per note."""
+    """Silent G HUB refusals surface via /state's engine.note — balloon once per note.
+
+    The balloon is the *only* place the note is shown: the tray tooltip stays the plain
+    aggregate session count, with nothing engine- or agent-specific appended to it.
+    """
     app_instance, server = tray
     balloons = []
     monkeypatch.setattr(
@@ -406,7 +410,8 @@ def test_tray_balloons_once_when_engine_note_appears(tray, monkeypatch):
     app_instance._poll_state()
     assert len(balloons) == 1
     assert note in balloons[0][1]
-    assert note in app_instance.tray.toolTip()
+    # A pending note must not leak into the tooltip — it is the aggregate count, only.
+    assert app_instance.tray.toolTip() == "1 active session"
 
     # Same note again must not re-balloon; clearing it resets the latch.
     app_instance._poll_state()
@@ -416,7 +421,7 @@ def test_tray_balloons_once_when_engine_note_appears(tray, monkeypatch):
     cleared["engine"] = {"name": "ghub", "active": True, "note": None}
     server.set(cleared)
     app_instance._poll_state()
-    assert note not in app_instance.tray.toolTip()
+    assert app_instance.tray.toolTip() == "1 active session"
 
     server.set(payload)
     app_instance._poll_state()

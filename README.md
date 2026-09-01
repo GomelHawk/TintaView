@@ -292,7 +292,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `update.channel` | `stable` | Update channel (currently only `stable` is published). |
-| `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout and tooltip. The wizard sets this for you, in the order you type the agents' numbers. |
+| `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
 | `agents.<key>.confirm_detection` | `event` | `event` (a real hook fires) or `stall` (heuristic — Cursor's default). |
 | `agents.<key>.stall_seconds` | `8.0` | Only used when `confirm_detection = "stall"`. |

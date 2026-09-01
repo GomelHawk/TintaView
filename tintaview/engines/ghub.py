@@ -555,7 +555,16 @@ class GHubEngine(BaseEngine):
 
     @property
     def active(self) -> bool:
-        return self._saved
+        if not self._saved:
+            return False
+        if self._use_sidecar:
+            # A dead or discarded worker is not an open session. `_saved` alone used to
+            # answer here, so once the sidecar went away the engine still reported
+            # active, `LightController._ensure_open_locked` never called `open()` again,
+            # and every later paint failed silently for the rest of the run.
+            sc = self._sidecar
+            return sc is not None and sc.alive
+        return True
 
     # --- DLL / init lifecycle ------------------------------------------------
 
@@ -703,9 +712,11 @@ class GHubEngine(BaseEngine):
             ok = self._sidecar.open()
         except Exception as e:
             log.info("G HUB sidecar open failed: %r", e)
+            self._saved = False
             self.note_failure(f"G HUB sidecar unavailable ({e!r})")
             return False
         if not ok:
+            self._saved = False
             self.note_failure("Logitech LED SDK unavailable (G HUB not installed, or not running?)")
             return False
         self._saved = True
@@ -763,7 +774,7 @@ class GHubEngine(BaseEngine):
             self._note_paint_result(ok)
         except Exception as e:
             log.debug("ghub sidecar set_color FAILED: %r", e)
-            self.status_note = "G HUB sidecar failed — restart TintaView"
+            self.status_note = "G HUB lighting helper stopped responding — reconnecting"
             self._note_paint_result(False)
 
     def _note_paint_result(self, ok: bool) -> None:

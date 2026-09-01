@@ -176,7 +176,7 @@ If `doctor` says the G HUB engine is available but the lights still don't move:
   builds have no Integrations UI; the sidecar still matters.
 - Take the device **off onboard memory mode**. Onboard profiles ignore the SDK
   entirely; switch the device to a G HUB (automatic) profile.
-- If the tray balloon / tooltip says **"G HUB restarted; restart TintaView to reclaim
+- If the tray balloon says **"G HUB restarted; restart TintaView to reclaim
   lighting"** — do that. After G HUB auto-updates under a live tray the SDK session is
   orphaned; a normal session end already calls `LogiLedShutdown` and re-inits on the
   next open, but a G HUB process restart mid-hold still needs a TintaView relaunch.

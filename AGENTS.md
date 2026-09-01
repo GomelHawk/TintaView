@@ -20,8 +20,15 @@ CI (`ci.yml`) runs all four on ubuntu / windows / macOS × Python 3.12, 3.13 and
 construct real `QWidget`s and never `.show()` them, so `offscreen` is enough — never add a
 test that needs a real display.
 
+**Never commit.** Prepare changes in the working tree and stop there — no `git commit`, no
+`git add`, no branch, no push, no tag. Committing is the maintainer's call every time, and an
+agent-made commit has to be unpicked before the work can be reviewed. This holds even when the
+change is finished, tested and obviously correct, and even when a task description sounds like it
+implies a commit; if you think one is warranted, say so and leave it to the maintainer.
+
 At the end of implementing any update or feature, give a short commit-style description of the
-change (what changed, in one or two sentences) — even if the change isn't actually committed.
+change (what changed, in one or two sentences) — that description is what the maintainer commits
+with, and is the reason it reads like a commit message despite the rule above.
 
 ## Layout
 
@@ -90,7 +97,7 @@ themselves — everything the two UIs *label* comes from one table each:
 | --- | --- | --- |
 | engine keys, order, per-platform gating | `engines.factory.ENGINE_MODES` / `ENGINE_DISPLAY` / `engine_supported()` | both UIs |
 | engine labels *as shown in the popup* | `i18n` key `engine.mode.<mode>`, falling back to `ENGINE_DISPLAY` | settings dialog |
-| agent + stats-only provider keys and display names | `agents.base.STATS_ONLY_AGENTS` / `display_name()` | both UIs, tray tooltip, usage flyout |
+| agent + stats-only provider keys and display names | `agents.base.STATS_ONLY_AGENTS` / `display_name()` | both UIs, usage flyout |
 | supported interface languages | `i18n.LANGUAGES` | both UIs |
 
 Add a stats-only provider by adding a row to `agents.base.STATS_ONLY_AGENTS`, a detect
@@ -139,8 +146,11 @@ Two invariants in the ingress path:
   forever and defeat the crash-safety release.
 
 **State model.** Sessions are keyed by `(agent, sid)`, not `sid` alone. Colour priority is global
-and unchanged: `confirm > working > idle > none`. `/state` also reports a per-agent breakdown so
-the tooltip can say `Claude: working · Codex: idle`.
+and unchanged: `confirm > working > idle > none`. `/state` also reports a per-agent breakdown,
+which the usage flyout renders as a status dot per agent. The tray tooltip deliberately
+does **not** use it: Shell_NotifyIcon's `szTip` is a fixed `WCHAR[128]`, so the tooltip is
+the aggregate session count and nothing else — no per-agent lines, no engine note. A
+lighting-engine problem is announced by a tray balloon instead.
 
 **Config.** One file for daemon, tray, wizard and `doctor`: `~/.tintaview/config.toml`, or
 `%LOCALAPPDATA%\TintaView\config.toml` on Windows. Every key is documented in the README's
@@ -188,7 +198,12 @@ Configuration table — keep that table in sync when adding one.
   7. **Under `pythonw.exe` the SDK is a silent no-op** (returns success, mouse stays on
      G HUB's profile — measured on G102 Lightsync). The tray **always** runs as
      `pythonw`; only this engine paints through a `python.exe` sidecar
-     (`engines/ghub_sidecar.py` / `ghub_worker`). Never switch the whole tray/autostart
+     (`engines/ghub_sidecar.py` / `ghub_worker`). The RPC is one request per reply on a
+     shared pipe, so **any** failed request must discard the worker (`_discard`) rather
+     than raise and leave it running — a reader left parked in `readline()` answers the
+     *next* request with the wrong id, permanently. `GHubEngine.active` therefore has to
+     track the worker's liveness too, or `LightController._ensure_open_locked` never
+     reopens and the lights stay dead. Never switch the whole tray/autostart
      to `python.exe` for this. In-process LED calls are used only inside the worker,
      under console `python.exe` tools (`doctor --paint`, smoke scripts), or with an
      injected DLL in tests.
