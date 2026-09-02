@@ -15,8 +15,10 @@ shipped inside every wheel for nothing.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -52,13 +54,7 @@ def test_ico_exists_with_expected_sizes() -> None:
         assert expected.issubset(set(sizes)), f"tintaview.ico missing sizes: {expected - set(sizes)}"
 
 
-def test_check_mode_regenerates_and_compares_bytes() -> None:
-    """`--check` must actually be able to fail.
-
-    It used to only assert that each file existed and was non-empty, which passes
-    for the failure that really happens: a re-exported source whose output nobody
-    regenerated. Every file is still there and every one of them is stale.
-    """
+def _load_build_assets():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -67,6 +63,23 @@ def test_check_mode_regenerates_and_compares_bytes() -> None:
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="byte-exact regeneration only holds on Linux, where the assets are built and "
+    "where CI's lint job runs --check; Pillow's PNG/ICO encoders and resampling differ "
+    "per platform (both files came out STALE on the Windows and macOS runners)",
+)
+def test_check_mode_regenerates_and_compares_bytes() -> None:
+    """`--check` must actually be able to fail.
+
+    It used to only assert that each file existed and was non-empty, which passes
+    for the failure that really happens: a re-exported source whose output nobody
+    regenerated. Every file is still there and every one of them is stale.
+    """
+    module = _load_build_assets()
 
     assert module.check() is True  # the committed files are current
 

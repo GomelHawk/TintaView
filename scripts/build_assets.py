@@ -273,7 +273,9 @@ def check() -> bool:
     from artwork under assets/source/, so the failure that actually happens is a re-exported
     source whose output nobody regenerated — at which point all the files still exist, are
     all non-empty, and are all wrong. Byte comparison catches exactly that, and it does not
-    false-alarm because the pipeline is reproducible (see the module docstring).
+    false-alarm because the pipeline is reproducible *on one platform*: regenerate and check
+    on Linux (CI's lint job does), since Pillow's PNG/ICO encoders and resampling do not
+    produce identical bytes on Windows or macOS.
     """
     ok = True
     with tempfile.TemporaryDirectory() as tmp:

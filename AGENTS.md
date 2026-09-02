@@ -10,15 +10,18 @@ a constraint, not a suggestion, and update this file if a decision genuinely cha
 
 ```sh
 python -m pip install -e ".[dev,ui]"
-ruff check .                          # line-length 100, E/F/W/I/UP/B/C4/SIM
-pytest -q                             # DeprecationWarning is an error
-python scripts/build_assets.py --check # generated assets must be committed and current
-QT_QPA_PLATFORM=offscreen pytest -q   # required for the Qt tests without a display server
+ruff check .                           # line-length 100, E/F/W/I/UP/B/C4/SIM
+pytest -q                              # DeprecationWarning is an error
+python scripts/build_assets.py --check # generated assets must be committed and current (Linux only — see below)
+QT_QPA_PLATFORM=offscreen pytest -q    # required for the Qt tests without a display server
 ```
 
 CI (`ci.yml`) runs `pytest` on ubuntu / windows / macOS × Python 3.12, 3.13 and 3.14, and `ruff`
 plus the asset check once, in a separate ubuntu `lint` job (both are platform-independent — nine
-copies of them bought nothing). Pushes to `main` and pull requests trigger it, with in-progress
+copies of them bought nothing). The asset check compares a fresh build byte-for-byte with the
+committed files, which only holds on Linux: Pillow's PNG/ICO encoders and resampling do not
+reproduce the same bytes on Windows or macOS (both files came out STALE on those runners), so
+regenerate assets on Linux and expect `tests/test_assets.py`'s byte test to skip elsewhere. Pushes to `main` and pull requests trigger it, with in-progress
 runs on the same ref cancelled, a 15-minute job timeout and a pip cache. The UI tests
 construct real `QWidget`s and never `.show()` them, so `offscreen` is enough — never add a
 test that needs a real display.

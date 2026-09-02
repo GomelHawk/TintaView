@@ -444,17 +444,49 @@ def test_install_hook_writes_script_and_env_over_stdin(monkeypatch, wsl_mod):
     assert exe2 is False
 
 
-def test_install_agent_hooks_prefers_unc_route_when_nothing_installed(monkeypatch, wsl_mod):
+def test_install_agent_hooks_prefers_unc_route_when_nothing_installed(
+    monkeypatch, wsl_mod, tmp_path
+):
     monkeypatch.setattr(wsl_mod, "distro_home", lambda distro: "/home/dmitry")
     monkeypatch.setattr(wsl_mod, "_tintaview_available", lambda distro: False)
+    # Stand in for the distro's config file with a path that does not exist *anywhere*.
+    # The real `\\wsl.localhost\...` spelling is asserted separately below: on a Windows
+    # runner without WSL, opening it raises EINVAL — an unreadable config, which since the
+    # overwrite fix correctly yields "failed: ..." rather than a CREATE plan.
+    unc_path = tmp_path / "wsl-home" / ".claude" / "settings.json"
+    monkeypatch.setattr(wsl_mod, "agent_config_unc_path", lambda distro, home, adapter: unc_path)
 
     result = wsl_mod.install_agent_hooks("Ubuntu", ["claude"], assume_yes=False)
 
     assert result["route"] == "unc"
     plan = result["plans"]["claude"]
     assert not isinstance(plan, str)  # a real HookPlan, ready for the wizard to confirm
-    assert str(plan.path) == r"\\wsl.localhost\Ubuntu\home\dmitry\.claude\settings.json"
+    assert plan.path == unc_path
     assert plan.action == "create"
+
+
+def test_install_agent_hooks_unc_route_reports_an_unreadable_config(monkeypatch, wsl_mod):
+    """An unreachable distro (or a Windows box with no WSL at all) must surface as a
+    failed plan, never as a CREATE that would overwrite the real file with only our hooks."""
+    monkeypatch.setattr(wsl_mod, "distro_home", lambda distro: "/home/dmitry")
+    monkeypatch.setattr(wsl_mod, "_tintaview_available", lambda distro: False)
+
+    def unreadable(adapter, hook_bin, scope="user", project_dir=None):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(wsl_mod.hooks_mod, "plan_install", unreadable)
+
+    result = wsl_mod.install_agent_hooks("Ubuntu", ["claude"], assume_yes=False)
+
+    assert result["route"] == "unc"
+    assert result["plans"]["claude"].startswith("failed: ")
+
+
+def test_agent_config_unc_path_spells_the_wsl_localhost_share(wsl_mod):
+    from tintaview.agents import base as agents_base
+
+    path = wsl_mod.agent_config_unc_path("Ubuntu", "/home/dmitry", agents_base.get("claude"))
+    assert str(path) == r"\\wsl.localhost\Ubuntu\home\dmitry\.claude\settings.json"
 
 
 def test_install_agent_hooks_uses_remote_tintaview_when_available(monkeypatch, wsl_mod):
