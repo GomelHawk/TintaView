@@ -14,7 +14,7 @@ in particular usually already contains their own hooks. Three rules make that sa
    mid-write can never truncate an agent's config.
 
 Re-running an install is a no-op: the plan comes back with ``action == "noop"`` and an
-empty diff, which is also what makes the tray's drift check cheap.
+empty diff, which is also what makes a repeated `status()` check cheap.
 """
 
 from __future__ import annotations
@@ -253,15 +253,15 @@ def status(
     scope: str = "user",
     project_dir: Path | None = None,
 ) -> str:
-    """What state this agent's hooks are in — the tray's drift check.
+    """What state this agent's hooks are in — `doctor`, `hooks status` and the settings dialog.
 
     ``stale-path`` matters more than it looks: it means our entries point at a hook
     binary that no longer exists (a moved or reinstalled TintaView), which fails silently
     at runtime and would otherwise just look like "the lights stopped working".
 
     A file that exists but cannot be read or parsed is ``unreadable``, never ``missing``:
-    the drift check runs on a timer, and "missing" is the state that offers to rewrite
-    the file.
+    "missing" is the state that offers to rewrite the file, and a check that runs
+    unattended must never be able to route a user into that.
     """
     path = adapter.hooks_config_path(scope, project_dir)
     try:

@@ -331,13 +331,15 @@ id pulled out by `sed`, **no Python startup**, `curl -s -m 1`, output discarded,
    user into a CREATE, which would overwrite their real config with only our hooks. Every UI
    that offers "install" must key on `missing / partial / stale-path`, never on `!= installed`.
 
-**Drift detection.** Agents rewrite their config on upgrade, so the tray re-checks hook presence
-rather than silently going dark: `ui/tray.py`'s `HookDriftWorker` runs on the shared 5-minute
-usage cadence (and once at startup), off the GUI thread, resolving each enabled agent through
-`wsl.configured_adapter`, and treats only `missing / partial / stale-path` as actionable. It
-balloons once per state change and toggles a "Fix agent hooks…" tray item that opens the console
-wizard. Tests must stub `HookDriftWorker.fetch` in the tray fixture, or the startup check reads the
-developer's real `~/.claude/settings.json` from a thread.
+**Drift detection — startup only, WSL-aware, no menu item.** Agents rewrite their config on
+upgrade, so the tray runs **one** hook check at startup (`ui/tray.py`'s `HookCheckWorker`, off the
+GUI thread) and balloons "Hooks are missing for X — open Settings → Open Full Setup Wizard". No
+timer, no tray item: the fix already exists in Settings. The check is `install.wsl.missing_hooks`,
+shared with `doctor`, `tintaview hooks status` and the settings dialog's tick-an-agent prompt —
+never call `hooks.status()` with `config.hook_bin_path()` and a bare adapter from anywhere. A first
+version did exactly that and reported every agent as `stale-path` on the maintainer's working
+WSL-split machine (see below); when the distro cannot be reached the shared helper returns None and
+every caller reports **nothing**, because unknown is not missing.
 
 **Not done, and deliberately so:** Claude Code and Codex both support plugin-bundled hooks, so a
 `tintaview` plugin could collapse install down to one `/plugin install`. It would only ever cover
@@ -549,6 +551,15 @@ terminal. The Windows-side wizard enumerates distros via `wsl.exe -l -q`, instal
 into the Windows-side config. It relies on the **`curl.exe` trick**: called from WSL, `curl.exe`
 runs in the *Windows* network namespace, so `127.0.0.1:8777` reaches the daemon with no firewall
 rule and no mirrored-networking requirement.
+
+**There are always two implementations of every path: native and WSL-split.** Any feature that
+reads or checks an install — where the hook script is, which `tv-hook` an installed hook entry
+should point at, where an agent's config file lives — has a native answer (`config.hook_bin_path()`,
+`adapter.hooks_config_path()`) *and* a split answer (`wsl.remote_hook_bin(split_home)`, the agent's
+config behind `\\wsl.localhost\<distro>\...`). Ship only the native one and the feature is wrong on
+the maintainer's own machine. The shared resolution is `install.wsl.hook_check()` /
+`check_adapter()` / `hook_status()` / `missing_hooks()`; use it, and add a split-mode test next to
+the native one for anything new.
 
 **Anything that *inspects* an install has to cross the same boundary the installer does.** On the
 Windows half, `Path.home()` is `C:\Users\you` and `config_dir()` is `%LOCALAPPDATA%\TintaView` —

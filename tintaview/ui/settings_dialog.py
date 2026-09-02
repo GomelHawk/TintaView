@@ -516,14 +516,11 @@ class SettingsDialog(QtWidgets.QDialog):
 
         Two rules that are easy to get wrong here:
 
-        - The adapter is resolved through `wsl.configured_adapter`, never used bare. On the
-          Windows half of a WSL-split install a bare adapter answers from `C:\\Users\\you`,
-          which is the wrong side of the boundary entirely, and every agent then reports
-          its hooks as missing on a working machine (AGENTS.md, "WSL split install").
-        - Only "missing / partial / stale-path" mean the wizard can help. `hooks.status()`
-          may report other things (a config file it could not read), and offering a
-          diff-and-confirm install for one of those sends the user somewhere that cannot
-          fix it.
+        - Everything goes through `wsl.missing_hooks`, the same resolution `doctor` and the
+          tray's startup check use: in a WSL split the hooks live in the distro and point
+          at *its* `tv-hook.sh`, and a check against the Windows-side paths reports every
+          agent as broken on a working machine (AGENTS.md, "WSL split install").
+        - Only "missing / partial / stale-path" mean the wizard can help (`wsl.NEEDS_INSTALL`).
 
         Runs on a worker thread with a bounded wait: the resolution above can put a UNC
         path into the read, and a `wsl.localhost` UNC read on a stopped distro blocks for as
@@ -531,30 +528,14 @@ class SettingsDialog(QtWidgets.QDialog):
         this one has to answer before the dialog can close, so it is joined rather than
         signalled — a timeout means "don't nag", not "assume broken".
         """
-        from ..install import hooks as hooks_mod
         from ..install import wsl
 
-        needs_install = {
-            hooks_mod.STATUS_MISSING,
-            hooks_mod.STATUS_PARTIAL,
-            hooks_mod.STATUS_STALE_PATH,
-        }
         cfg = self.result_cfg
-        hook_bin = config_mod.hook_bin_path()
         missing: list[str] = []
 
         def run() -> None:
-            for key in keys:
-                adapter = agents_base.get(key)
-                if adapter is None:
-                    continue
-                try:
-                    state = hooks_mod.status(wsl.configured_adapter(cfg, adapter), hook_bin)
-                except Exception:
-                    log.exception("could not check hook status for %s", key)
-                    continue
-                if state in needs_install:
-                    missing.append(adapter.display_name)
+            # None = a WSL split whose distro is not reachable: unknown, so don't nag.
+            missing.extend(wsl.missing_hooks(cfg, keys=keys) or [])
 
         thread = threading.Thread(target=run, daemon=True, name="tv-settings-hooks")
         thread.start()

@@ -229,10 +229,9 @@ def tray(qapp, monkeypatch, tmp_path):
     # Same reasoning: the startup update check is real network I/O on a background
     # thread, which every other tray test would otherwise trigger unattended.
     monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
-    # And the hook-drift check, which reads the developer's own ~/.claude/settings.json
-    # (and, on a WSL-split box, a UNC path into a distro). `HookDriftWorker._run` is
-    # exercised directly, against a fake registry, further down.
-    monkeypatch.setattr(tray_mod.HookDriftWorker, "fetch", lambda self: None)
+    # And the startup hook check, which would read the developer's own agent configs
+    # (and on a WSL-split box call wsl.exe). Its worker is exercised directly below.
+    monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: None)
 
     cfg = Config()
     cfg.enabled_agents = ["claude", "codex"]
@@ -367,7 +366,7 @@ def test_update_check_worker_silent_when_already_current_or_unreachable(qapp, mo
 def test_tray_runs_update_check_on_start_only_when_enabled(qapp, monkeypatch, tmp_path):
     monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
     monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
-    monkeypatch.setattr(tray_mod.HookDriftWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: None)
     calls = []
     monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: calls.append(1))
 
@@ -1276,124 +1275,87 @@ def test_the_pulse_skips_seticon_while_the_step_is_unchanged(tray, monkeypatch):
     assert len(calls) == 1
 
 
-# --------------------------------------------------------------------------- hook drift
+# --------------------------------------------------------------------------- startup hook check
 
 
-class _FakeAdapter:
-    def __init__(self, key: str, name: str) -> None:
-        self.key = key
-        self.display_name = name
-
-
-def _fake_hooks_module(states: dict[str, str]):
-    class _Hooks:
-        STATUS_INSTALLED = "installed"
-        STATUS_MISSING = "missing"
-        STATUS_PARTIAL = "partial"
-        STATUS_STALE_PATH = "stale-path"
-
-        def __init__(self) -> None:
-            self.checked: list = []
-
-        def status(self, adapter, hook_bin, scope="user", project_dir=None):
-            self.checked.append(adapter)
-            return states[adapter.key]
-
-    return _Hooks()
-
-
-def test_hook_drift_reports_only_the_statuses_the_wizard_can_fix(qapp, monkeypatch):
-    """`hooks.status()` may grow values beyond the four it has today — an unreadable
-    config file, say — and none of those are a reason to send someone into a
-    diff-and-confirm install flow that cannot address them."""
-    import tintaview.agents.base as agents_base
-    import tintaview.install
+def test_hook_check_worker_emits_the_shared_helpers_answer(qapp, monkeypatch):
+    """The worker is a thin thread around `wsl.missing_hooks` — the WSL-aware resolution
+    `doctor` uses — and adds no logic of its own that could disagree with it."""
     import tintaview.install.wsl as wsl_mod
 
-    adapters = {
-        "claude": _FakeAdapter("claude", "Claude Code"),
-        "codex": _FakeAdapter("codex", "Codex CLI"),
-        "cursor": _FakeAdapter("cursor", "Cursor"),
-        "jetbrains": None,  # stats-only: no adapter at all, and that is expected
-    }
-    hooks = _fake_hooks_module({
-        "claude": "installed",
-        "codex": "missing",
-        "cursor": "config-unreadable",  # a value this build has never seen
-    })
-    monkeypatch.setattr(agents_base, "get", adapters.get)
-    # The tray does `from tintaview.install import hooks`, which reads the attribute on
-    # the already-imported package — patching sys.modules alone would not be seen.
-    monkeypatch.setattr(tintaview.install, "hooks", hooks)
-    monkeypatch.setattr(wsl_mod, "configured_adapter", lambda cfg, adapter: adapter)
+    asked: list = []
 
+    def fake_missing(cfg, env=None, keys=None):
+        asked.append(cfg)
+        return ["Codex CLI"]
+
+    monkeypatch.setattr(wsl_mod, "missing_hooks", fake_missing)
     cfg = Config()
-    cfg.enabled_agents = ["claude", "codex", "cursor", "jetbrains"]
-    worker = tray_mod.HookDriftWorker(cfg)
+    worker = tray_mod.HookCheckWorker(cfg)
     seen: list[list] = []
-    worker.drift_ready.connect(seen.append)
+    worker.missing_ready.connect(seen.append)
 
     worker._run()
 
+    assert asked == [cfg]
     assert seen == [["Codex CLI"]]
 
 
-def test_hook_drift_resolves_the_adapter_through_the_configured_home(qapp, monkeypatch):
-    """AGENTS.md, "WSL split install": a bare adapter answers from C:\\Users\\you, which is
-    the wrong side of the boundary, and every agent is then reported as broken."""
-    import tintaview.agents.base as agents_base
-    import tintaview.install
+def test_hook_check_worker_stays_silent_when_the_distro_is_unreachable(qapp, monkeypatch):
+    """None from the helper means "could not determine", which must never be shown as
+    "missing" — that was the false alarm on a working WSL-split machine."""
     import tintaview.install.wsl as wsl_mod
 
-    adapter = _FakeAdapter("claude", "Claude Code")
-    remote = _FakeAdapter("claude", "Claude Code (remote)")
-    hooks = _fake_hooks_module({"claude": "installed"})
-    monkeypatch.setattr(agents_base, "get", lambda key: adapter if key == "claude" else None)
-    monkeypatch.setattr(tintaview.install, "hooks", hooks)
-    monkeypatch.setattr(wsl_mod, "configured_adapter", lambda cfg, a: remote)
+    monkeypatch.setattr(wsl_mod, "missing_hooks", lambda cfg, env=None, keys=None: None)
+    worker = tray_mod.HookCheckWorker(Config())
+    seen: list[list] = []
+    worker.missing_ready.connect(seen.append)
+
+    worker._run()
+
+    assert seen == []
+
+
+def test_hook_check_runs_once_at_startup_and_never_on_a_timer(qapp, monkeypatch, tmp_path):
+    monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
+    monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
+    calls: list[int] = []
+    monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: calls.append(1))
 
     cfg = Config()
-    cfg.enabled_agents = ["claude"]
-    tray_mod.HookDriftWorker(cfg)._run()
+    cfg.update.check = False
+    app_instance = TrayApp(cfg, _FakeServer(), qapp)
+    try:
+        assert calls == [1]
+        app_instance.usage_timer.timeout.emit()
+        app_instance.state_timer.timeout.emit()
+        assert calls == [1]
+        # And no menu item for it: the fix lives in Settings.
+        labels = [a.text() for a in app_instance.tray.contextMenu().actions()]
+        assert not any("hook" in label.lower() for label in labels)
+    finally:
+        for timer in (app_instance.state_timer, app_instance.usage_timer,
+                      app_instance.blink_timer, app_instance.anim_timer):
+            timer.stop()
+        app_instance.tray.hide()
 
-    assert hooks.checked == [remote]
 
-
-def test_hook_drift_balloons_once_per_state_change_and_offers_the_wizard(tray, monkeypatch):
-    """The check runs on the 5-minute usage cadence; a balloon every five minutes for a
-    condition the user has already chosen not to fix is how a tray icon gets muted."""
+def test_missing_hooks_balloon_points_at_settings(tray, monkeypatch):
     app_instance, _server = tray
     balloons: list[tuple] = []
     monkeypatch.setattr(
         QtWidgets.QSystemTrayIcon, "showMessage",
         lambda self, title, message, *a, **k: balloons.append((title, message)),
     )
-    assert app_instance._hooks_action.isVisible() is False
 
-    app_instance._on_hook_drift(["Codex CLI"])
+    app_instance._on_hooks_missing([])
+    assert balloons == []
+
+    app_instance._on_hooks_missing(["Codex CLI"])
     assert len(balloons) == 1
     assert "Codex CLI" in balloons[0][1]
-    assert app_instance._hooks_action.isVisible() is True
-
-    app_instance._on_hook_drift(["Codex CLI"])  # same state, no second balloon
-    assert len(balloons) == 1
-
-    app_instance._on_hook_drift([])  # fixed: menu item goes away, silently
-    assert len(balloons) == 1
-    assert app_instance._hooks_action.isVisible() is False
-
-    app_instance._on_hook_drift(["Cursor"])  # a new problem does balloon again
-    assert len(balloons) == 2
-
-
-def test_the_drift_check_rides_the_usage_cadence(tray):
-    """One slow loop, not a timer of its own: an agent's config file changes about as
-    often as its quota does."""
-    app_instance, _server = tray
-    calls: list[int] = []
-    app_instance._drift_worker.fetch = lambda: calls.append(1)  # type: ignore[method-assign]
-    app_instance.usage_timer.timeout.emit()
-    assert calls == [1]
+    assert "Setup" in balloons[0][1]
 
 
 # --------------------------------------------------------------------------- second launch / quit

@@ -22,14 +22,18 @@ safe to show as-is, never a bare `subprocess`/`OSError` traceback.
 
 from __future__ import annotations
 
+import logging
 import shlex
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NamedTuple
 
+from ..core import config as config_mod
 from . import codex_flag, detect
 from . import hooks as hooks_mod
+
+log = logging.getLogger(__name__)
 
 #: One-shot config commands; generous enough for a distro that's cold-starting.
 _TIMEOUT = 20.0
@@ -213,7 +217,7 @@ def configured_adapter(cfg: Any, adapter: Any) -> Any:
     install is `C:\\Users\\you` — the wrong side of the boundary entirely. The config
     already records where each agent really lives (the wizard writes the distro's UNC
     path there), so every hooks check — `doctor`, `tintaview hooks status`, the settings
-    dialog and the tray's drift check — must resolve through here rather than the bare
+    dialog — must resolve through here rather than the bare
     adapter, or a working split install is reported as "hooks missing".
     """
     from ..core import config as config_mod
@@ -316,6 +320,114 @@ def install_agent_hooks(distro: str, agent_keys: list[str], assume_yes: bool) ->
         "were reached directly over its \\\\wsl.localhost\\... path."
     )
     return result
+
+
+# --------------------------------------------------------------------------- hook status
+
+
+def split_home(env: Any) -> str | None:
+    """The distro's POSIX `$HOME` when this is the Windows half of a WSL-split install.
+
+    None otherwise — including when this *is* the distro (`platform=wsl`), where the hook
+    script and every agent config are ordinary local files and the plain checks are
+    already right. Also None when the distro can't be reached: a stopped distro is a
+    normal condition, and reporting "hooks missing" because `wsl.exe` timed out would be
+    the same false alarm this function exists to remove.
+    """
+    if env.mode != detect.MODE_WSL_SPLIT or not env.is_windows_side or not env.distro:
+        return None
+    try:
+        return distro_home(env.distro)
+    except Exception as exc:  # noqa: BLE001 - WslError, or wsl.exe missing entirely
+        log.info("could not reach %s to locate its hooks: %r", env.distro, exc)
+        return None
+
+
+class HookCheck(NamedTuple):
+    """What an installed hook entry must point at, on the side that runs the agents.
+
+    In a WSL split the hooks were written inside the distro pointing at *its*
+    `tv-hook.sh`, so that — not the Windows-side `tv-hook.cmd` — is what "is this path
+    still current?" has to be measured against. Measured against the Windows path, every
+    agent on a working split install reports `stale-path`, which is exactly the false
+    alarm that got a tray hook check removed once already.
+    """
+
+    hook_bin: Path | PurePosixPath
+    distro: str | None = None
+    home: str | None = None  # distro-side $HOME; set only in a WSL split
+
+
+def hook_check(cfg: Any, env: Any = None) -> HookCheck | None:
+    """The `HookCheck` for this machine, or None when it cannot be determined.
+
+    None means "the Windows half of a WSL split whose distro is not reachable right
+    now". Callers must then report *nothing* — unknown is not missing. `env` defaults to
+    `detect.detect()`, which on Windows runs `wsl.exe -l -q`; the split branch also runs
+    one `wsl.exe -d <distro>` to read `$HOME`, so call this once, not per agent.
+    """
+    del cfg  # the comparison target is per machine, not per config; kept for symmetry
+    env = detect.detect() if env is None else env
+    if env.mode == detect.MODE_WSL_SPLIT and env.is_windows_side:
+        home = split_home(env)
+        if home is None:
+            return None
+        return HookCheck(remote_hook_bin(home), env.distro, home)
+    return HookCheck(config_mod.hook_bin_path())
+
+
+def check_adapter(cfg: Any, adapter: Any, check: HookCheck) -> Any:
+    """`adapter` resolved to the config file the hooks were actually written into.
+
+    `agents.<key>.home` wins when set (`configured_adapter`). In a WSL split with no such
+    override — a config the wizard never seeded — the distro's file is reached over its
+    UNC path instead of falling back to `C:\\Users\\you\\...`, which does not exist and
+    would read as "missing".
+    """
+    resolved = configured_adapter(cfg, adapter)
+    if resolved is adapter and check.distro and check.home:
+        resolved = RemotePathAdapter(adapter, agent_config_unc_path(check.distro, check.home, adapter))
+    return resolved
+
+
+def hook_status(
+    cfg: Any, adapter: Any, check: HookCheck, scope: str = "user", project_dir: Path | None = None
+) -> str:
+    """`hooks.status()` measured against the right file and the right hook path."""
+    return hooks_mod.status(check_adapter(cfg, adapter, check), check.hook_bin, scope, project_dir)
+
+
+#: The only statuses a hook (re)install can address. `unreadable` and anything newer are
+#: deliberately excluded: sending someone into a diff-and-confirm install for a file we
+#: could not even read is worse than silence.
+NEEDS_INSTALL = frozenset({hooks_mod.STATUS_MISSING, hooks_mod.STATUS_PARTIAL, hooks_mod.STATUS_STALE_PATH})
+
+
+def missing_hooks(cfg: Any, env: Any = None, keys: list[str] | None = None) -> list[str] | None:
+    """Display names of the agents in `keys` (default: every enabled one) whose hooks need
+    (re)installing, in that order. None when it cannot be determined (see `hook_check`).
+
+    Stats-only providers have no adapter and are skipped; one agent whose check raises is
+    logged and skipped rather than sinking the others.
+    """
+    from ..agents import base as agents_base
+
+    check = hook_check(cfg, env)
+    if check is None:
+        return None
+    missing: list[str] = []
+    for key in list(cfg.enabled_agents if keys is None else keys):
+        adapter = agents_base.get(key)
+        if adapter is None:
+            continue
+        try:
+            state = hook_status(cfg, adapter, check)
+        except Exception:
+            log.exception("could not check hook status for %s", key)
+            continue
+        if state in NEEDS_INSTALL:
+            missing.append(adapter.display_name)
+    return missing
 
 
 def codex_flag_plan_unc(distro: str, home: str) -> codex_flag.FlagPlan:

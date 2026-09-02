@@ -397,19 +397,22 @@ class ManualUpdateWorker(_GuardedWorker):
         self.install_done.emit(int(code))
 
 
-class HookDriftWorker(_GuardedWorker):
-    """Re-checks every enabled agent's hooks on the shared usage cadence.
+class HookCheckWorker(_GuardedWorker):
+    """One hook check at startup, off the GUI thread — no timer, no menu item.
 
-    AGENTS.md's "Drift detection": agents rewrite their own config files on upgrade, so
-    hooks that were installed can disappear and TintaView simply stops hearing about
-    sessions — which reads as "the lights are broken", not "setup came undone". Off the
-    GUI thread because in a WSL-split install every one of these reads crosses a UNC path
-    into the distro, which can block for as long as `wsl.exe` takes to wake it up.
+    Agents rewrite their config on upgrade, so hooks that were installed can disappear
+    and TintaView simply stops hearing about sessions, which reads as "the lights are
+    broken". The whole check is `install.wsl.missing_hooks`, the same WSL-aware resolution
+    `doctor` uses: in a split install it compares against the distro's `tv-hook.sh` and
+    reads the agent configs behind their UNC paths, because measured against the
+    Windows-side paths every agent on a working machine is "stale". It runs off the GUI
+    thread since that resolution can wait on `wsl.exe`.
     """
 
-    #: Display names of agents whose hooks need (re)installing, in `enabled_agents` order.
-    drift_ready = QtCore.Signal(list)
-    _thread_name = "tv-tray-hook-drift"
+    #: Display names of the agents whose hooks need (re)installing. Never emitted when
+    #: the state could not be determined (an unreachable distro): unknown is not missing.
+    missing_ready = QtCore.Signal(list)
+    _thread_name = "tv-tray-hooks"
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
@@ -417,43 +420,16 @@ class HookDriftWorker(_GuardedWorker):
 
     def _run(self) -> None:
         try:
-            from tintaview.agents import base as agents_base
-            from tintaview.core import config as config_mod
-            from tintaview.install import hooks as hooks_mod
             from tintaview.install import wsl
         except ImportError:
             return
-
-        # Only these three mean "the wizard can fix this". `hooks.status()` may grow other
-        # values (a config file it could not read, say), and sending someone into a
-        # diff-and-confirm install flow that cannot address them is worse than silence.
-        needs_install = {
-            hooks_mod.STATUS_MISSING,
-            hooks_mod.STATUS_PARTIAL,
-            hooks_mod.STATUS_STALE_PATH,
-        }
         try:
-            hook_bin = config_mod.hook_bin_path()
+            missing = wsl.missing_hooks(self._cfg)
         except Exception:
-            log.exception("hook drift check: could not resolve the hook binary path")
+            log.exception("startup hook check failed")
             return
-
-        drifted: list[str] = []
-        for key in list(self._cfg.enabled_agents):
-            adapter = agents_base.get(key)
-            if adapter is None:
-                continue  # a stats-only provider (jetbrains, copilot) — no hooks by design
-            try:
-                # Resolved against `agents.<key>.home`, never the bare adapter: on the
-                # Windows half of a WSL split the adapter answers from C:\Users\you and
-                # every agent would be reported as missing its hooks.
-                state = hooks_mod.status(wsl.configured_adapter(self._cfg, adapter), hook_bin)
-            except Exception:
-                log.exception("hook drift check failed for %s", key)
-                continue
-            if state in needs_install:
-                drifted.append(adapter.display_name)
-        self.drift_ready.emit(drifted)
+        if missing is not None:
+            self.missing_ready.emit(missing)
 
 
 class TrayApp(QtCore.QObject):
@@ -519,15 +495,10 @@ class TrayApp(QtCore.QObject):
         self._manual_update_worker.install_done.connect(self._on_update_installed)
 
         self._doctor_worker = DoctorWorker()
+        self._hook_worker = HookCheckWorker(cfg)
+        self._hook_worker.missing_ready.connect(self._on_hooks_missing)
         self._doctor_worker.report_ready.connect(self._show_doctor_report)
         self._doctor_dialog: QtWidgets.QDialog | None = None
-
-        #: Display names from the last hook-drift check, latched so the balloon fires on a
-        #: change of state rather than on every poll.
-        self._drifted_agents: list[str] = []
-        self._hooks_action: QtGui.QAction | None = None  # set by _build_menu below
-        self._drift_worker = HookDriftWorker(cfg)
-        self._drift_worker.drift_ready.connect(self._on_hook_drift)
 
         #: One engine rebuild at a time — see `_refresh_lighting`. The thread is kept so
         #: tests can join it; nothing in the app waits on it.
@@ -572,10 +543,6 @@ class TrayApp(QtCore.QObject):
         self.usage_timer = QtCore.QTimer(self)
         self.usage_timer.setInterval(usage_ms)
         self.usage_timer.timeout.connect(self._stats_worker.fetch)
-        # Hook drift rides the same cadence rather than getting a timer of its own: both
-        # are "check on the slow loop", and an agent's config file changes about as often
-        # as its quota does (AGENTS.md, "Drift detection").
-        self.usage_timer.timeout.connect(self._check_hook_drift)
         self.usage_timer.start()
 
         self.blink_timer = QtCore.QTimer(self)
@@ -588,7 +555,9 @@ class TrayApp(QtCore.QObject):
 
         self._poll_state()
         self._stats_worker.fetch()
-        self._check_hook_drift()
+        # Once, at startup only — see HookCheckWorker. A periodic version with a "Fix
+        # hooks" menu item was removed at the maintainer's request.
+        self._hook_worker.fetch()
         if cfg.update.check:
             self._update_worker.fetch()
 
@@ -622,11 +591,6 @@ class TrayApp(QtCore.QObject):
 
         menu.addSeparator()
         menu.addAction(t("tray.menu.settings"), self._open_settings)
-        # Only visible once the drift check has actually found something: a permanently
-        # present "Fix hooks" reads as though something is always wrong.
-        hooks_action = menu.addAction(t("tray.menu.fix_hooks"), run_console_setup)
-        hooks_action.setVisible(bool(self._drifted_agents))
-        self._hooks_action = hooks_action
         menu.addAction(t("tray.menu.check_updates"), self._check_updates)
         menu.addAction(t("tray.menu.open_logs"), self._open_logs)
         menu.addAction(t("tray.menu.diagnostics"), self._run_diagnostics)
@@ -1036,24 +1000,10 @@ class TrayApp(QtCore.QObject):
             15000,
         )
 
-    def _check_hook_drift(self) -> None:
-        """Kick off a hook-drift check. A named slot rather than connecting the worker's
-        `fetch` directly, so the worker stays replaceable (and the timer wiring testable)."""
-        self._drift_worker.fetch()
-
-    def _on_hook_drift(self, agents: list) -> None:
-        """A hook-drift check finished: balloon once per *change*, and offer the wizard.
-
-        Latched on the agent list rather than fired every poll — the drift check runs on
-        the 5-minute usage cadence, and a notification every five minutes for a condition
-        the user has already decided not to fix now is how a tray icon gets muted.
-        """
+    def _on_hooks_missing(self, agents: list) -> None:
+        """The startup hook check found agents with no working hooks: say so once, and
+        point at the fix that already exists — Settings → "Open Full Setup Wizard"."""
         agents = [str(a) for a in agents]
-        if agents == self._drifted_agents:
-            return
-        self._drifted_agents = agents
-        if self._hooks_action is not None:
-            self._hooks_action.setVisible(bool(agents))
         if not agents:
             return
         self.tray.showMessage(

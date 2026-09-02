@@ -25,6 +25,7 @@ import pytest
 
 from tintaview.agents.base import HOOK_SENTINEL
 from tintaview.core import config as config_mod
+from tintaview.core.config import Config
 from tintaview.install import detect
 from tintaview.install.detect import Environment
 from tintaview.ui import wizard
@@ -878,3 +879,92 @@ def test_unavailable_options_are_marked_but_still_selectable(monkeypatch, capsys
     assert "you can still pick it" in out
     # ...and the choice was honoured, not silently overridden.
     assert config_mod.load(tv_home / "config.toml").engine.mode == "openrgb"
+
+
+# --------------------------------------------------------------------------- hook check (native vs split)
+
+
+def _env(mode: str, platform: str, distro: str | None = None):
+    return detect.Environment(platform=platform, mode=mode, distro=distro)
+
+
+def test_hook_check_native_measures_against_the_local_hook_script(wsl_mod, monkeypatch, tmp_path):
+    monkeypatch.setattr(config_mod, "hook_bin_path", lambda: tmp_path / "bin" / "tv-hook.sh")
+    check = wsl_mod.hook_check(Config(), _env(detect.MODE_NATIVE, detect.PLATFORM_LINUX))
+
+    assert check == wsl_mod.HookCheck(tmp_path / "bin" / "tv-hook.sh")
+
+
+def test_hook_check_split_measures_against_the_distro_hook_script(wsl_mod, monkeypatch):
+    """The false alarm that got the first tray check removed: on the Windows half of a
+    split install the hooks point at the distro's tv-hook.sh, and comparing them to
+    tv-hook.cmd reports every agent as stale-path."""
+    monkeypatch.setattr(wsl_mod, "distro_home", lambda distro: "/home/dmitry")
+    check = wsl_mod.hook_check(
+        Config(), _env(detect.MODE_WSL_SPLIT, detect.PLATFORM_WINDOWS, "Ubuntu")
+    )
+
+    assert check is not None
+    assert str(check.hook_bin) == "/home/dmitry/.tintaview/bin/tv-hook.sh"
+    assert (check.distro, check.home) == ("Ubuntu", "/home/dmitry")
+
+
+def test_hook_check_is_none_when_the_distro_cannot_be_reached(wsl_mod, monkeypatch):
+    def boom(distro):
+        raise wsl_mod.WslError("wsl.exe timed out")
+
+    monkeypatch.setattr(wsl_mod, "distro_home", boom)
+    env = _env(detect.MODE_WSL_SPLIT, detect.PLATFORM_WINDOWS, "Ubuntu")
+
+    assert wsl_mod.hook_check(Config(), env) is None
+    assert wsl_mod.missing_hooks(Config(), env) is None  # unknown, never "missing"
+
+
+def test_hook_check_inside_the_distro_is_native(wsl_mod, monkeypatch, tmp_path):
+    """`platform=wsl` is the distro itself: the files are local there."""
+    monkeypatch.setattr(config_mod, "hook_bin_path", lambda: tmp_path / "tv-hook.sh")
+    check = wsl_mod.hook_check(Config(), _env(detect.MODE_WSL_SPLIT, detect.PLATFORM_WSL, "Ubuntu"))
+
+    assert check == wsl_mod.HookCheck(tmp_path / "tv-hook.sh")
+
+
+def test_check_adapter_reaches_the_distro_config_when_no_home_is_configured(wsl_mod):
+    from tintaview.agents import base as agents_base
+
+    adapter = agents_base.get("claude")
+    check = wsl_mod.HookCheck(wsl_mod.remote_hook_bin("/home/dmitry"), "Ubuntu", "/home/dmitry")
+
+    resolved = wsl_mod.check_adapter(Config(), adapter, check)
+
+    assert resolved is not adapter
+    assert str(resolved.hooks_config_path()) == (
+        r"\\wsl.localhost\Ubuntu\home\dmitry\.claude\settings.json"
+    )
+
+
+def test_check_adapter_prefers_the_configured_home(wsl_mod, tmp_path):
+    from tintaview.agents import base as agents_base
+
+    cfg = Config()
+    cfg.agent("claude").home = str(tmp_path / "elsewhere")
+    check = wsl_mod.HookCheck(wsl_mod.remote_hook_bin("/home/dmitry"), "Ubuntu", "/home/dmitry")
+
+    resolved = wsl_mod.check_adapter(cfg, agents_base.get("claude"), check)
+
+    assert resolved.hooks_config_path() == tmp_path / "elsewhere" / "settings.json"
+
+
+def test_missing_hooks_reports_only_what_an_install_can_fix(wsl_mod, monkeypatch, tmp_path):
+    from tintaview.install import hooks as hooks_mod
+
+    states = {"claude": "installed", "codex": "missing", "cursor": "unreadable"}
+    monkeypatch.setattr(config_mod, "hook_bin_path", lambda: tmp_path / "tv-hook.sh")
+    monkeypatch.setattr(
+        hooks_mod, "status", lambda adapter, hook_bin, scope="user", project_dir=None: states[adapter.key]
+    )
+    cfg = Config()
+    cfg.enabled_agents = ["claude", "codex", "cursor", "jetbrains"]  # jetbrains: stats-only
+    env = _env(detect.MODE_NATIVE, detect.PLATFORM_LINUX)
+
+    assert wsl_mod.missing_hooks(cfg, env) == ["Codex CLI"]
+    assert wsl_mod.missing_hooks(cfg, env, keys=["cursor"]) == []

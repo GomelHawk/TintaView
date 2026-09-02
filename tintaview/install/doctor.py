@@ -389,23 +389,11 @@ _UNRESOLVED = object()
 
 
 def _wsl_split_home(env: Environment) -> str | None:
-    """The distro's POSIX `$HOME` when this is the Windows half of a WSL-split install.
+    """The distro's POSIX `$HOME` in a WSL split, else None — see `wsl.split_home`, which
+    the tray, the settings dialog and `hooks status` share with this report."""
+    from . import wsl
 
-    None otherwise — including when this *is* the distro (`platform=wsl`), where the
-    hook script and every agent config are ordinary local files and the plain checks are
-    already right. Also None when the distro can't be reached: a stopped distro is a
-    normal condition, and reporting "hooks missing" because `wsl.exe` timed out would be
-    the same false alarm this function exists to remove.
-    """
-    from . import detect, wsl
-
-    if env.mode != detect.MODE_WSL_SPLIT or not env.is_windows_side or not env.distro:
-        return None
-    try:
-        return wsl.distro_home(env.distro)
-    except Exception as exc:  # noqa: BLE001 - WslError, or wsl.exe missing entirely
-        log.info("doctor: could not reach %s to locate its hooks: %r", env.distro, exc)
-        return None
+    return wsl.split_home(env)
 
 
 def _remote_path(distro: str, posix_path: object) -> Path:
@@ -554,7 +542,7 @@ def _check_agent_hooks(
             )
             continue
 
-        adapter = _configured_adapter(cfg, adapter)
+        adapter = wsl.check_adapter(cfg, adapter, wsl.HookCheck(hook_bin, env.distro, split_home))
         path = adapter.hooks_config_path()
         try:
             state = hooks_mod.status(adapter, hook_bin)

@@ -194,17 +194,20 @@ def _cmd_hooks(args: argparse.Namespace) -> int:
             print(f"could not install the hook script: {exc}", file=sys.stderr)
             failures += 1
 
-    for adapter in adapters:
-        if args.action == "status":
-            # Resolved against `agents.<key>.home`, not the adapter's own default: on the
-            # Windows half of a WSL-split install the agent's config lives behind a UNC
-            # path and a bare adapter reports every agent as "missing" (AGENTS.md, "WSL
-            # split install").
-            state = hooks_mod.status(
-                wsl.configured_adapter(cfg, adapter), hook_bin, args.scope, project_dir
-            )
+    if args.action == "status":
+        # Measured against the install that actually wrote the hooks: in a WSL split that
+        # is the distro's tv-hook.sh and the agent's config behind its UNC path, not the
+        # Windows-side tv-hook.cmd and C:\Users\you (AGENTS.md, "WSL split install").
+        check = wsl.HookCheck(hook_bin) if args.hook_bin else wsl.hook_check(cfg)
+        if check is None:
+            print("WSL distro not reachable — cannot check the hooks inside it", file=sys.stderr)
+            return 1
+        for adapter in adapters:
+            state = wsl.hook_status(cfg, adapter, check, args.scope, project_dir)
             print(f"{adapter.display_name:<14} {state}")
-            continue
+        return 0
+
+    for adapter in adapters:
 
         try:
             plan = (hooks_mod.plan_install(adapter, hook_bin, args.scope, project_dir)
