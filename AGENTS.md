@@ -16,7 +16,10 @@ python scripts/build_assets.py --check # generated assets must be committed and 
 QT_QPA_PLATFORM=offscreen pytest -q   # required for the Qt tests without a display server
 ```
 
-CI (`ci.yml`) runs all four on ubuntu / windows / macOS × Python 3.12, 3.13 and 3.14. The UI tests
+CI (`ci.yml`) runs `pytest` on ubuntu / windows / macOS × Python 3.12, 3.13 and 3.14, and `ruff`
+plus the asset check once, in a separate ubuntu `lint` job (both are platform-independent — nine
+copies of them bought nothing). Pushes to `main` and pull requests trigger it, with in-progress
+runs on the same ref cancelled, a 15-minute job timeout and a pip cache. The UI tests
 construct real `QWidget`s and never `.show()` them, so `offscreen` is enough — never add a
 test that needs a real display.
 
@@ -44,7 +47,8 @@ tintaview/
   install/   detect.py  hooks.py  hookscript.py  codex_flag.py  autostart.py  wsl.py
              components.py  doctor.py  update.py  restart.py
   hooks/     tv-hook.sh  tv-hook.cmd                     # shipped as package data
-  assets/generated/                                      # built by scripts/build_assets.py
+  assets/generated/  logo_full.png  tintaview.ico          # built by scripts/build_assets.py;
+                                                         # exactly these two — the tray mark is drawn
 packaging/   install.ps1  install.sh
 tests/       one module per subsystem, fixtures under tests/fixtures/
 ```
@@ -138,13 +142,26 @@ tool-start, tool-end`.
 | `GET` | `/state` | Read-only status for the tray and `doctor` |
 | `GET` | `/healthz` | Liveness for `doctor` |
 | `GET` | `/show` | A second launch asks the running instance to surface its usage panel |
+| `GET` | `/quit` | Graceful shutdown: `install/restart.py` and the tray's own Quit ask the running instance to stop, so the engine is closed and the devices handed back. Answers `quitting: false` when nothing registered `on_quit` |
 
 Two invariants in the ingress path:
 
 - **Acknowledge before any lighting I/O.** A slow Chroma or OpenRGB call must never be able to
-  stall an agent.
+  stall an agent. The handler acks, updates the store, and hands the resulting status to a
+  **single-slot applier thread** (`_StatusApplier` in `core/server.py`), the only caller of
+  `controller.apply()`. It keeps just the newest wanted status, so a status superseded while a
+  slow SDK call was in flight is dropped rather than replayed onto the device afterwards; the
+  watchdog, the stall detector and the tray's `StatusServer.apply_status()` route through it too.
 - **`/state` must never touch a session's last-seen stamp.** Polling it would otherwise keep the
-  watchdog from ever expiring anything and defeat the crash-safety release.
+  watchdog from ever expiring anything and defeat the crash-safety release. Related:
+  `LightController.engine_status()` is a **lock-free** snapshot kept current by the methods that
+  change it. The GUI thread polls `/state` every 1.5 s while the controller lock is held across
+  `set_color()`/`open()`, so reading it under that lock froze the tray on a slow SDK.
+
+`/quit` is what lets the process exit *cleanly* from outside: `tintaview run` also installs
+SIGTERM/SIGINT handlers (headless parks on an `Event`; the tray quits the `QApplication`), so a
+`systemctl --user stop`, a logout or the wizard's restart no longer leaves OpenRGB on our last
+colour or G HUB without its `LogiLedShutdown`.
 
 `/show` exists because a second `tintaview` launch used to print "already running" to a console
 that a Start-menu shortcut doesn't have, so it looked like nothing happened. The tray registers
@@ -155,7 +172,10 @@ uses a Qt signal).
 
 **State model.** Sessions are keyed by `(agent, sid)`, not `sid` alone. Colour priority is global
 and unchanged: `confirm > working > idle > none`. `/state` also reports a per-agent breakdown,
-which the usage flyout renders as a status dot per agent.
+which the usage flyout renders as a status dot per agent. `StateStore`'s mutators return the new
+effective status (`None` when it did not change), computed under the store's own lock — never
+re-read `effective()` afterwards to decide what to paint, or two events on two worker threads
+apply each other's stale fold.
 
 **Every session carries its own last-seen stamp, and the watchdog expires sessions individually**
 (`StateStore.expired` / `end_many`). A single store-wide clock — which is what this was — is wrong
@@ -183,7 +203,9 @@ Configuration table — keep that table in sync when adding one.
 `close()`, `heartbeat()`, `active` property. `BaseEngine` carries the shared failure cooldown.
 
 - **Chroma** is the default. POST to open, PUT `/heartbeat` every 4 s, PUT per device with **BGR**
- packing, DELETE to close. Release is automatic — Synapse takes back over on DELETE.
+ packing, DELETE to close. Release is automatic — Synapse takes back over on DELETE. Three
+ consecutive failed writes, or **any 4xx on the session URI**, retire the session so the next
+ status change opens a fresh one — a restarted Synapse used to leave `active` True forever.
 - **G HUB** (`engines/ghub.py`) loads `sdk_legacy_led_x64.dll` with `ctypes` — no new
   dependency, no bundled binary, Windows-only. Current G HUB ships it under
   `LGHUB\sdks\`; older installs keep it in the `LGHUB` root. Things about the legacy LED
@@ -194,7 +216,10 @@ Configuration table — keep that table in sync when adding one.
      G HUB's profile. `LightController` opens/closes per session, so `close()` must
      Shutdown and the next `open()` re-`InitWithName` (with settle + retries) on the
      same SDK thread. Do not "simplify" back to restore-only until atexit — that
-     stuck devices until the tray quit.
+     stuck devices until the tray quit. `close()` also stops the pump thread
+     (`_CallPump.stop()`); the next `open()` starts a fresh one, since it has to
+     re-`InitWithName` anyway. The sidecar reuses its engine across `open` calls with an
+     unchanged config payload and reads replies on one persistent thread, not one per RPC.
   3. **The SDK initialises per calling thread**, so every call — from hook handler
      threads, the blink thread, the heartbeat thread — is funnelled through one
      dedicated worker thread owned by the engine, never called ad hoc from whichever
@@ -241,8 +266,13 @@ Configuration table — keep that table in sync when adding one.
   3. **Peripherals only by default** (mouse, keyboard, headset). Motherboard/RAM/GPU/case lighting
      is ambient decoration; driving it makes the whole room flash amber on every tool call.
      `engine.openrgb.device_types = []` opts back in to everything.
+  OpenRGB retires its connection the same way Chroma does: three writes that reached no
+  device drop the client so `active` goes False and the controller reconnects.
 - **Null** is status-only, drives nothing, and is always available. `auto` mode probes
-  `engine.order` and falls back to it.
+  `engine.order` and falls back to it — and, when that fallback was the result, re-probes on a
+  later `apply()` every `AUTO_REDETECT_SECONDS` (30 s), so a tray that autostarted before
+  Synapse/G HUB/the OpenRGB server came up is not status-only for the rest of the session. A
+  pinned engine mode is never re-probed.
 
 OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in plain language and
 `doctor` detects both running. Pin to SDK v5 behaviour, feature-detect, fail soft to status-only.
@@ -292,10 +322,19 @@ id pulled out by `sed`, **no Python startup**, `curl -s -m 1`, output discarded,
    (temp + rename).
 5. Be **idempotent**: re-running produces no diff and no backup.
 6. `uninstall` removes exactly the sentinel-marked entries and nothing else.
-7. `status` reports `installed / missing / partial / stale-path` per agent.
+7. `status` reports `installed / missing / partial / stale-path / unreadable` per agent.
+   `unreadable` (file present but unreadable or unparseable — a locked file, a sleeping WSL
+   distro's UNC path, corrupt JSON) is deliberately *not* `missing`: `missing` is what routes a
+   user into a CREATE, which would overwrite their real config with only our hooks. Every UI
+   that offers "install" must key on `missing / partial / stale-path`, never on `!= installed`.
 
 **Drift detection.** Agents rewrite their config on upgrade, so the tray re-checks hook presence
-periodically and surfaces "Hooks missing for Codex — Fix" rather than silently going dark.
+rather than silently going dark: `ui/tray.py`'s `HookDriftWorker` runs on the shared 5-minute
+usage cadence (and once at startup), off the GUI thread, resolving each enabled agent through
+`wsl.configured_adapter`, and treats only `missing / partial / stale-path` as actionable. It
+balloons once per state change and toggles a "Fix agent hooks…" tray item that opens the console
+wizard. Tests must stub `HookDriftWorker.fetch` in the tray fixture, or the startup check reads the
+developer's real `~/.claude/settings.json` from a thread.
 
 **Not done, and deliberately so:** Claude Code and Codex both support plugin-bundled hooks, so a
 `tintaview` plugin could collapse install down to one `/plugin install`. It would only ever cover
@@ -323,13 +362,21 @@ rate-limited response replace good data with an estimate.
 
 - **Claude** — `GET https://api.anthropic.com/api/oauth/usage` with the OAuth token from
   `~/.claude/.credentials.json`; falls back to an estimate reconstructed from
-  `~/.claude/projects/**/*.jsonl`, labelled as an estimate. The fallback prices transcripts from
-  `PRICING` in the provider, which **will** go stale as models ship. An unrecognised model is
-  charged at `DEFAULT_PRICING` (the flagship rate) and flips the section header to
-  `usage.claude.header_estimate_unpriced`, never at zero: a model priced at nothing produces a
-  plausible-but-quietly-low total that nobody notices, which is exactly how `claude-opus-5` — the
-  model most sessions actually run — contributed $0.00 to the estimate for a whole release.
-  `tests/test_stats.py` pins the current models' rates per model.
+  `~/.claude/projects/**/*.jsonl`, labelled as an estimate. Two rules for that estimate:
+  - **Count each streamed message once.** Claude Code writes one JSONL line *per content
+    block* of an assistant message and every line carries the message's `usage`; input and
+    cache counts repeat, `output_tokens` grows and the last line is final. Lines are
+    collapsed on `(message.id, requestId)` keeping the largest counts — measured on a real
+    week, 3592 usage lines were 1737 messages, so the naive sum was ~2x too high.
+    `<synthetic>` placeholder messages are skipped.
+  - **Price from `PRICING`, which will go stale as models ship.** An unrecognised model is
+    charged at `DEFAULT_PRICING` (the flagship rate) and flips the section header to
+    `usage.claude.header_estimate_unpriced`, never at zero: a model priced at nothing
+    produces a plausible-but-quietly-low total that nobody notices, which is exactly how
+    `claude-opus-5` contributed $0.00 for a whole release and how `claude-fable-5-1` was
+    billed at half its rate for another. Cache reads default to 0.1x input;
+    `CACHE_READ_PER_MTOK` holds the flat-rate exceptions (Fable 5.1). `tests/test_stats.py`
+    and `tests/test_stats_claude_fallback.py` pin the current models' rates per model.
 - **Codex** — entirely local: `token_count` records in `~/.codex/sessions/**/rollout-*.jsonl`.
   `info.total_token_usage` is always present; `rate_limits.primary/secondary` only on
   ChatGPT-plan sessions (`null` on API-key sessions). Show official percentages when present,
@@ -372,8 +419,14 @@ rate-limited response replace good data with an estimate.
   per model over the last 7 days — informational totals only (`show_pct=False`), same shape as
   Codex's API-key fallback.
 
-In a **WSL split** install the Claude/Codex JSONL files sit behind a UNC path: scan only files
-modified in the last 7 days and cache by mtime, or the poll is slow.
+In a **WSL split** install the Claude/Codex JSONL files sit behind a UNC path, where every
+`stat` and read is a round trip. Both transcript providers therefore go through
+`stats/_scan.py`: `recent_files()` walks the tree once, prunes subtrees the caller rules out
+(Codex's `YYYY/MM/DD` directories) and keeps only files modified in the last 7 days — a file
+untouched for a week cannot hold a line from it — and `FileMemo` caches each file's parsed
+records on `(mtime_ns, size)`, so an unchanged file costs one `stat` per poll. Measured
+locally: a cold scan 0.65 s → 0.13 s, a warm poll 4 ms. Don't reintroduce a `glob("**")` in
+a provider.
 
 ## Interface language (i18n)
 
@@ -466,18 +519,23 @@ own profile; the tray therefore keeps `pythonw` and, only for the `ghub` engine,
 frozen bundle or an `.exe` installer without a code-signing certificate to go with it** —
 `tests/test_packaging.py` guards this.
 
-Two Windows-specific traps `install.ps1` encodes:
+Two traps both installers encode (the first is Windows-only):
 
 - On Windows `config_dir()` **is** the install prefix (`%LOCALAPPDATA%\TintaView`) — `config.toml`,
   `hook.env`, `bin\tv-hook.cmd` and `logs\` are siblings of the venv. So the prefix is never
   deleted recursively; only `<prefix>\venv`, which the installer owns outright, ever is.
 - `pip install --upgrade` compares version numbers and does nothing when they match, so the wheel
-  is additionally force-reinstalled with `--no-deps`. Without that, re-running the installer can't
-  repair a damaged install, and a re-tagged release silently keeps the old code while reporting
-  success.
+  is additionally force-reinstalled with `--no-deps` — in `install.ps1` *and* `install.sh`. Without
+  that, re-running the installer can't repair a damaged install, and a re-tagged release silently
+  keeps the old code while reporting success.
 
-`install.ps1` verifies the wheel's SHA-256 against the release's `SHA256SUMS.txt` before installing
-and is idempotent — it *is* the update mechanism.
+Both installers download the release **wheel** and verify its SHA-256 against the release's
+`SHA256SUMS.txt` before installing, failing closed on a missing or mismatched digest, and are
+idempotent — they *are* the update mechanism. `install.sh` no longer falls back to the GitHub
+auto-generated tarball (not in the sums file, not reproducible) or to `pip install tintaview`
+from PyPI (a name this project does not publish, so anyone could squat it); if the release can't
+be resolved it dies with the releases URL. `TINTAVIEW_SOURCE_URL` remains a developer override
+that installs an arbitrary source URL with a loud "unverified" warning.
 
 ### WSL split install
 
@@ -496,7 +554,7 @@ neither has anything to do with where the hooks actually are. Two rules, both le
 
 - **Resolve an agent's config against `agents.<key>.home`, never `adapter.default_home()`.** The
   wizard writes the distro's UNC path there for exactly this reason. `install.wsl.RemotePathAdapter`
-  wraps an adapter so `hooks_config_path()` answers with it; `doctor._configured_adapter` is the
+  wraps an adapter so `hooks_config_path()` answers with it; `install.wsl.configured_adapter` is the
   general form (it also covers a plain hand-edited `home =`).
 - **The hook script lives in the distro, at `wsl.remote_hook_bin($HOME)`** — the Windows-side
   `bin\tv-hook.cmd` is *correctly* absent in a split install, and the installed hook entries point
@@ -519,8 +577,9 @@ Config and every agent's hook configuration are **never touched by an update** �
 stable `tv-hook` path, not at anything version-specific. So `tintaview update` only ever downloads
 the release's own install script, **verifies its SHA-256** against the release's checksums asset,
 and re-runs it: `install.ps1 -Silent` on Windows (detached, since it stops the interpreter running
-out of the venv it is about to replace), `sh install.sh` on Linux/macOS. `-Prefix` is derived from
-`sys.prefix` so a non-default install upgrades itself instead of spawning a second copy.
+out of the venv it is about to replace), `sh install.sh --prefix …` on Linux/macOS. `-Prefix` /
+`--prefix` is derived from `sys.prefix` so a non-default install upgrades itself instead of
+spawning a second copy.
 
 `update.channel` picks what counts as an update. `stable` (the default) asks GitHub for
 `/releases/latest`, which already excludes drafts and pre-releases. `beta` reads the release
@@ -533,11 +592,12 @@ installed, because every later rc *and* the final release then compare equal to 
 
 ### CI and release
 
-`build.yml` runs on tag `v*`: `python -m build` on ubuntu-latest (the wheel is pure Python, so no
-Windows runner and no matrix), a smoke test that the wheel installs and `python -m tintaview` works,
-then it attaches the wheel, the sdist, `install.ps1`, `install.sh` and `SHA256SUMS.txt` to the
+`build.yml` runs on tag `v*`: the offscreen test suite first (a red suite cannot publish), then
+`python -m build` on ubuntu-latest (the wheel is pure Python, so no Windows runner and no matrix), a
+smoke test that the wheel installs and `python -m tintaview` works, then it attaches the wheel, the sdist, `install.ps1`, `install.sh` and `SHA256SUMS.txt` to the
 GitHub Release. Building on Linux also keeps `install.sh` from being CRLF-mangled on the way into
-the release — see `.gitattributes`.
+the release — see `.gitattributes`. Third-party actions are pinned to a commit SHA (with the tag in
+a comment) and `.github/dependabot.yml` proposes the bumps; `ci.yml` runs with `contents: read`.
 
 ## Testing conventions
 

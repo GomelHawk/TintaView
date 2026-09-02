@@ -45,9 +45,15 @@ class _Session:
 class StateStore:
     """Thread-safe map of ``(agent, sid) -> _Session``.
 
-    Every mutator returns whether the *effective* status changed, so callers can skip
-    redundant device writes — the blink loop and a chatty PostToolUse stream would
-    otherwise hammer the lighting SDK with identical colours.
+    Every mutator returns **the new effective status when it changed**, and ``None`` when
+    it didn't, so callers can skip redundant device writes — the blink loop and a chatty
+    PostToolUse stream would otherwise hammer the lighting SDK with identical colours.
+
+    Returning the status itself, rather than a bool the caller then re-reads with
+    ``effective()``, is what makes the lighting update race-free: two events landing on
+    two HTTP worker threads used to mutate under the lock and then each read the fold
+    back *outside* it, so the older event could win and leave the lights on a colour
+    nothing was in any more.
     """
 
     def __init__(self) -> None:
@@ -57,14 +63,14 @@ class StateStore:
 
     # --- mutation ---------------------------------------------------------
 
-    def start(self, agent: str, sid: str) -> bool:
+    def start(self, agent: str, sid: str) -> str | None:
         with self._lock:
             before = self.effective()
             self._sessions[(agent, sid)] = _Session(status=STATUS_IDLE)
             self._touch()
-            return self.effective() != before
+            return self._changed_locked(before)
 
-    def set(self, agent: str, sid: str, status: str, tool: str | None = None) -> bool:
+    def set(self, agent: str, sid: str, status: str, tool: str | None = None) -> str | None:
         """Set a session's status, and optionally the tool it's running.
 
         ``tool=None`` means "unchanged" and ``tool=""`` means "no longer running a named
@@ -85,16 +91,16 @@ class StateStore:
                 session.tool = tool
             session.seen = time.monotonic()
             self._touch()
-            return self.effective() != before
+            return self._changed_locked(before)
 
-    def end(self, agent: str, sid: str) -> bool:
+    def end(self, agent: str, sid: str) -> str | None:
         with self._lock:
             before = self.effective()
             self._sessions.pop((agent, sid), None)
             self._touch()
-            return self.effective() != before
+            return self._changed_locked(before)
 
-    def end_many(self, keys) -> bool:
+    def end_many(self, keys) -> str | None:
         """Drop several sessions at once, reporting one effective-status change.
 
         The watchdog's retirement path: expiring three dead sessions must produce a
@@ -106,12 +112,21 @@ class StateStore:
             for key in list(keys):
                 self._sessions.pop(tuple(key), None)
             self._touch()
-            return self.effective() != before
+            return self._changed_locked(before)
 
     def clear(self) -> None:
         with self._lock:
             self._sessions.clear()
             self._touch()
+
+    def _changed_locked(self, before: str) -> str | None:
+        """The new effective status, or None when it still folds to `before`.
+
+        Computed while the mutator still holds the store lock, so what the caller applies
+        to the hardware is the fold that this very mutation produced.
+        """
+        after = self.effective()
+        return after if after != before else None
 
     def _touch(self) -> None:
         self._last_event = time.monotonic()

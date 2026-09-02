@@ -87,6 +87,13 @@ class StatsService:
         # this, the agent order configured in the wizard would only hold by luck.
         results = {key: completed[key] for key in keys if key in completed}
 
+        # One cache write for the whole poll, not one per provider. `source == "cache"`
+        # means `_apply_cache_policy` already substituted the stored copy, so persisting
+        # it again would only rewrite the file with what is already in it.
+        fresh = [r for r in results.values() if r.ok and r.source != "cache"]
+        if fresh:
+            self._cache.update_many(fresh)
+
         with self._lock:
             self._latest.update(results)
         return results
@@ -98,7 +105,9 @@ class StatsService:
 
     def _fetch_one(self, key: str, timeout: float) -> UsageResult:
         provider = self._providers[key]
-        agent_cfg = self._cfg.agent(key)
+        # `agent_config()`, not `agent()`: this is the 5-minute poll, and `agent()`
+        # *creates* the agent's table as a side effect of being asked about it.
+        agent_cfg = self._cfg.agent_config(key)
         try:
             result = provider.fetch(agent_cfg, timeout=timeout)
         except Exception as e:  # noqa: BLE001 - belt-and-braces; providers must not raise, but don't trust it
@@ -107,11 +116,14 @@ class StatsService:
         return self._apply_cache_policy(result)
 
     def _apply_cache_policy(self, result: UsageResult) -> UsageResult:
-        """Good data refreshes the cache; bad data (empty rows — a rate limit, an
-        outage, a login failure) falls back to the last cached good result instead of
-        blanking the flyout or replacing good numbers with a worse guess."""
+        """Good data is kept; bad data (empty rows — a rate limit, an outage, a login
+        failure) falls back to the last cached good result instead of blanking the flyout
+        or replacing good numbers with a worse guess.
+
+        Deliberately does not write: `fetch_all` persists the whole pass in one go once
+        every provider has answered.
+        """
         if result.ok:
-            self._cache.update(result)
             return result
         cached = self._cache.get(result.agent)
         if cached is not None and cached.ok:

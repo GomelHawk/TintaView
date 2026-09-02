@@ -61,6 +61,11 @@ _MIN_WIDTH = 560
 #: minimum height computed from the width it will actually get (`heightForWidth`).
 _HINT_WIDTH = _MIN_WIDTH - 40
 
+#: How long the hooks check below may take before the dialog gives up on it. Long enough
+#: for `wsl.exe` to wake a stopped distro on a slow machine, short enough that accepting
+#: the dialog never looks hung.
+_HOOK_CHECK_TIMEOUT_S = 5.0
+
 
 def _hint(text: str) -> QtWidgets.QLabel:
     """A small, greyed explanatory line, spanning the whole form width."""
@@ -505,25 +510,58 @@ class SettingsDialog(QtWidgets.QDialog):
             self.result_cfg.agent(key).confirm_detection = adapter.default_confirm_detection
 
     def _missing_hooks(self, keys: list[str]) -> list[str]:
-        """Display names of `keys` whose hooks aren't installed and pointing at us.
+        """Display names of `keys` whose hooks the wizard needs to (re)install.
 
         Stats-only providers are skipped — they have no hooks by definition.
+
+        Two rules that are easy to get wrong here:
+
+        - The adapter is resolved through `wsl.configured_adapter`, never used bare. On the
+          Windows half of a WSL-split install a bare adapter answers from `C:\\Users\\you`,
+          which is the wrong side of the boundary entirely, and every agent then reports
+          its hooks as missing on a working machine (AGENTS.md, "WSL split install").
+        - Only "missing / partial / stale-path" mean the wizard can help. `hooks.status()`
+          may report other things (a config file it could not read), and offering a
+          diff-and-confirm install for one of those sends the user somewhere that cannot
+          fix it.
+
+        Runs on a worker thread with a bounded wait: the resolution above can put a UNC
+        path into the read, and a `wsl.localhost` UNC read on a stopped distro blocks for as
+        long as `wsl.exe` takes to wake it. Same pattern as `_start_engine_probe`, except
+        this one has to answer before the dialog can close, so it is joined rather than
+        signalled — a timeout means "don't nag", not "assume broken".
         """
         from ..install import hooks as hooks_mod
+        from ..install import wsl
 
+        needs_install = {
+            hooks_mod.STATUS_MISSING,
+            hooks_mod.STATUS_PARTIAL,
+            hooks_mod.STATUS_STALE_PATH,
+        }
+        cfg = self.result_cfg
         hook_bin = config_mod.hook_bin_path()
-        missing = []
-        for key in keys:
-            adapter = agents_base.get(key)
-            if adapter is None:
-                continue
-            try:
-                state = hooks_mod.status(adapter, hook_bin)
-            except Exception:
-                log.exception("could not check hook status for %s", key)
-                continue
-            if state != hooks_mod.STATUS_INSTALLED:
-                missing.append(adapter.display_name)
+        missing: list[str] = []
+
+        def run() -> None:
+            for key in keys:
+                adapter = agents_base.get(key)
+                if adapter is None:
+                    continue
+                try:
+                    state = hooks_mod.status(wsl.configured_adapter(cfg, adapter), hook_bin)
+                except Exception:
+                    log.exception("could not check hook status for %s", key)
+                    continue
+                if state in needs_install:
+                    missing.append(adapter.display_name)
+
+        thread = threading.Thread(target=run, daemon=True, name="tv-settings-hooks")
+        thread.start()
+        thread.join(_HOOK_CHECK_TIMEOUT_S)
+        if thread.is_alive():
+            log.warning("hook status check timed out; not prompting for the wizard")
+            return []
         return missing
 
     def _offer_hook_install(self, newly_enabled: list[str]) -> None:

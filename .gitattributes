@@ -6,10 +6,11 @@
 # unhelpful as `"elif" unexpected`, so `tv-hook.sh` silently stops reporting agent events
 # and `install.sh` refuses to run at all.
 #
-# It also reaches production: .github/workflows/build.yml runs on windows-latest and
-# publishes `packaging/install.sh` to the GitHub Release straight from that checkout, so
-# a CRLF conversion there ships a broken installer to every Linux and macOS user, and
-# breaks `tintaview update` on those platforms with it.
+# It also reaches production: .github/workflows/build.yml publishes `packaging/install.sh`
+# to the GitHub Release straight from its checkout, so a CRLF conversion there ships a
+# broken installer to every Linux and macOS user, and breaks `tintaview update` on those
+# platforms with it. (Building on ubuntu-latest is the other half of that guarantee; this
+# file is what keeps it true no matter which runner the job ever moves to.)
 *.sh text eol=lf
 
 # The other direction, for the one interpreter that genuinely wants CRLF: cmd.exe can
@@ -18,7 +19,9 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-# Never "fix" line endings inside binary assets.
+# Never "fix" line endings inside binary assets. `.icns` is listed even though nothing
+# generates one today — assets/source/ is where re-exported artwork lands, and a stray
+# CRLF conversion there is silent corruption.
 *.png binary
 *.ico binary
 *.icns binary

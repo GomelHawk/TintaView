@@ -26,6 +26,7 @@ import contextlib
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -93,6 +94,12 @@ class GHubSidecar:
         self._lock = threading.Lock()
         self._next_id = 1
         self._stderr_thread: threading.Thread | None = None
+        # One persistent reader per worker process, pushing whole lines here. A thread
+        # per request (which is what the readline() timeout used to need) meant a thread
+        # created and abandoned on every single paint, and the abandoned one stayed
+        # parked in readline() ready to eat the *next* reply.
+        self._reader_thread: threading.Thread | None = None
+        self._replies: queue.Queue[str | None] = queue.Queue()
         # Set when an RPC leaves the pipe in an unknown state (see `_discard`). The
         # process is killed at the same time, but `poll()` can lag a moment behind the
         # kill, and until it catches up `alive` must already read False.
@@ -131,6 +138,15 @@ class GHubSidecar:
                 creationflags=creationflags,
             )
             self._broken = False
+            # A fresh queue per worker, handed to the reader by argument: a `_discard`
+            # replaces `self._replies`, and the old reader must keep writing to the old
+            # queue so nothing it saw can answer a request made after the kill.
+            self._replies = queue.Queue()
+            self._reader_thread = threading.Thread(
+                target=self._pump_stdout, args=(self._proc, self._replies), daemon=True,
+                name="tv-ghub-sidecar-out",
+            )
+            self._reader_thread.start()
             self._stderr_thread = threading.Thread(
                 target=self._pump_stderr, args=(self._proc,), daemon=True,
                 name="tv-ghub-sidecar-err",
@@ -141,13 +157,14 @@ class GHubSidecar:
     def stop(self) -> None:
         with self._lock:
             proc = self._proc
+            replies = self._replies
             self._proc = None
         if proc is None:
             return
         try:
             if proc.poll() is None and proc.stdin is not None:
                 try:
-                    self._request_unlocked(proc, "close", {}, timeout=2.0)
+                    self._request_unlocked(proc, replies, "close", {}, timeout=2.0)
                 except Exception as e:
                     log.debug("ghub sidecar close before stop failed: %r", e)
                 with contextlib.suppress(OSError):
@@ -199,7 +216,31 @@ class GHubSidecar:
             proc = self._proc
             if proc is None or self._broken or proc.poll() is not None:
                 raise RuntimeError("G HUB sidecar is not running")
-            return self._request_unlocked(proc, cmd, fields, timeout=timeout)
+            return self._request_unlocked(proc, self._replies, cmd, fields, timeout=timeout)
+
+    def _pump_stdout(self, proc: subprocess.Popen[str], replies: queue.Queue) -> None:
+        """Read reply lines for one worker until its pipe closes.
+
+        Like `_pump_stderr`, the process and its queue are passed in rather than read off
+        `self`: a respawn swaps both, and this thread must keep serving the pair it was
+        started for. The `None` sentinel on the way out is what turns a worker that died
+        into an immediate error instead of a request that waits out its whole timeout.
+        """
+        if proc.stdout is None:
+            replies.put(None)
+            return
+        try:
+            while True:
+                # readline(), not iteration: `for line in pipe` buffers, and this has to
+                # hand each reply over the moment the worker flushes it.
+                line = proc.stdout.readline()
+                if not line:
+                    return
+                replies.put(line)
+        except Exception as e:
+            log.debug("ghub sidecar stdout reader stopped: %r", e)
+        finally:
+            replies.put(None)
 
     def _discard(self, proc: subprocess.Popen[str], reason: str) -> None:
         """Abandon a worker whose response stream is no longer trustworthy.
@@ -217,6 +258,9 @@ class GHubSidecar:
         """
         self._broken = True
         log.info("G HUB sidecar discarded (%s)", reason)
+        # A fresh queue, so anything the dying worker already wrote (or its reader's
+        # closing sentinel) can never be handed to a later request as its reply.
+        self._replies = queue.Queue()
         with contextlib.suppress(Exception):
             proc.kill()
 
@@ -238,6 +282,7 @@ class GHubSidecar:
     def _request_unlocked(
         self,
         proc: subprocess.Popen[str],
+        replies: queue.Queue,
         cmd: str,
         fields: dict[str, Any],
         *,
@@ -247,31 +292,22 @@ class GHubSidecar:
         req_id = self._next_id
         self._next_id += 1
         payload = {"id": req_id, "cmd": cmd, **fields}
-        proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
-        proc.stdin.flush()
+        try:
+            proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            proc.stdin.flush()
+        except Exception:
+            self._discard(proc, f"stdin write failed during {cmd!r}")
+            raise
 
-        # Blocking read with a watchdog thread — stdout.readline has no timeout on Windows.
-        holder: dict[str, Any] = {}
-        error: list[BaseException] = []
-
-        def _read() -> None:
-            try:
-                line = proc.stdout.readline()
-                holder["line"] = line
-            except BaseException as e:  # noqa: BLE001 — reported to caller
-                error.append(e)
-
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
+        # The reply comes off the persistent reader thread's queue: `readline()` has no
+        # timeout on Windows, and `Queue.get` does. One request is in flight at a time
+        # (`_request` holds the lock), so the next line on the queue is this request's.
+        try:
+            line = replies.get(timeout=timeout)
+        except queue.Empty:
             self._discard(proc, f"timed out on {cmd!r}")
-            raise TimeoutError(f"G HUB sidecar timed out on {cmd!r}")
-        if error:
-            self._discard(proc, f"stdout read failed during {cmd!r}")
-            raise error[0]
-        line = holder.get("line") or ""
-        if not line:
+            raise TimeoutError(f"G HUB sidecar timed out on {cmd!r}") from None
+        if not line:  # None is the reader's EOF sentinel: the worker is gone
             self._discard(proc, f"closed stdout during {cmd!r}")
             raise RuntimeError(f"G HUB sidecar closed stdout during {cmd!r}")
         try:
@@ -299,6 +335,10 @@ def worker_main(argv: list[str] | None = None) -> int:
     from .ghub import GHubEngine
 
     engine: GHubEngine | None = None
+    #: The payload `engine` was built from. A reconnect sends the same one, and building
+    #: a fresh engine for it leaked a `tintaview-ghub` pump thread (plus an atexit entry)
+    #: on every open for the life of the worker.
+    engine_cfg: dict[str, Any] | None = None
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
@@ -312,10 +352,17 @@ def worker_main(argv: list[str] | None = None) -> int:
         cmd = req.get("cmd")
         try:
             if cmd == "open":
-                cfg = _cfg_from_payload(req.get("cfg") or {})
+                payload = req.get("cfg") or {}
                 if engine is not None and engine.active:
+                    # A new session must re-save the user's lighting, so the old one is
+                    # closed (Shutdown) first either way.
                     engine.close()
-                engine = GHubEngine(cfg)
+                if engine is not None and payload != engine_cfg:
+                    engine.close()  # a no-op when it is already closed
+                    engine = None
+                if engine is None:
+                    engine = GHubEngine(_cfg_from_payload(payload))
+                    engine_cfg = payload
                 ok = engine.open()
                 print(json.dumps({"id": req_id, "ok": ok}), flush=True)
             elif cmd == "set_color":

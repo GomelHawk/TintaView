@@ -381,6 +381,13 @@ def _check_engine(reporter: _Reporter, cfg: Config, env: Environment) -> None:
 # --------------------------------------------------------------------------- 5. hook script
 
 
+#: Sentinel for "nobody has resolved the split home yet, do it now". `None` is a real
+#: answer (not a split install, or the distro is unreachable), so it cannot double as
+#: "unknown" — and `run_doctor` resolving it once is the whole point: `wsl.exe` has a
+#: 20-second timeout and two checks used to pay it independently.
+_UNRESOLVED = object()
+
+
 def _wsl_split_home(env: Environment) -> str | None:
     """The distro's POSIX `$HOME` when this is the Windows half of a WSL-split install.
 
@@ -409,32 +416,20 @@ def _remote_path(distro: str, posix_path: object) -> Path:
 
 
 def _configured_adapter(cfg: Config, adapter: AgentAdapter) -> AgentAdapter:
-    """`adapter`, but with `hooks_config_path()` resolved against `agents.<key>.home`.
-
-    A bare adapter answers from `Path.home()`, which on the Windows half of a WSL-split
-    install is `C:\\Users\\you` — the wrong side of the boundary entirely. The config
-    already records where each agent really lives (the wizard writes the distro's UNC
-    path there), and `_check_codex_flag` has always read it; this is the same resolution,
-    applied to the hooks check that used to disagree with it in the very same report.
-    """
+    """Kept as a thin alias: the resolution now lives in `wsl.configured_adapter` so the
+    CLI, the settings dialog and the tray share it with this report."""
     from . import wsl
 
-    acfg = cfg.agent(adapter.key)
-    if not acfg.home:
-        return adapter
-    home = config_mod.expand(acfg.home)
-    if home == adapter.default_home():
-        return adapter
-    # Derived from the adapter's own paths rather than re-spelling ".claude/settings.json"
-    # here, exactly as `wsl.agent_config_unc_path` does.
-    rel = adapter.hooks_config_path("user").relative_to(adapter.default_home())
-    return wsl.RemotePathAdapter(adapter, home / rel)
+    return wsl.configured_adapter(cfg, adapter)
 
 
-def _check_hook_script(reporter: _Reporter, cfg: Config, env: Environment) -> None:
+def _check_hook_script(
+    reporter: _Reporter, cfg: Config, env: Environment, split_home: object = _UNRESOLVED
+) -> None:
     from . import wsl
 
-    split_home = _wsl_split_home(env)
+    if split_home is _UNRESOLVED:
+        split_home = _wsl_split_home(env)
     if split_home is not None:
         # The agents run inside the distro, so that is where the script they invoke
         # lives. The Windows-side `bin\tv-hook.cmd` is *correctly* absent in a split
@@ -519,7 +514,9 @@ def _check_codex_flag(reporter: _Reporter, cfg: Config, adapter: AgentAdapter) -
         )
 
 
-def _check_agent_hooks(reporter: _Reporter, cfg: Config, env: Environment) -> None:
+def _check_agent_hooks(
+    reporter: _Reporter, cfg: Config, env: Environment, split_home: object = _UNRESOLVED
+) -> None:
     from ..agents import base as agents_base
     from . import hooks as hooks_mod
     from . import wsl
@@ -527,7 +524,8 @@ def _check_agent_hooks(reporter: _Reporter, cfg: Config, env: Environment) -> No
     if not cfg.enabled_agents:
         return  # already reported by _check_config
 
-    split_home = _wsl_split_home(env)
+    if split_home is _UNRESOLVED:
+        split_home = _wsl_split_home(env)
     if split_home is not None:
         # The hooks were written pointing at the distro's own tv-hook.sh, so that is
         # what "is this path still current?" has to be measured against. Comparing them
@@ -578,6 +576,18 @@ def _check_agent_hooks(reporter: _Reporter, cfg: Config, env: Environment) -> No
             reporter.fail(
                 "AGENT HOOKS", f"{adapter.display_name}: hooks partially installed ({path})",
                 f"run `tintaview hooks install --agent {key}` to fill in the missing events",
+            )
+        elif state == hooks_mod.STATUS_UNREADABLE:
+            # Deliberately not "run hooks install": the file is there and probably fine,
+            # we just could not open or parse it (permissions, a lock, a sleeping distro
+            # behind a UNC path, hand-edited JSON). Installing from here would plan a
+            # CREATE and replace the user's own hooks with only ours.
+            reporter.warn(
+                "AGENT HOOKS",
+                f"{adapter.display_name}: {path} exists but could not be read or parsed",
+                "check the file's permissions and that it is valid JSON — do NOT run "
+                f"`tintaview hooks install --agent {key}` until it can be read, or the "
+                "merge would have nothing of yours to merge into",
             )
         elif state == hooks_mod.STATUS_STALE_PATH:
             reporter.fail(
@@ -790,8 +800,12 @@ def run_doctor(verbose: bool = False, paint: bool = False,
     cfg = _check_config(reporter)
     daemon_ok = _check_daemon(reporter, cfg)
     _check_engine(reporter, cfg, env)
-    _check_hook_script(reporter, cfg, env)
-    _check_agent_hooks(reporter, cfg, env)
+    # Resolved once and handed to both checks: `_wsl_split_home` shells out to `wsl.exe`
+    # with a 20-second timeout, and each check used to pay for its own call — so a
+    # stopped distro made `doctor` sit there for the better part of a minute.
+    split_home = _wsl_split_home(env)
+    _check_hook_script(reporter, cfg, env, split_home)
+    _check_agent_hooks(reporter, cfg, env, split_home)
     _check_stats(reporter, cfg)
     if verbose:
         _live_hook_test(reporter, cfg, daemon_ok, interactive)

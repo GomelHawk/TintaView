@@ -17,16 +17,18 @@ import json
 import threading
 import time
 import urllib.request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
 from tintaview import __version__
+from tintaview.core import controller as controller_mod
 from tintaview.core.config import AgentConfig, Config
 from tintaview.core.controller import LightController
-from tintaview.core.server import StatusServer
+from tintaview.core.server import StatusServer, _StatusApplier
 from tintaview.core.stalldetect import StallDetector
 from tintaview.engines.base import LightingEngine
+from tintaview.engines.null import NullEngine
 
 # --------------------------------------------------------------------------- fixtures
 
@@ -646,7 +648,12 @@ def test_watchdog_releases_the_lights_once_every_session_expires():
 
 def test_end_many_reports_one_effective_change_for_the_whole_batch():
     """Retiring several dead sessions must produce a single lighting update, and none
-    at all when the survivors still fold to the same colour."""
+    at all when the survivors still fold to the same colour.
+
+    The mutators report the new effective status (None when unchanged) rather than a
+    bool, so the caller applies the fold computed under the store's own lock instead of
+    re-reading it afterwards and racing another event.
+    """
     from tintaview.core.state import StateStore
 
     state = StateStore()
@@ -655,14 +662,27 @@ def test_end_many_reports_one_effective_change_for_the_whole_batch():
     state.set("cursor", "c", "confirm")
 
     # Dropping the only `confirm` demotes the fold from confirm to working: one change.
-    assert state.end_many([("cursor", "c")]) is True
+    assert state.end_many([("cursor", "c")]) == "working"
     assert state.effective() == "working"
     # Dropping one of two equally-working sessions changes nothing anyone can see.
-    assert state.end_many([("cursor", "b")]) is False
+    assert state.end_many([("cursor", "b")]) is None
     assert state.effective() == "working"
     # Dropping the last one releases the lights.
-    assert state.end_many([("claude", "a")]) is True
+    assert state.end_many([("claude", "a")]) == "none"
     assert state.effective() == "none"
+
+
+def test_mutators_report_the_status_they_folded_to():
+    """Every mutator answers the same way, so the applier never has to re-read the fold."""
+    from tintaview.core.state import StateStore
+
+    state = StateStore()
+    assert state.start("claude", "s1") == "idle"
+    assert state.set("claude", "s1", "working") == "working"
+    assert state.set("claude", "s1", "working") is None  # a repeat changes nothing
+    assert state.set("claude", "s1", "working", tool="Bash") is None  # tool is display-only
+    assert state.end("claude", "s1") == "none"
+    assert state.end("claude", "s1") is None
 
 
 def test_expired_is_per_session_not_per_store(monkeypatch):
@@ -845,3 +865,253 @@ def test_pause_is_idempotent_and_never_raises():
         assert server.controller.paused is False
     finally:
         server.stop()
+
+
+# --------------------------------------------------------------------------- blink thread
+
+
+def _live_blink_threads() -> set[threading.Thread]:
+    return {t for t in threading.enumerate() if t.name == "tintaview-blink" and t.is_alive()}
+
+
+def test_confirm_idle_confirm_leaves_exactly_one_blink_thread():
+    """A confirm -> idle -> confirm inside one half-period used to leak a blink thread.
+
+    Stopping only set the shared Event and starting cleared it again, so the thread that
+    was supposed to retire woke up to find the stop flag gone and kept ticking next to
+    its replacement — two threads painting opposite halves of the blink, one more per
+    round trip, for the life of the process.
+    """
+    cfg = make_cfg()
+    cfg.colors.blink_ms = 200  # long enough that the first thread is still parked
+    injected = FakeEngine()
+    controller = LightController(cfg, engine=injected)
+    others = _live_blink_threads()  # whatever another test left running
+    try:
+        controller.apply("confirm")
+        assert _wait_until(lambda: injected.colors != []), "the blink never started"
+
+        controller.apply("idle")
+        controller.apply("confirm")
+
+        assert _wait_until(lambda: len(_live_blink_threads() - others) == 1, timeout=3.0), \
+            "a superseded blink thread kept ticking alongside its replacement"
+    finally:
+        controller.shutdown()
+
+
+def test_a_bad_confirm_colour_does_not_kill_the_blink_thread():
+    """A hand-edited `confirm = "red"` makes `device_rgb` raise. Read outside the tick's
+    try/except that killed the thread outright, while `blinking` stayed True and /state
+    kept reporting a blink nobody could see."""
+    cfg = make_cfg()
+    cfg.colors.device.confirm = "red"  # not a hex colour
+    injected = FakeEngine()
+    controller = LightController(cfg, engine=injected)
+    try:
+        controller.apply("confirm")
+        # The "off" half still paints, so the loop is provably still ticking.
+        assert _wait_until(lambda: injected.colors.count((0, 0, 0)) >= 2, timeout=2.0)
+        assert controller.blinking is True
+
+        cfg.colors.device.confirm = "#00FF00"  # fixed in Settings, mid-blink
+        assert _wait_until(lambda: (0, 255, 0) in injected.colors, timeout=2.0)
+    finally:
+        controller.shutdown()
+
+
+def test_engine_status_never_waits_on_the_engine_lock():
+    """The Qt GUI thread polls /state every 1.5 s while the blink thread holds the
+    controller lock across a vendor SDK call. Reading the engine block under that same
+    lock froze the tray for as long as a slow Chroma/G HUB call took."""
+    cfg = make_cfg()
+    injected = FakeEngine()
+    in_tick = threading.Event()
+    release_tick = threading.Event()
+    record_color = injected.set_color
+
+    def gated_set_color(r: int, g: int, b: int) -> None:
+        in_tick.set()
+        release_tick.wait(5.0)
+        record_color(r, g, b)
+
+    injected.set_color = gated_set_color
+    controller = LightController(cfg, engine=injected)
+    try:
+        controller.apply("confirm")
+        assert in_tick.wait(5.0), "the blink thread never reached a tick"
+
+        start = time.monotonic()
+        status = controller.engine_status()
+        assert time.monotonic() - start < 0.5, "engine_status() blocked on the engine lock"
+        assert status["name"] == "fake"
+    finally:
+        release_tick.set()
+        controller.shutdown()
+
+
+# --------------------------------------------------------------------------- auto re-detect
+
+
+def test_auto_mode_reprobes_after_nothing_was_reachable(monkeypatch):
+    """Synapse/G HUB/OpenRGB routinely start after the tray does. A NullEngine cached at
+    the first event used to make the process status-only for its whole life."""
+    from tintaview.engines import factory
+
+    cfg = make_cfg()
+    cfg.engine.mode = "auto"
+    now = [1_000.0]
+    real = FakeEngine()
+    built: list[str] = []
+
+    def fake_make_engine(_cfg):
+        engine = real if len(built) >= 2 else NullEngine()
+        built.append(engine.name)
+        return engine
+
+    monkeypatch.setattr(factory, "make_engine", fake_make_engine)
+    controller = LightController(cfg, clock=lambda: now[0])
+    try:
+        controller.apply("working")
+        assert built == ["none"]
+
+        controller.apply("working")  # still inside the cooldown: no second probe sweep
+        assert built == ["none"]
+
+        now[0] += controller_mod.AUTO_REDETECT_SECONDS + 1
+        controller.apply("working")  # probed again — still nothing reachable
+        assert built == ["none", "none"]
+
+        now[0] += controller_mod.AUTO_REDETECT_SECONDS + 1
+        controller.apply("working")  # ...and now Synapse is up
+        assert controller.engine_status()["name"] == "fake"
+        assert real.opens == 1
+    finally:
+        controller.shutdown()
+
+
+def test_a_pinned_engine_is_never_reprobed(monkeypatch):
+    """`status-only` is a choice, not a failure — swapping it out from under the user
+    would be a surprise, and `mode = "chroma"` means "that one, even while it is down"."""
+    from tintaview.engines import factory
+
+    cfg = make_cfg()
+    cfg.engine.mode = "none"
+    now = [1_000.0]
+    built: list[str] = []
+
+    def fake_make_engine(_cfg):
+        built.append("none")
+        return NullEngine()
+
+    monkeypatch.setattr(factory, "make_engine", fake_make_engine)
+    controller = LightController(cfg, clock=lambda: now[0])
+    try:
+        controller.apply("working")
+        now[0] += controller_mod.AUTO_REDETECT_SECONDS * 10
+        controller.apply("working")
+        assert built == ["none"]
+    finally:
+        controller.shutdown()
+
+
+# --------------------------------------------------------------------------- applier
+
+
+def test_applier_keeps_only_the_newest_status():
+    """One slot, not a queue: a status superseded while a slow SDK call was in flight is
+    dropped rather than replayed onto the device after the fact."""
+    seen: list[str] = []
+    gate = threading.Event()
+
+    def apply(status: str) -> None:
+        seen.append(status)
+        if len(seen) == 1:
+            gate.wait(5.0)  # the first call is still inside the vendor SDK
+
+    applier = _StatusApplier(apply)
+    try:
+        applier.request("idle")
+        assert _wait_until(lambda: seen == ["idle"])
+        applier.request("working")
+        applier.request("confirm")  # supersedes "working" before it ever ran
+        gate.set()
+        assert applier.wait_idle(5.0)
+        assert seen == ["idle", "confirm"]
+    finally:
+        gate.set()
+        applier.stop()
+
+
+def test_the_watchdog_and_the_stall_detector_share_the_applier():
+    """Every writer to the engine has to be the same thread, or the fold one of them
+    computed under the store lock can be overwritten by an older one."""
+    cfg = make_cfg()
+    cfg.agents["cursor"] = AgentConfig(confirm_detection="stall", stall_seconds=0.02)
+    cfg.server.watchdog_timeout = 0.2
+    server, engine = make_server(cfg)
+    try:
+        _event(server, "session-start", agent="cursor", sid="c1")
+        _event(server, "tool-start", agent="cursor", sid="c1", tool="run_terminal")
+        time.sleep(0.05)  # cross the 20ms stall deadline
+        server._stall.tick()
+        assert _wait_until(lambda: server.controller.blinking is True)
+
+        # ...and the watchdog's expiry releases the device through the same slot.
+        assert _wait_until(lambda: engine.closes == 1, timeout=3.0)
+        assert server.controller.blinking is False
+    finally:
+        server.stop()
+
+
+def test_stop_closes_the_ingress_before_releasing_the_engine():
+    """`stop()` used to shut the controller down first, so a hook already in flight could
+    re-open the engine after it was released and the process exited holding the lights."""
+    server, engine = make_server()
+    _event(server, "working", agent="claude", sid="s1")
+    assert _wait_until(lambda: engine.opens == 1)
+
+    url = server.url
+    server.stop()
+
+    assert engine.active is False
+    assert engine.closes == 1
+    with pytest.raises(URLError):
+        urllib.request.urlopen(f"{url}/healthz", timeout=1)
+    assert engine.opens == 1  # nothing could arrive to take the device back
+
+
+# --------------------------------------------------------------------------- /quit
+
+
+def _get_quit(server: StatusServer) -> dict:
+    with urllib.request.urlopen(f"{server.url}/quit", timeout=2) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def test_quit_reports_false_when_nothing_is_registered(server_engine):
+    server, _engine = server_engine
+    assert _get_quit(server) == {"ok": True, "quitting": False}
+
+
+def test_quit_invokes_the_registered_callback(server_engine):
+    server, _engine = server_engine
+    calls: list[int] = []
+    server.on_quit = lambda: calls.append(1)
+
+    assert _get_quit(server)["quitting"] is True
+    assert _wait_until(lambda: calls == [1])
+
+
+def test_quit_survives_a_raising_callback(server_engine):
+    """It runs on an HTTP worker thread, where an exception would be logged and lost —
+    and a failed quit must still leave a usable server behind."""
+    server, _engine = server_engine
+
+    def boom() -> None:
+        raise RuntimeError("not quitting today")
+
+    server.on_quit = boom
+    assert _get_quit(server)["ok"] is True
+    assert server.request_quit() is False
+    assert _get_state(server)["effective"] == "none"  # still serving

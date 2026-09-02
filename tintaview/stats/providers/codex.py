@@ -18,13 +18,24 @@ below is a defensive ``.get()``). They are ``null`` on API-key sessions (verifie
 this machine); we fall back to token totals over the shared 5h/7d windows there,
 labelled as informational (``show_pct=False``) rather than a real percentage.
 
-Performance: this may run over a slow Windows UNC path (the WSL split). Two rules to
+Performance: this may run over a slow Windows UNC path (the WSL split). Three rules to
 keep a poll fast:
-  1. Only look at files whose mtime is within the last 7 days.
-  2. Read each candidate file from the END, not front-to-back — the newest
-     ``token_count`` record is always near the tail because these files are
-     append-only. ``_latest_record_in_file`` grows the tail read geometrically only
-     as far as it needs to find one.
+  1. Only look at files whose mtime is within the last 7 days, and prune whole
+     ``YYYY/MM/DD`` directories that cannot hold one before descending into them —
+     ``sessions/`` accumulates a directory per day forever, and walking every one of
+     them was most of the poll on a machine that had been using Codex for a year.
+  2. Read each candidate file from the END, not front-to-back — these files are
+     append-only, so the records that matter are at the tail. ``_scan_tail`` grows the
+     read geometrically only as far as it needs.
+  3. Memoise the parse per file on ``(mtime_ns, size)``, so an unchanged session costs
+     one ``stat`` instead of a read.
+
+``info.total_token_usage`` is **cumulative for the whole session**, which is the trap in
+the 5-hour row: a week-long session touched ten minutes ago belongs in that window, but
+only for what it spent *inside* it. Adding its running total made "last 5 hours" larger
+than "last 7 days". So the tail scan keeps every ``token_count`` record back to 5 hours
+before the file's own newest one, and the 5h row accumulates ``latest - the newest
+snapshot from before the cutoff``.
 
 The schema is undocumented and has changed across Codex versions; this module must
 never raise — an unrecognised shape degrades to an ``UsageResult`` with a clear
@@ -33,10 +44,12 @@ never raise — an unrecognised shape degrades to an ``UsageResult`` with a clea
 
 from __future__ import annotations
 
-import glob
 import json
 import logging
+import os
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,6 +57,7 @@ from typing import Any
 from tintaview.core.config import AgentConfig, expand
 from tintaview.i18n import t
 
+from .. import _scan
 from .. import format as fmt
 from ..model import UsageProvider, UsageResult, UsageRow
 
@@ -54,6 +68,29 @@ _MAX_AGE_DAYS = 7
 # this is the fallback informational path, not worth an unbounded scan of a huge log.
 _MAX_TAIL_BYTES = 16 * 1024 * 1024
 _TAIL_CHUNK = 64 * 1024
+
+#: The 5-hour window, plus a few minutes of slack so the baseline record is strictly
+#: older than any cutoff a later poll can produce. The tail scan reads back until it has
+#: a record this far behind the file's newest one — anchored to the *file*, not to `now`,
+#: which is what lets the result be memoised across polls.
+_WINDOW_5H_SPAN_S = 5 * 3600 + 300
+
+#: How long after its date a `YYYY/MM/DD` session directory may still gain writes. Codex
+#: names the directory for when the session *started*, and a session left open overnight
+#: keeps appending — so pruning strictly on the directory's own date would drop files
+#: whose mtime is inside the window. Two days is generous on purpose: pruning is only an
+#: optimisation, and being wrong about it loses real usage.
+_DIR_GRACE_S = 2 * 86400
+
+#: The token fields Codex reports, in the order `_empty_totals` keys them.
+_TOKEN_FIELDS = (
+    ("input", "input_tokens"),
+    ("cached_input", "cached_input_tokens"),
+    ("cache_write", "cache_write_input_tokens"),
+    ("output", "output_tokens"),
+    ("reasoning_output", "reasoning_output_tokens"),
+    ("total", "total_tokens"),
+)
 
 
 # --------------------------------------------------------------------------- paths
@@ -67,21 +104,88 @@ def _resolve_home(agent_config: AgentConfig) -> Path:
     return expand(agent_config.home) if agent_config.home else _default_home()
 
 
-def _iter_recent_session_files(home: Path, max_age_days: int = _MAX_AGE_DAYS) -> list[Path]:
-    pattern = str(home / "sessions" / "**" / "rollout-*.jsonl")
-    cutoff = time.time() - max_age_days * 86400
-    out: list[Path] = []
-    for raw in glob.glob(pattern, recursive=True):
-        p = Path(raw)
+def _date_dir_end(parts: list[str]) -> float | None:
+    """When a `YYYY`, `YYYY/MM` or `YYYY/MM/DD` directory's date range ends (exclusive).
+
+    None for anything that is not one of those shapes — a name we do not recognise as a
+    date is never pruned, because it might be anything (a user's own folder, a future
+    Codex layout) and losing real sessions is far worse than walking a few directories.
+    """
+    if not 1 <= len(parts) <= 3 or not all(p.isdigit() for p in parts):
+        return None
+    if len(parts[0]) != 4:
+        return None
+    try:
+        year = int(parts[0])
+        if len(parts) == 1:
+            end = datetime(year + 1, 1, 1)
+        elif len(parts) == 2:
+            month = int(parts[1])
+            end = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+        else:
+            end = datetime(year, int(parts[1]), int(parts[2])) + timedelta(days=1)
+        return end.timestamp()  # naive: these directory names are local dates
+    except (ValueError, OverflowError, OSError):
+        return None  # month 13, day 32, a year outside the platform's range — don't prune
+
+
+def _make_skip_dir(sessions: Path, cutoff: float) -> Callable[[str, str], bool]:
+    """A `_scan.recent_files` pruner for Codex's `sessions/YYYY/MM/DD` tree.
+
+    `sessions/` gains a directory per day and never loses one, so the old
+    `glob("**/rollout-*.jsonl")` re-walked every day the user had ever run Codex on every
+    5-minute poll — over a UNC path that is a round trip per directory. Whole years and
+    months are dropped here without ever being listed.
+    """
+    root = str(sessions)
+
+    def skip(dirpath: str, dirname: str) -> bool:
         try:
-            if p.stat().st_mtime >= cutoff:
-                out.append(p)
-        except OSError:
-            continue  # vanished between glob and stat — not fatal, just skip it
-    return out
+            rel = os.path.relpath(dirpath, root)
+        except ValueError:  # different drive on Windows — not our tree, don't prune
+            return False
+        parts = [] if rel in (".", "") else rel.split(os.sep)
+        parts.append(dirname)
+        end = _date_dir_end(parts)
+        if end is None:
+            return False
+        return end + _DIR_GRACE_S <= cutoff
+
+    return skip
+
+
+def _recent_session_files(home: Path, max_age_days: int = _MAX_AGE_DAYS,
+                          now: float | None = None) -> list[Path]:
+    now = time.time() if now is None else now
+    sessions = home / "sessions"
+    cutoff = now - max_age_days * 86400
+    return _scan.recent_files(
+        sessions, "rollout-*.jsonl", max_age_days * 86400,
+        now=now, skip_dir=_make_skip_dir(sessions, cutoff),
+    )
 
 
 # --------------------------------------------------------------------------- tail scan
+
+
+@dataclass(frozen=True)
+class _TailScan:
+    """What one rollout file's tail says about its session.
+
+    `latest` is the whole newest `token_count` record (the rate-limit percentages live on
+    it); `history` is `(timestamp, total_token_usage)` for every `token_count` record the
+    scan read, newest first, reaching back far enough to answer the 5-hour window.
+    """
+
+    latest: dict[str, Any] | None = None
+    latest_ts: datetime | None = None
+    history: tuple[tuple[datetime, dict[str, Any]], ...] = ()
+
+
+#: Per-file parse cache. `total_token_usage` never changes for a record already written,
+#: so an unchanged file's scan is still valid; `_fetch` prunes this to the recent set on
+#: every poll so it cannot grow for the life of the tray.
+_TAIL_MEMO: _scan.FileMemo[_TailScan] = _scan.FileMemo()
 
 
 def _is_token_count_record(rec: Any) -> bool:
@@ -93,34 +197,43 @@ def _is_token_count_record(rec: Any) -> bool:
     )
 
 
-def _latest_record_in_file(path: Path) -> dict[str, Any] | None:
-    """Return the most recent `token_count` event_msg record in one rollout file,
-    reading from the end in growing chunks instead of parsing the whole file.
+def _record_totals(rec: dict[str, Any]) -> dict[str, Any]:
+    info = (rec.get("payload") or {}).get("info") or {}
+    totals = info.get("total_token_usage")
+    return totals if isinstance(totals, dict) else {}
 
-    A session can run long enough to produce a large file, so a single small tail read
-    is not always enough (the last few lines might be unrelated housekeeping events) —
-    this doubles the read size until it finds a match, hits the whole file, or hits
-    `_MAX_TAIL_BYTES`.
+
+def _scan_tail(path: Path) -> _TailScan:
+    """Every `token_count` record in the tail of one rollout file, newest first.
+
+    Reads from the END in geometrically growing chunks, because these files are
+    append-only and can get large. It stops as soon as it holds a record at least
+    `_WINDOW_5H_SPAN_S` older than the newest one — that is all the 5-hour delta needs,
+    and anchoring the stop condition to the *file's* own newest timestamp (rather than to
+    `now`) is what makes the result safe to memoise across polls: every later poll's
+    cutoff is later still, so the span already covers it.
     """
     try:
         size = path.stat().st_size
     except OSError:
-        return None
+        return _TailScan()
     if size == 0:
-        return None
+        return _TailScan()
 
     chunk = _TAIL_CHUNK
     with open(path, "rb") as f:
         while True:
             read = min(chunk, size)
             f.seek(size - read)
-            data = f.read(read)
-            text = data.decode("utf-8", errors="ignore")
+            text = f.read(read).decode("utf-8", errors="ignore")
             lines = text.split("\n")
             if read < size:
                 # The first line of a partial tail is very likely cut mid-record —
                 # drop it rather than risk json.loads on a truncated line.
                 lines = lines[1:]
+
+            history: list[tuple[datetime, dict[str, Any]]] = []
+            latest: dict[str, Any] | None = None
             for line in reversed(lines):
                 line = line.strip()
                 if not line or '"token_count"' not in line:
@@ -129,11 +242,59 @@ def _latest_record_in_file(path: Path) -> dict[str, Any] | None:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if _is_token_count_record(rec):
-                    return rec
-            if read >= size or read >= _MAX_TAIL_BYTES:
-                return None
+                if not _is_token_count_record(rec):
+                    continue
+                ts = _parse_ts(rec.get("timestamp"))
+                if ts is None:
+                    continue
+                if latest is None:
+                    latest = rec
+                history.append((ts, _record_totals(rec)))
+
+            spans = bool(history) and (
+                (history[0][0] - history[-1][0]).total_seconds() >= _WINDOW_5H_SPAN_S
+            )
+            if spans or read >= size or read >= _MAX_TAIL_BYTES:
+                if not history:
+                    return _TailScan()
+                return _TailScan(latest=latest, latest_ts=history[0][0], history=tuple(history))
             chunk *= 2
+
+
+def _window_totals(scan: _TailScan, cutoff: datetime) -> dict[str, Any]:
+    """This session's usage *inside* the window, not its whole history.
+
+    `total_token_usage` is cumulative for the session, so adding the latest record's
+    total to the 5-hour bucket charged that window with every token the session had ever
+    spent — a session opened last Tuesday and touched ten minutes ago made "last 5 hours"
+    bigger than "last 7 days". Subtract the newest snapshot taken *before* the cutoff.
+
+    With no such snapshot in the tail — a session that began inside the window, or one
+    whose tail we could not read far enough back — the running total IS the window's
+    usage, which is the right answer in the first case and the old behaviour in the
+    second.
+    """
+    latest = scan.history[0][1]
+    for ts, totals in scan.history[1:]:
+        if ts < cutoff:
+            return _subtract_totals(latest, totals)
+    return latest
+
+
+def _subtract_totals(latest: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for _acc_key, field in _TOKEN_FIELDS:
+        # Floored at zero: a counter that appears to go backwards (a resumed session
+        # re-reporting from scratch) must not subtract from another session's usage.
+        out[field] = max(_as_int(latest.get(field)) - _as_int(baseline.get(field)), 0)
+    return out
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_ts(ts: Any) -> datetime | None:
@@ -252,16 +413,12 @@ def _pct_row(label: str, window: dict[str, Any]) -> UsageRow:
 
 
 def _empty_totals() -> dict[str, int]:
-    return {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0, "reasoning_output": 0, "total": 0}
+    return {acc_key: 0 for acc_key, _field in _TOKEN_FIELDS}
 
 
 def _accumulate(acc: dict[str, int], totals: dict[str, Any]) -> None:
-    acc["input"] += int(totals.get("input_tokens") or 0)
-    acc["cached_input"] += int(totals.get("cached_input_tokens") or 0)
-    acc["cache_write"] += int(totals.get("cache_write_input_tokens") or 0)
-    acc["output"] += int(totals.get("output_tokens") or 0)
-    acc["reasoning_output"] += int(totals.get("reasoning_output_tokens") or 0)
-    acc["total"] += int(totals.get("total_tokens") or 0)
+    for acc_key, field in _TOKEN_FIELDS:
+        acc[acc_key] += _as_int(totals.get(field))
 
 
 def _total_row(label: str, acc: dict[str, int]) -> UsageRow:
@@ -287,36 +444,42 @@ class CodexUsageProvider(UsageProvider):
 
     def _fetch(self, agent_config: AgentConfig) -> UsageResult:
         home = _resolve_home(agent_config)
-        files = _iter_recent_session_files(home)
+        files = _recent_session_files(home)
         if not files:
             return UsageResult(agent=self.key, error=t("usage.codex.error.no_sessions"))
+        # Forget files that dropped out of the 7-day window, so the memo tracks the
+        # working set instead of every session this process has ever seen.
+        _TAIL_MEMO.prune(files)
 
         now = datetime.now(UTC)
-        cutoffs = {"5h": now - timedelta(hours=5), "7d": now - timedelta(days=7)}
+        cutoff_5h = now - timedelta(hours=5)
+        cutoff_7d = now - timedelta(days=7)
         window_totals = {"5h": _empty_totals(), "7d": _empty_totals()}
 
         latest_record: dict[str, Any] | None = None
         latest_ts: datetime | None = None
 
         for path in files:
-            record = _latest_record_in_file(path)
-            if record is None:
+            try:
+                scan = _TAIL_MEMO.get(path, _scan_tail)
+            except OSError:
+                continue  # vanished between the walk and the read — skip, not fatal
+            if scan.latest is None or scan.latest_ts is None:
                 continue
-            ts = _parse_ts(record.get("timestamp"))
-            if ts is None:
-                continue
+            ts = scan.latest_ts
             if latest_ts is None or ts > latest_ts:
                 latest_ts = ts
-                latest_record = record
-            # Codex's total_token_usage is cumulative for the whole session, so the
-            # latest record per file already IS that session's running total — bucket
-            # it into a window if the session was active within it.
-            payload = record.get("payload") or {}
-            info = payload.get("info") or {}
-            totals = info.get("total_token_usage") or {}
-            for label, cutoff in cutoffs.items():
-                if ts >= cutoff:
-                    _accumulate(window_totals[label], totals)
+                latest_record = scan.latest
+
+            session_total = scan.history[0][1]
+            # 7d gets the session's whole running total, which is what a session touched
+            # inside the week has spent (these files do not outlive a week's worth of
+            # relevance in practice). 5h gets only what was spent inside those 5 hours —
+            # see `_window_totals` for why the cumulative figure is wrong there.
+            if ts >= cutoff_7d:
+                _accumulate(window_totals["7d"], session_total)
+            if ts >= cutoff_5h:
+                _accumulate(window_totals["5h"], _window_totals(scan, cutoff_5h))
 
         if latest_record is None:
             return UsageResult(agent=self.key, error=t("usage.codex.error.no_records"))

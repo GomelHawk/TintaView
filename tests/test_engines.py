@@ -56,6 +56,12 @@ class _ChromaHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         self._record()
+        # `put_status` lets a test make Synapse reject writes the way a restarted one
+        # does (404 on a session URI that no longer exists) or hiccup (500).
+        status = getattr(self.server, "put_status", 200)
+        if status != 200:
+            self.send_error(status)
+            return
         self._reply({})
 
     def do_DELETE(self) -> None:
@@ -151,6 +157,67 @@ def test_chroma_probe_failure_does_not_set_cooldown():
     assert engine.in_cooldown() is False  # only open() failures back off, per old code
 
 
+def test_chroma_drops_a_session_that_stops_answering(chroma_server):
+    """Write failures used to be swallowed with `active` left True, so a restarted
+    Synapse was never noticed: the controller saw an open session, never called `open()`
+    again, and every PUT for the rest of the run went to a URI nobody was serving."""
+    url = f"http://127.0.0.1:{chroma_server.server_port}/razer/chromasdk"
+    engine = ChromaEngine(ChromaConfig(devices=["mouse"]), url=url)
+    assert engine.open() is True
+
+    chroma_server.put_status = 500  # transient server-side error
+    for _ in range(2):
+        engine.set_color(1, 2, 3)
+    assert engine.active is True, "a couple of failures is noise, not a dead session"
+
+    engine.set_color(1, 2, 3)
+    assert engine.active is False
+
+    chroma_server.put_status = 200
+    assert engine.open() is True  # ...and the next status change reopens cleanly
+    assert engine.active is True
+
+
+def test_chroma_a_4xx_on_the_session_uri_is_fatal_at_once(chroma_server):
+    """Only a fresh POST to the discovery endpoint can produce a working URI, so there
+    is nothing to gain from two more rejected writes."""
+    url = f"http://127.0.0.1:{chroma_server.server_port}/razer/chromasdk"
+    engine = ChromaEngine(ChromaConfig(devices=["mouse"]), url=url)
+    assert engine.open() is True
+
+    chroma_server.put_status = 404
+    engine.set_color(1, 2, 3)
+    assert engine.active is False
+
+
+def test_chroma_a_successful_write_resets_the_failure_tally(chroma_server):
+    url = f"http://127.0.0.1:{chroma_server.server_port}/razer/chromasdk"
+    engine = ChromaEngine(ChromaConfig(devices=["mouse"]), url=url)
+    assert engine.open() is True
+
+    chroma_server.put_status = 500
+    engine.set_color(1, 2, 3)
+    engine.set_color(1, 2, 3)
+    chroma_server.put_status = 200
+    engine.set_color(1, 2, 3)  # Synapse came back
+    chroma_server.put_status = 500
+    engine.set_color(1, 2, 3)
+
+    assert engine.active is True  # the tally restarted, so this is failure #1 again
+
+
+def test_chroma_heartbeat_failure_also_retires_the_session(chroma_server):
+    """The heartbeat is the only call a session with no status changes makes, so it has
+    to be able to notice the session died too."""
+    url = f"http://127.0.0.1:{chroma_server.server_port}/razer/chromasdk"
+    engine = ChromaEngine(ChromaConfig(devices=["mouse"]), url=url)
+    assert engine.open() is True
+
+    chroma_server.put_status = 404
+    engine.heartbeat()
+    assert engine.active is False
+
+
 # --------------------------------------------------------------------------- OpenRGB
 
 
@@ -177,7 +244,8 @@ class _FakeColor:
 
 
 class _FakeDevice:
-    def __init__(self, name, dtype, mode_names, active_mode, colors) -> None:
+    def __init__(self, name, dtype, mode_names, active_mode, colors, raise_on_set=False) -> None:
+        self.raise_on_set = raise_on_set
         self.name = name
         self.type = dtype
         self.modes = [_FakeMode(n) for n in mode_names]
@@ -197,6 +265,8 @@ class _FakeDevice:
             self.active_mode = mode
 
     def set_color(self, color) -> None:
+        if self.raise_on_set:
+            raise OSError("connection reset by peer")  # what a restarted server looks like
         self.color_calls.append(color)
 
     def set_colors(self, colors) -> None:
@@ -325,6 +395,30 @@ def test_openrgb_missing_dependency_is_quiet(monkeypatch):
 
     engine.set_color(1, 2, 3)  # must never raise even though nothing is connected
     engine.close()
+
+
+def test_openrgb_drops_the_connection_after_repeated_write_failures(monkeypatch):
+    """OpenRGB's server is a desktop app like any other and gets restarted. A dead socket
+    used to leave `active` True forever, so the rig stayed on whatever colour it had."""
+    mouse = _FakeDevice("Mouse", 6, ["Direct"], active_mode=0, colors=[_FakeColor(1, 1, 1)])
+    _install_fake_openrgb(monkeypatch, [mouse])
+
+    engine = OpenRGBEngine(OpenRGBConfig(device_types=["mouse"]))
+    assert engine.open() is True
+    engine.set_color(1, 2, 3)
+    assert engine.active is True
+
+    mouse.raise_on_set = True
+    for _ in range(2):
+        engine.set_color(4, 5, 6)
+    assert engine.active is True, "a couple of failures is noise, not a dead server"
+
+    engine.set_color(4, 5, 6)
+    assert engine.active is False
+
+    mouse.raise_on_set = False
+    assert engine.open() is True  # a fresh connection, and a fresh snapshot with it
+    assert engine.active is True
 
 
 # --------------------------------------------------------------------------- G HUB
@@ -781,6 +875,33 @@ def test_ghub_discover_dll_path_finds_sdks_subdirectory(tmp_path, monkeypatch):
     (tmp_path / "LGHUB" / f"sdk_legacy_led_{bitness}.dll").write_bytes(b"")
 
     assert discover_dll_path(GHubConfig()) == dll
+
+
+def test_ghub_close_retires_the_sdk_pump_thread():
+    """The pump thread used to run until process exit, so every `GHubEngine` ever built
+    kept one alive — and the sidecar worker built a new engine on every `open`, leaking
+    a thread per reconnect. `close()` has to `Shutdown` the SDK anyway, so the next
+    `open()` re-inits on a fresh thread and nothing is lost by retiring it.
+    """
+    def live_pumps() -> set[threading.Thread]:
+        return {t for t in threading.enumerate() if t.name == "tintaview-ghub" and t.is_alive()}
+
+    others = live_pumps()
+    dll = _FakeGHubDll()
+    engine = GHubEngine(GHubConfig(), dll=dll)
+    try:
+        assert engine.open() is True
+        assert len(live_pumps() - others) == 1
+
+        engine.close()
+        assert live_pumps() - others == set()
+
+        # ...and reopening starts exactly one again, rather than running without a pump.
+        assert engine.open() is True
+        assert len(live_pumps() - others) == 1
+        assert dll.names().count("LogiLedInitWithName") == 2
+    finally:
+        engine.close()
 
 
 def test_ghub_setup_notes_list_what_to_turn_on_and_off():

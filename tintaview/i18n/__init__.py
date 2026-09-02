@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from functools import lru_cache
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -198,6 +199,18 @@ def _template(lang: str, key: str, kwargs: dict[str, Any]) -> str | None:
     return None
 
 
+@lru_cache(maxsize=512)
+def _warn_bad_placeholders(key: str, lang: str) -> None:
+    """Log a bad-placeholder translation **once** per (key, language).
+
+    `t()` is called from `paintEvent` and from the stats poll, so a single mistranslated
+    key used to write a warning line every repaint — tens of lines a second, which buries
+    the log the "Open logs folder" menu item exists to make readable. Once is all the
+    information there is: the catalogue does not change while the process runs.
+    """
+    log.warning("i18n: %r in %r has placeholders the caller didn't supply", key, lang)
+
+
 def t(key: str, /, **kwargs: Any) -> str:
     """The translated string for `key`, with `kwargs` interpolated by name.
 
@@ -216,5 +229,5 @@ def t(key: str, /, **kwargs: Any) -> str:
         try:
             return template.format(**kwargs)
         except (KeyError, IndexError, ValueError):
-            log.warning("i18n: %r in %r has placeholders the caller didn't supply", key, lang)
+            _warn_bad_placeholders(key, lang)
     return key

@@ -6,6 +6,8 @@ call and every download goes through a monkeypatched stand-in.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import urllib.error
 from pathlib import Path
 from typing import Any
@@ -450,3 +452,110 @@ def test_run_update_dispatches_to_the_windows_path(monkeypatch):
 
     assert U.run_update(check_only=False, channel="stable") == 0
     assert seen == [newer]
+
+
+# --------------------------------------------------------------------------- POSIX path
+
+
+def _posix_release_assets() -> list[dict[str, Any]]:
+    base = "https://example.invalid/download"
+    return [
+        {"name": "install.sh", "browser_download_url": f"{base}/install.sh"},
+        {"name": "SHA256SUMS.txt", "browser_download_url": f"{base}/SHA256SUMS.txt"},
+    ]
+
+
+@pytest.fixture
+def real_tmpdir_script(monkeypatch):
+    """Stub verification but keep `_fetch_install_script`'s real `mkdtemp` directory.
+
+    The download's temp directory is the thing under test in a couple of these, so it
+    has to be the one the code actually created, not a pytest `tmp_path` handed in.
+    """
+    def fake(_url, _checksums_url, dest_dir, filename):
+        target = Path(dest_dir) / filename
+        target.write_text("# stub\n", encoding="utf-8")
+        return target
+
+    monkeypatch.setattr(U, "_download_and_verify", fake)
+
+
+def test_posix_update_passes_its_own_install_prefix(monkeypatch, real_tmpdir_script, tmp_path):
+    """A `--prefix` install must upgrade itself, not gain a second copy.
+
+    install.sh defaults to ~/.local/share/tintaview, so running it with no arguments from
+    a prefixed install left the original untouched and running the old code.
+    """
+    ran: list[list[str]] = []
+    monkeypatch.setattr(U.subprocess, "run",
+                        lambda argv, **kw: ran.append(argv) or subprocess.CompletedProcess(argv, 0))
+
+    prefix = tmp_path / "PortableInstall"
+    (prefix / "venv").mkdir(parents=True)
+    monkeypatch.setattr(U.sys, "prefix", str(prefix / "venv"))
+
+    assert U._update_posix("9.9.9", _posix_release_assets()) == 0
+    argv = ran[0]
+    assert argv[0] == "sh"
+    assert argv[argv.index("--prefix") + 1] == str(prefix.resolve())
+
+
+def test_posix_update_from_a_checkout_passes_no_prefix(monkeypatch, real_tmpdir_script, tmp_path):
+    ran: list[list[str]] = []
+    monkeypatch.setattr(U.subprocess, "run",
+                        lambda argv, **kw: ran.append(argv) or subprocess.CompletedProcess(argv, 0))
+    monkeypatch.setattr(U.sys, "prefix", str(tmp_path / "some-checkout" / ".venv"))
+
+    assert U._update_posix("9.9.9", _posix_release_assets()) == 0
+    assert "--prefix" not in ran[0]
+
+
+def test_posix_update_cleans_up_the_download_directory(monkeypatch, real_tmpdir_script, tmp_path):
+    """`mkdtemp` is never reclaimed by anyone else, and the tray checks on a timer."""
+    seen: list[Path] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(Path(argv[1]))
+        assert seen[-1].exists(), "the script must still be there while it runs"
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(U.subprocess, "run", fake_run)
+    monkeypatch.setattr(U.sys, "prefix", str(tmp_path / "checkout" / ".venv"))
+
+    assert U._update_posix("9.9.9", _posix_release_assets()) == 0
+    assert not seen[0].parent.exists(), "the mkdtemp directory outlived the update"
+
+
+def test_posix_update_cleans_up_even_when_the_script_cannot_be_run(
+    monkeypatch, real_tmpdir_script, tmp_path
+):
+    holder: list[Path] = []
+
+    def boom(argv, **_kw):
+        holder.append(Path(argv[1]))
+        raise OSError("no sh here")
+
+    monkeypatch.setattr(U.subprocess, "run", boom)
+    monkeypatch.setattr(U.sys, "prefix", str(tmp_path / "checkout" / ".venv"))
+
+    assert U._update_posix("9.9.9", _posix_release_assets()) == 1
+    assert not holder[0].parent.exists()
+
+
+def test_windows_update_keeps_the_download_until_the_detached_script_has_run(
+    monkeypatch, real_tmpdir_script, tmp_path
+):
+    """The opposite rule to the POSIX path, and deliberately so.
+
+    install.ps1 is launched detached because it stops the interpreter running out of the
+    venv it is replacing; deleting the .ps1 on the way out would abort the update.
+    """
+    launched: list[list[str]] = []
+    monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+    monkeypatch.setattr(U.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(U.sys, "prefix", str(tmp_path / "checkout" / ".venv"))
+
+    assert U._update_windows("9.9.9", _windows_release_assets()) == 0
+    script = Path(launched[0][launched[0].index("-File") + 1])
+    assert script.exists()
+    shutil.rmtree(script.parent, ignore_errors=True)

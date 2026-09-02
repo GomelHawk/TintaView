@@ -328,7 +328,56 @@ def test_tv_hook_sh_url_encodes_unsafe_characters_out_of_sid(capturing_server):
     assert sid and all(c.isalnum() or c in "._-" for c in sid)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="tv-hook.sh is POSIX sh, not for Windows")
+def test_tv_hook_sh_rejects_shell_metacharacters_in_the_value(capturing_server):
+    # A value carrying shell/URL metacharacters is *rejected*, not filtered: rewriting it
+    # into a different-but-valid id would quietly merge two sessions into one bucket, and
+    # the backtick/`$()`/`;` forms must never reach the command line at all.
+    url, received = capturing_server
+    payload = b'{"session_id":"$(touch /tmp/tv-pwned);`id`|rm -rf ~"}'
+    result = _run_hook(url, "claude", "tool-start", payload)
+    assert result.returncode == 0
+    assert received == ["/v1/event/tool-start?agent=claude&sid=default"]
+    assert not Path("/tmp/tv-pwned").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="tv-hook.sh is POSIX sh, not for Windows")
+def test_tv_hook_sh_tolerates_spaces_around_the_colon(capturing_server):
+    # A pretty-printed payload is still a valid payload; the field match allows the
+    # whitespace JSON permits either side of the colon.
+    url, received = capturing_server
+    payload = b'{\n  "session_id" :   "spaced-1",\n  "tool": "Bash"\n}'
+    result = _run_hook(url, "claude", "working", payload)
+    assert result.returncode == 0
+    assert received == ["/v1/event/working?agent=claude&sid=spaced-1"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="tv-hook.sh is POSIX sh, not for Windows")
+def test_tv_hook_sh_handles_a_huge_payload(capturing_server):
+    # The byte cap (`head -c 65536`) went away with the fork-per-stage pipeline; a
+    # multi-megabyte payload must still resolve the id and still exit cleanly, since a
+    # hook that hangs or dies on a big tool result stalls the agent's turn.
+    url, received = capturing_server
+    payload = b'{"junk":"' + b"x" * (4 * 1024 * 1024) + b'","session_id":"big-1"}'
+    result = _run_hook(url, "claude", "tool-end", payload)
+    assert result.returncode == 0
+    assert received == ["/v1/event/tool-end?agent=claude&sid=big-1"]
+
+
 # --------------------------------------------------------------------------- tv-hook.cmd
+
+
+def test_tv_hook_cmd_clears_every_variable_it_tests_with_if_defined():
+    """A batch hook inherits the agent's whole environment.
+
+    `if defined TOKEN` on a variable that was never `set` here reads whatever the user
+    exported under that name — and `TOKEN` is very commonly a real API secret, which
+    would then be sent to the daemon as `?sid=`. Same trap for AFTER/CHECK. Asserted as
+    text so it is checked on Linux and macOS CI too, where the script cannot be run.
+    """
+    text = TV_HOOK_CMD.read_text(encoding="utf-8")
+    for name in ("LINE", "TOKEN", "AFTER", "CHECK"):
+        assert f'set "{name}="' in text, f"{name} is tested with `if defined` but never cleared"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="tv-hook.cmd is a Windows batch script")
@@ -347,3 +396,29 @@ def test_tv_hook_cmd_posts_claude_session_id(capturing_server):
     )
     assert result.returncode == 0
     assert received == ["/v1/event/tool-start?agent=claude&sid=abc123"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="tv-hook.cmd is a Windows batch script")
+def test_tv_hook_cmd_ignores_an_inherited_token_env_var(capturing_server):
+    """An inherited `TOKEN` must never become the session id.
+
+    Before `set "TOKEN="`, a payload with no session-id field left the variable holding
+    whatever the agent's shell exported — so the hook sent the user's API token to the
+    daemon as `?sid=`, and it landed in the access log.
+    """
+    url, received = capturing_server
+    env = dict(os.environ)
+    env["TINTAVIEW_URL"] = url
+    env["TINTAVIEW_CURL"] = "curl.exe"
+    env["TOKEN"] = "sk-supersecret"
+    env.pop("TINTAVIEW_HOME", None)
+    result = subprocess.run(
+        [str(TV_HOOK_CMD), "claude", "idle"],
+        input=b'{"unrelated":"x"}',
+        env=env,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert received == ["/v1/event/idle?agent=claude&sid=default"]
+    assert "supersecret" not in "".join(received)

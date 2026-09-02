@@ -15,6 +15,7 @@ broker is cheap enough to live inside the tray process, so it does.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -22,10 +23,17 @@ from . import __version__
 from .core import config as config_mod
 from .core import log as log_mod
 
+log = logging.getLogger(__name__)
+
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    cfg = config_mod.load()
+    # Logging FIRST, before anything that can fail. Under `pythonw.exe` there is no
+    # console and no stderr worth the name, so a config that raises on the way in used
+    # to be an invisible exit: no window, no message, nothing in the log. `log_mod.setup`
+    # deliberately needs nothing from the config (only `config_dir()`, which is paths and
+    # env), so this ordering costs nothing.
     log_mod.setup("tintaview")
+    cfg = config_mod.load()
 
     # Before anything can render a label: the stats providers build their row text on
     # worker threads started by the tray, and `TrayApp` itself applies this too (so an
@@ -50,10 +58,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     if args.headless:
         print(f"TintaView status broker listening on {server.url}")
-        try:
-            import threading
+        import threading
 
-            threading.Event().wait()
+        park = threading.Event()
+        # systemd/launchd stop the daemon with SIGTERM, and Ctrl+C sends SIGINT. Both
+        # have to reach the `finally` below, or the process dies holding the device and
+        # the lights stay on TintaView's last colour until the vendor app is restarted.
+        _install_signal_handlers(lambda *_a: park.set())
+        # `/quit` is the same shutdown, asked for over HTTP by `install/restart.py` or a
+        # second launch, so it lands on the same event rather than a second path.
+        server.on_quit = park.set
+        try:
+            park.wait()
         except KeyboardInterrupt:
             pass
         finally:
@@ -68,10 +84,44 @@ def _cmd_run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
 
+    # Qt installs no signal handling of its own, and a Python handler only runs when the
+    # interpreter next gets control — which the tray's periodic QTimer guarantees, so
+    # quitting the QApplication from the handler is enough. PySide6 is optional, so the
+    # import stays inside the handler and never at module scope.
+    def _quit_qt(*_args) -> None:
+        try:
+            from PySide6.QtWidgets import QApplication
+        except ImportError:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    _install_signal_handlers(_quit_qt)
+
     try:
         return run_tray(cfg, server)
     finally:
         server.stop()
+
+
+def _install_signal_handlers(handler) -> None:
+    """Install `handler` for SIGTERM and SIGINT, where the platform has them.
+
+    Windows has no SIGTERM worth the name and a service manager may hand us a process
+    whose signals can't be reset, so every step is guarded: failing to install one must
+    never stop TintaView from starting.
+    """
+    import signal
+
+    for name in ("SIGTERM", "SIGINT"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError, RuntimeError) as exc:  # not the main thread, etc.
+            log.debug("could not install a %s handler: %r", name, exc)
 
 
 def _defer_to_running_instance(cfg, headless: bool) -> int:
@@ -110,6 +160,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 def _cmd_hooks(args: argparse.Namespace) -> int:
     from .agents import base as agents_base
     from .install import hooks as hooks_mod
+    from .install import wsl
 
     cfg = config_mod.load()
     hook_bin = Path(args.hook_bin) if args.hook_bin else config_mod.hook_bin_path()
@@ -145,7 +196,13 @@ def _cmd_hooks(args: argparse.Namespace) -> int:
 
     for adapter in adapters:
         if args.action == "status":
-            state = hooks_mod.status(adapter, hook_bin, args.scope, project_dir)
+            # Resolved against `agents.<key>.home`, not the adapter's own default: on the
+            # Windows half of a WSL-split install the agent's config lives behind a UNC
+            # path and a bare adapter reports every agent as "missing" (AGENTS.md, "WSL
+            # split install").
+            state = hooks_mod.status(
+                wsl.configured_adapter(cfg, adapter), hook_bin, args.scope, project_dir
+            )
             print(f"{adapter.display_name:<14} {state}")
             continue
 
@@ -226,17 +283,30 @@ def _confirm(question: str) -> bool:
     return answer in ("y", "yes")
 
 
+def _add_headless(parser: argparse.ArgumentParser, *, default) -> None:
+    """Declare `--headless` on `parser`, in one place for all three spellings.
+
+    `tintaview --headless`, `tintaview run --headless` and `tintaview --headless run`
+    all have to mean the same thing. The last one used to start the tray: argparse
+    parses a subcommand into its own namespace and copies *every* key of it over the
+    one the top-level parser produced, so the `run` parser's `headless=False` default
+    overwrote the True the top-level flag had just set. `SUPPRESS` on the subparser is
+    the fix — the key only exists there when the flag was actually passed there.
+    """
+    parser.add_argument("--headless", action="store_true", default=default,
+                        help="run the status broker without the tray UI")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tintaview", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"TintaView {__version__}")
-    p.add_argument("--headless", action="store_true",
-                   help="run the status broker without the tray UI")
-    p.set_defaults(func=_cmd_run, headless=False)
+    _add_headless(p, default=False)
+    p.set_defaults(func=_cmd_run)
 
     sub = p.add_subparsers(dest="command")
 
     run = sub.add_parser("run", help="run the tray (default)")
-    run.add_argument("--headless", action="store_true")
+    _add_headless(run, default=argparse.SUPPRESS)
     run.set_defaults(func=_cmd_run)
 
     setup = sub.add_parser("setup", help="install or reconfigure TintaView")

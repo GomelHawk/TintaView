@@ -522,7 +522,9 @@ def test_restart_targets_the_pid_the_daemon_reports(monkeypatch):
     stopped: list[int] = []
     launched: list[bool] = []
     monkeypatch.setattr(restart_mod, "running_pid", lambda cfg: 4242)
-    monkeypatch.setattr(restart_mod, "_stop", lambda pid: stopped.append(pid) or True)
+    monkeypatch.setattr(
+        restart_mod, "_stop", lambda pid, cfg=None: stopped.append(pid) or True
+    )
     monkeypatch.setattr(restart_mod, "_launch", lambda: launched.append(True) or True)
 
     assert restart_mod.restart_if_running(Config()) is True
@@ -549,7 +551,7 @@ def test_restart_never_kills_the_wizards_own_process(monkeypatch):
     from tintaview.core.config import Config
     from tintaview.install import restart as restart_mod
 
-    def boom(pid):
+    def boom(pid, cfg=None):
         raise AssertionError("asked to kill the process running the wizard")
 
     monkeypatch.setattr(restart_mod, "running_pid", lambda cfg: os.getpid())

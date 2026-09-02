@@ -81,6 +81,37 @@ class AgentAdapter(abc.ABC):
         return []
 
 
+class NestedHooksAdapter(AgentAdapter):
+    """Adapters whose hook file uses Claude Code's nested shape.
+
+    Claude and Codex write byte-identical structures — each native event maps to a list
+    of ``{"matcher": ..., "hooks": [{"type": "command", ...}]}`` entries, with the
+    ``matcher`` key omitted entirely when the binding has none, and one entry per
+    binding so two matchers on the same event (Claude's ``Notification``) stay separate.
+    Only the *file path* differs, which each adapter still answers for itself.
+
+    Cursor is deliberately not here: its file is flat and versioned (no inner ``hooks``
+    list, no ``matcher``), so it renders its own.
+    """
+
+    def render_hooks(self, hook_command: str) -> dict:
+        hooks: dict[str, list[dict]] = {}
+        for binding in self.bindings:
+            entry: dict = {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{hook_command} {binding.event}",
+                        "timeout": binding.timeout,
+                    }
+                ]
+            }
+            if binding.matcher is not None:
+                entry = {"matcher": binding.matcher, **entry}
+            hooks.setdefault(binding.native_event, []).append(entry)
+        return {"hooks": hooks}
+
+
 _REGISTRY: dict[str, AgentAdapter] = {}
 
 

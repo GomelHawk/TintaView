@@ -44,6 +44,11 @@ STATUS_INSTALLED = "installed"
 STATUS_MISSING = "missing"
 STATUS_PARTIAL = "partial"
 STATUS_STALE_PATH = "stale-path"
+#: The file is there but we could not read or parse it — a permission problem, a lock,
+#: a sleeping WSL distro behind a UNC path, or corrupt JSON. Deliberately *not*
+#: `missing`: "missing" sends the user to `hooks install`, which would then plan a
+#: CREATE and overwrite a settings file full of their own hooks with only ours.
+STATUS_UNREADABLE = "unreadable"
 
 
 @dataclass
@@ -92,10 +97,16 @@ def hook_command(adapter: AgentAdapter, hook_bin: Path) -> str:
 
 
 def _read_json(path: Path) -> tuple[dict, str]:
-    """Return (parsed, original text). A missing file is an empty config, not an error."""
+    """Return (parsed, original text). A missing file is an empty config, not an error.
+
+    Only *not found* means empty. Every other `OSError` — no read permission, a file the
+    agent has locked, a UNC path into a WSL distro that is asleep — propagates, because
+    treating it as "empty" made `plan_install` choose CREATE and replace the user's real
+    settings.json with a file containing nothing but TintaView's hooks.
+    """
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
         return {}, ""
     if not text.strip():
         return {}, text
@@ -247,12 +258,16 @@ def status(
     ``stale-path`` matters more than it looks: it means our entries point at a hook
     binary that no longer exists (a moved or reinstalled TintaView), which fails silently
     at runtime and would otherwise just look like "the lights stopped working".
+
+    A file that exists but cannot be read or parsed is ``unreadable``, never ``missing``:
+    the drift check runs on a timer, and "missing" is the state that offers to rewrite
+    the file.
     """
     path = adapter.hooks_config_path(scope, project_dir)
     try:
         existing, before = _read_json(path)
-    except ValueError:
-        return STATUS_MISSING
+    except (OSError, ValueError):
+        return STATUS_UNREADABLE
     if not before:
         return STATUS_MISSING
 

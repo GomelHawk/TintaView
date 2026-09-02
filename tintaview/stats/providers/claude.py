@@ -9,7 +9,9 @@ Where the numbers come from:
     extra-usage / overage credit pool.
   - Fallback: if the endpoint fails (network, non-401/429 HTTP error, unreadable
     credentials, unrecognised shape), reconstruct approximate 5h/7d token + cost
-    totals from the transcript JSONL under ``<home>/projects/**/*.jsonl``.
+    totals from the transcript JSONL under ``<home>/projects/**/*.jsonl`` — reading
+    only files modified in the last week, from a per-file memo (``stats/_scan.py``),
+    and counting each streamed message once (see ``_parse_transcript``).
   - 401 means the login itself is dead — no fallback estimate is useful there, so we
     surface the exact message Claude Code's own CLI shows.
   - 429 means the endpoint is rate-limited, not that there's no data — falling back to
@@ -23,20 +25,20 @@ bundle with nothing extra installed.
 
 from __future__ import annotations
 
-import glob
 import json
 import logging
-import os
+import time
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from tintaview.core.config import AgentConfig, expand
 from tintaview.i18n import t
 
 from .. import format as fmt
+from .._scan import WEEK_S, FileMemo, recent_files
 from ..model import UsageProvider, UsageResult, UsageRow
 
 log = logging.getLogger(__name__)
@@ -53,12 +55,26 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-4-8": (5.0, 25.0),
     "claude-opus-4-7": (5.0, 25.0),
     "claude-opus-4-6": (5.0, 25.0),
+    "claude-fable-5-1": (10.0, 50.0),
     "claude-fable-5": (10.0, 50.0),
+    "claude-mythos-5-1": (10.0, 50.0),
     "claude-mythos-5": (10.0, 50.0),
     "claude-sonnet-5": (2.0, 10.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
 }
+
+#: Cache-read USD per MTok where it is *not* the usual 0.1x of the input rate. Fable 5.1
+#: reads its cache at a flat $0.25/MTok; at 0.1x it would be billed here at $1.00, a 4x
+#: overstatement on the token class that dominates a long agentic session.
+CACHE_READ_PER_MTOK: dict[str, float] = {
+    "claude-fable-5-1": 0.25,
+}
+
+#: Claude Code writes placeholder assistant messages under this model id (a cancelled
+#: turn, an interrupted stream). They carry no billable usage and would otherwise count
+#: as an "unknown model" and flip the header to the unpriced wording.
+SYNTHETIC_MODEL = "<synthetic>"
 
 #: What an unrecognised model costs. NOT (0.0, 0.0): a model released after this build
 #: would then contribute exactly nothing to the estimate, which reads as a plausible
@@ -270,55 +286,133 @@ def _norm_model(m: str | None) -> str | None:
 #: separate concerns and the label can be translated at render time.
 _WINDOW_LABELS = {"5h": "usage.claude.window_5h", "week": "usage.claude.window_week"}
 
+_WINDOWS_S = {"5h": 5 * 3600, "week": WEEK_S}
 
-def _reconstruct_from_jsonl(home: Path) -> dict[str, dict[str, float]]:
-    """Approximate 5h and 7d token totals + cost from transcript usage lines."""
-    now = datetime.now(UTC)
-    cutoffs = {"5h": now - timedelta(hours=5), "week": now - timedelta(days=7)}
+
+class _UsageRec(NamedTuple):
+    """One billable assistant message, as parsed out of a transcript."""
+
+    ts: float  # epoch seconds
+    model: str | None  # normalised (date snapshot stripped)
+    input: int
+    output: int
+    cache_read: int
+    cache_write: int
+
+
+#: Parsed transcripts, re-read only when a file's (mtime, size) changes. Module-level on
+#: purpose: the provider object is rebuilt per poll, the memo must outlive it.
+_MEMO: FileMemo[list[_UsageRec]] = FileMemo()
+
+
+def _parse_transcript(path: Path) -> list[_UsageRec]:
+    """Every billable message in one transcript, each counted once.
+
+    Claude Code writes a streamed assistant message as one JSONL line *per content
+    block* (text, tool_use, ...), and every one of those lines carries the message's
+    `usage`. Input and cache counts repeat identically across them; `output_tokens`
+    grows, the last line holding the final figure. Summing lines naively therefore
+    double-counts roughly half of all usage (measured: 3592 usage lines for 1737
+    distinct messages in one week). Lines are collapsed on `(message.id, requestId)`,
+    keeping the largest counts seen; a line with neither id (an older transcript shape)
+    is kept as its own record.
+    """
+    recs: list[_UsageRec] = []
+    index: dict[tuple[str | None, str | None], int] = {}
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if '"usage"' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = rec.get("timestamp")
+            msg = rec.get("message") or {}
+            usage = msg.get("usage")
+            if not ts or not isinstance(usage, dict):
+                continue
+            try:
+                when = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                continue
+            raw_model = msg.get("model")
+            if raw_model == SYNTHETIC_MODEL:
+                continue
+            new = _UsageRec(
+                ts=when,
+                model=_norm_model(raw_model),
+                input=int(usage.get("input_tokens") or 0),
+                output=int(usage.get("output_tokens") or 0),
+                cache_read=int(usage.get("cache_read_input_tokens") or 0),
+                cache_write=int(usage.get("cache_creation_input_tokens") or 0),
+            )
+            key = (msg.get("id"), rec.get("requestId"))
+            if key == (None, None):
+                recs.append(new)
+                continue
+            at = index.get(key)
+            if at is None:
+                index[key] = len(recs)
+                recs.append(new)
+                continue
+            old = recs[at]
+            recs[at] = old._replace(
+                input=max(old.input, new.input),
+                output=max(old.output, new.output),
+                cache_read=max(old.cache_read, new.cache_read),
+                cache_write=max(old.cache_write, new.cache_write),
+            )
+    return recs
+
+
+def _cost_of(rec: _UsageRec) -> tuple[float, bool]:
+    """``(usd, priced)`` for one message at the current `PRICING`."""
+    (in_r, out_r), priced = _rates_for(rec.model)
+    cache_r = CACHE_READ_PER_MTOK.get(rec.model or "", in_r * 0.1)
+    usd = (
+        rec.input * in_r
+        + rec.output * out_r
+        + rec.cache_read * cache_r
+        + rec.cache_write * in_r * 1.25
+    ) / 1_000_000
+    return usd, priced
+
+
+def _reconstruct_from_jsonl(home: Path, now: float | None = None) -> dict[str, dict[str, float]]:
+    """Approximate 5h and 7d token totals + cost from transcript usage lines.
+
+    Only files modified inside the 7-day window are opened (a file untouched for a week
+    cannot hold a line from it), and unchanged files are served from `_MEMO` — the two
+    halves of AGENTS.md's rule for transcript scans over a WSL-split UNC path. Cost is
+    priced at aggregation time, so a `PRICING` change never needs the memo invalidated.
+    """
+    now = time.time() if now is None else now
+    cutoffs = {k: now - secs for k, secs in _WINDOWS_S.items()}
     acc = {
         k: {"in": 0, "out": 0, "cache_r": 0, "cache_w": 0, "cost": 0.0, "unpriced": 0}
         for k in cutoffs
     }
 
-    pattern = os.path.join(home, "projects", "**", "*.jsonl")
-    for path in glob.glob(pattern, recursive=True):
+    files = recent_files(home / "projects", "*.jsonl", WEEK_S, now=now)
+    _MEMO.prune(files)
+    for path in files:
         try:
-            with open(path, encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    if '"usage"' not in line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    ts = rec.get("timestamp")
-                    msg = rec.get("message") or {}
-                    usage = msg.get("usage")
-                    if not ts or not usage:
-                        continue
-                    try:
-                        t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    model = _norm_model(msg.get("model"))
-                    (in_r, out_r), priced = _rates_for(model)
-                    itok = usage.get("input_tokens", 0) or 0
-                    otok = usage.get("output_tokens", 0) or 0
-                    crd = usage.get("cache_read_input_tokens", 0) or 0
-                    cwr = usage.get("cache_creation_input_tokens", 0) or 0
-                    cost = (itok * in_r + otok * out_r + crd * in_r * 0.1 + cwr * in_r * 1.25) / 1_000_000
-                    for k, cut in cutoffs.items():
-                        if t >= cut:
-                            a = acc[k]
-                            a["in"] += itok
-                            a["out"] += otok
-                            a["cache_r"] += crd
-                            a["cache_w"] += cwr
-                            a["cost"] += cost
-                            if not priced:
-                                a["unpriced"] += itok + otok + crd + cwr
+            recs = _MEMO.get(path, _parse_transcript)
         except OSError:
             continue
+        for rec in recs:
+            usd, priced = _cost_of(rec)
+            for k, cut in cutoffs.items():
+                if rec.ts >= cut:
+                    a = acc[k]
+                    a["in"] += rec.input
+                    a["out"] += rec.output
+                    a["cache_r"] += rec.cache_read
+                    a["cache_w"] += rec.cache_write
+                    a["cost"] += usd
+                    if not priced:
+                        a["unpriced"] += rec.input + rec.output + rec.cache_read + rec.cache_write
     return acc
 
 

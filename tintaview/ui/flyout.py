@@ -359,7 +359,9 @@ class Flyout(QtWidgets.QWidget):
         the screen immediately (see `_resize_to_content`) instead of only being correct
         the next time the flyout happens to be reopened."""
         self._anchor = anchor
-        self.adjustSize()
+        # No adjustSize() here: `_resize_to_content` pins the card with `setFixedSize`, so
+        # the size hint is already the fixed size and adjustSize is a no-op that only looks
+        # like it is doing something.
         self.move(self._clamped_position(anchor))
         self.show()
         self.raise_()
@@ -383,8 +385,16 @@ class Flyout(QtWidgets.QWidget):
         running right now ("Bash", "Edit"), "" when it isn't running anything nameable.
         Drawn beside the title, so it needs no resize either.
         """
-        self._status = dict(status or {})
-        self._tools = dict(tools or {})
+        new_status = dict(status or {})
+        new_tools = dict(tools or {})
+        # Early return, because the tray calls this on every 1.5 s state poll and the maps
+        # are identical between polls almost all of the time. `update()` schedules a full
+        # repaint of the card — every section, every row, every elided label — so calling
+        # it unconditionally repainted a card that had not changed ~40 times a minute.
+        if new_status == self._status and new_tools == self._tools:
+            return
+        self._status = new_status
+        self._tools = new_tools
         self.update()
 
     def _status_dot_color(self, agent: str) -> QtGui.QColor | None:

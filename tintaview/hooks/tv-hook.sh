@@ -29,30 +29,32 @@ fi
 : "${TINTAVIEW_URL:=http://127.0.0.1:8777}"
 : "${TINTAVIEW_CURL:=curl}"
 
-# Read stdin exactly once, bounded, and only if something is actually piped in — a
-# manual `tv-hook.sh claude working` at an interactive terminal must return instantly
-# rather than blocking on a stdin read that will never come.
-INPUT=""
-if [ ! -t 0 ]; then
-    INPUT=$(head -c 65536)
-fi
-
-# Pick the session-id field name for this agent, then pull its value out with sed.
-# This is deliberately not a JSON parser: it matches "<field>"<ws>:<ws>"<value>" and
-# takes the first hit, which is all the agents' flat hook payloads need.
+# Pick the session-id field name for this agent. This is deliberately not a JSON parser:
+# it matches "<field>"<ws>:<ws>"<value>" and takes the first hit, which is all the
+# agents' flat hook payloads need.
 if [ "$AGENT" = "cursor" ]; then
     FIELD="conversation_id"
 else
     FIELD="session_id"
 fi
 
-SID=$(printf '%s' "$INPUT" | sed -n "s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -n 1)
-[ -n "$SID" ] || SID="default"
-
-# Defensive URL-encoding: session ids are hex/uuid in practice, but a hook must never
-# be able to break the request line, so strip anything outside a safe character set
-# rather than trusting the agent's payload.
-SID=$(printf '%s' "$SID" | sed 's/[^A-Za-z0-9._-]//g')
+# ONE sed, reading stdin directly, doing the extraction *and* the safe-character check in
+# the same expression and quitting at the first hit. The previous shape — `head -c` into
+# a shell variable, then `printf | sed | head -n 1`, then `printf | sed` again — forked
+# about seven processes on every single tool call, on a script whose whole budget is
+# ~5 ms. It also needed `head -c`, which is not in every POSIX `head`.
+#
+# The value is matched against the safe character set rather than filtered through it, so
+# a payload carrying anything else fails to match and falls back to "default" — a hook
+# must never be able to break the request line, and quietly rewriting a session id into a
+# *different* valid one would silently merge two sessions into one bucket.
+#
+# Guarded on a tty because a manual `tv-hook.sh claude working` at an interactive terminal
+# must return instantly rather than block on a stdin read that will never come.
+SID=""
+if [ ! -t 0 ]; then
+    SID=$(sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
+fi
 [ -n "$SID" ] || SID="default"
 
 # Fire and forget: short timeout, discard output, and always exit 0 — whatever

@@ -97,7 +97,17 @@ def _find_newest(root: Path) -> Path:
     candidates = list(root.glob(f"*/options/{QUOTA_FILENAME}"))
     if not candidates:
         raise _QuotaFileError(f"no {QUOTA_FILENAME} found under {root}")
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    # The stat has to be tolerant: the IDE rewrites this file on its own sync schedule,
+    # so one of the candidates can vanish between the glob and the stat. A raw OSError
+    # here escapes the `_QuotaFileError` handler and takes the whole provider down —
+    # treating an unreadable candidate as infinitely old just picks another one.
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return max(candidates, key=_mtime)
 
 
 def detect() -> bool:

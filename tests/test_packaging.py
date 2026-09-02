@@ -47,6 +47,11 @@ def build_yml() -> str:
     return BUILD_YML.read_text(encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def sh() -> str:
+    return INSTALL_SH.read_text(encoding="utf-8")
+
+
 def test_both_installers_ship_in_the_repo():
     assert INSTALL_PS1.is_file(), "install.ps1 is the only supported Windows install path"
     assert INSTALL_SH.is_file()
@@ -133,3 +138,75 @@ def test_no_compiled_bundle_is_built_or_published(build_yml: str):
     )
     for forbidden in ("pyinstaller", "iscc", "innosetup", "inno setup", "setup.exe"):
         assert forbidden not in steps, f"build.yml should not run {forbidden!r}"
+
+
+# --------------------------------------------------------------------------- install.sh
+
+
+def test_install_sh_downloads_the_same_wheel_ci_publishes(sh: str, build_yml: str):
+    """Both installers fetch the wheel, because the wheel is what SHA256SUMS.txt covers.
+
+    GitHub's auto-generated `archive/refs/tags/<tag>.tar.gz` is produced on demand and is
+    not reproducible, so it can never appear in the checksums file and could therefore
+    never be verified — which is why install.sh used to install it unchecked.
+    """
+    assert 'WHEEL_NAME="tintaview-$VERSION-py3-none-any.whl"' in sh
+    assert "archive/refs/tags" not in sh, (
+        "the GitHub auto tarball is not in SHA256SUMS.txt and cannot be verified"
+    )
+    assert "cp dist/*.whl" in build_yml
+
+
+def test_install_sh_verifies_the_download_and_fails_closed(sh: str):
+    """The Linux/macOS twin of install.ps1's Assert-Checksum."""
+    assert "SHA256SUMS.txt" in sh
+    assert "sha256sum -c" in sh, "coreutils on Linux"
+    assert "shasum -a 256 -c" in sh, "macOS ships no sha256sum"
+    # A missing checksums file, a missing entry, a mismatch and a machine with neither
+    # hashing tool must *all* abort, and the download must be deleted rather than left
+    # around for something else to install.
+    for phrase in (
+        "Refusing to install an unverified build",           # checksums file unreachable
+        "refusing to install an unverified download",        # no entry for our file
+        "an unverified build is never installed",            # mismatch / no hashing tool
+    ):
+        assert phrase in sh, phrase
+    assert sh.count('rm -f "$_dir/$_file"') == 3, "every failure path deletes the download"
+
+
+def test_install_sh_never_falls_back_to_pypi(sh: str):
+    """TintaView is deliberately not on PyPI (AGENTS.md non-goals), so `tintaview` there
+    is an unclaimed, squattable name — installing from it would run a stranger's code."""
+    # Comments stripped first: the surviving comment explains *why* the fallback is gone
+    # and naming it there is the point. What must not come back is code that runs it.
+    code = "\n".join(line for line in sh.splitlines() if not line.strip().startswith("#"))
+    assert 'PKG_SPEC="tintaview"' not in code
+    assert "pip install tintaview" not in code
+
+
+def test_the_source_url_override_still_works_and_warns(sh: str):
+    """A developer override may bypass verification, but never quietly."""
+    assert "TINTAVIEW_SOURCE_URL" in sh
+    assert "WITHOUT any" in sh and "SHA-256 verification" in sh
+
+
+def test_both_installers_force_reinstall_to_repair_a_damaged_install(sh: str, ps1: str):
+    """`pip install --upgrade` compares version numbers and does nothing when they match.
+
+    Without the second pass, re-running the installer cannot repair a broken install and
+    a re-tagged release silently keeps the old code while reporting success (AGENTS.md,
+    "Packaging").
+    """
+    assert "--force-reinstall --no-deps" in ps1
+    assert "--force-reinstall --no-deps" in sh
+
+
+def test_install_sh_exits_zero_from_a_local_checkout(sh: str):
+    """An EXIT trap whose last command is false sets the script's exit status.
+
+    `[ -n "$WORKDIR" ] && rm -rf "$WORKDIR"` is false when nothing was downloaded (the
+    local-checkout path), so a fully successful install reported failure — and
+    `tintaview update` returns install.sh's exit code straight to the caller.
+    """
+    assert '[ -n "$WORKDIR" ] && rm -rf' not in sh
+    assert 'if [ -n "$WORKDIR" ]; then' in sh

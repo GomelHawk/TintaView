@@ -1,0 +1,9 @@
+# Actions are pinned (see build.yml, which pins to a commit SHA), and a pin is only as
+# good as whoever remembers to move it. Weekly PRs keep the pins current — and, more to
+# the point, surface the security advisories that are the reason for pinning at all.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

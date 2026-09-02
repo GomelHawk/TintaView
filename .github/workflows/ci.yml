@@ -2,9 +2,48 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
+# Every push to a PR branch used to start a full 9-leg matrix *and* leave the previous
+# one running. Superseded runs tell you nothing about the commit you just pushed, so
+# cancel them; the queue (and the account's Actions minutes) is finite.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes to the repo. Stated explicitly so a token leaked out of a
+# third-party action cannot push, tag or open anything.
+permissions:
+  contents: read
+
 jobs:
+  # Ruff and the generated-asset check are platform- and version-independent, so they ran
+  # nine times to say the same thing nine times — and a lint error failed every leg of the
+  # matrix, burying whichever real test failure was underneath it.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install TintaView (dev extra)
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      # Regenerates the assets into a temp directory and compares bytes, so a source
+      # re-export whose output nobody rebuilt fails here rather than shipping stale.
+      - name: Verify generated assets are up to date
+        run: python scripts/build_assets.py --check
+
   test:
     strategy:
       fail-fast: false
@@ -12,6 +51,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
+    # A hung Qt test would otherwise sit on a runner for six hours, nine times over.
+    timeout-minutes: 15
     env:
       # PySide6 must never try to open a real display/window server in CI — the tray and
       # flyout tests (tests/test_ui.py) construct real QWidgets, just never .show() one
@@ -23,6 +64,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          # There is no requirements.txt or lock file; pyproject.toml is what pins the
+          # dependency set, so it is what the cache key has to hash.
+          cache-dependency-path: pyproject.toml
 
       # Ubuntu's minimal runner image is missing a handful of shared libraries PySide6's
       # QtGui loads unconditionally (font/EGL/session-bus glue), even under the offscreen
@@ -37,11 +82,5 @@ jobs:
       - name: Install TintaView (dev + ui extras)
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,ui]"
 
-      - name: Lint (ruff)
-        run: ruff check .
-
       - name: Test (pytest)
         run: pytest -q
-
-      - name: Verify generated assets are up to date
-        run: python scripts/build_assets.py --check

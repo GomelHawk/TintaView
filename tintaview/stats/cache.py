@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 
 from tintaview.core.config import config_dir
@@ -73,6 +74,22 @@ class UsageCache:
         with self._lock:
             self._data[result.agent] = result
             self._save()
+
+    def update_many(self, results: Iterable[UsageResult]) -> None:
+        """Remember several results and persist them in **one** write.
+
+        `StatsService` used to call `update()` per provider, so a five-provider poll
+        rewrote this whole file five times — five temp files, five `os.replace`, five
+        chances for a reader to see a half-finished set. The atomicity is unchanged; only
+        the number of writes is.
+        """
+        with self._lock:
+            changed = False
+            for result in results:
+                self._data[result.agent] = result
+                changed = True
+            if changed:
+                self._save()
 
     def _save(self) -> None:
         # Called with `self._lock` already held.

@@ -11,10 +11,10 @@ from pathlib import Path
 
 from tintaview.core import events
 
-from .base import AgentAdapter, HookBinding, register
+from .base import HookBinding, NestedHooksAdapter, register
 
 
-class ClaudeAdapter(AgentAdapter):
+class ClaudeAdapter(NestedHooksAdapter):
     key = "claude"
     display_name = "Claude Code"
     session_id_field = "session_id"
@@ -41,26 +41,6 @@ class ClaudeAdapter(AgentAdapter):
             base = project_dir or Path.cwd()
             return base / ".claude" / "settings.json"
         return self.default_home() / "settings.json"
-
-    def render_hooks(self, hook_command: str) -> dict:
-        # Claude nests entries as {"matcher": ..., "hooks": [{"type": "command", ...}]}
-        # under each native event name; multiple matchers for one event (e.g.
-        # Notification) become separate entries in that event's list.
-        hooks: dict[str, list[dict]] = {}
-        for binding in self.bindings:
-            entry: dict = {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": f"{hook_command} {binding.event}",
-                        "timeout": binding.timeout,
-                    }
-                ]
-            }
-            if binding.matcher is not None:
-                entry = {"matcher": binding.matcher, **entry}
-            hooks.setdefault(binding.native_event, []).append(entry)
-        return {"hooks": hooks}
 
     def setup_notes(self) -> list[str]:
         return [

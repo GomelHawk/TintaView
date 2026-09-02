@@ -33,6 +33,23 @@ _CALL_TIMEOUT = 5.0
 _PROBE_TIMEOUT = 1.5
 _OPEN_ATTEMPTS = 3
 _RETRY_SLEEP = 0.3
+#: Consecutive `set_color`/`heartbeat` failures before the session URI is dropped. One
+#: failure is noise (Synapse briefly busy, a device asleep); three in a row means the
+#: session is gone — Synapse was restarted, or it expired the session on us. Dropping
+#: the URI is what lets `LightController._ensure_open_locked` open a fresh one on the
+#: next event; without it `active` stayed True forever and the lights never came back.
+_SESSION_FAILURE_LIMIT = 3
+
+
+def _is_session_gone(exc: urllib.error.HTTPError) -> bool:
+    """A 4xx on the session URI is fatal to the session, immediately.
+
+    Synapse answers 404 (and friends) once the session it handed us no longer exists —
+    restarted, expired, taken over. Retrying is pointless: only a fresh POST to the
+    discovery endpoint can produce a URI that works. A 5xx is a transient server-side
+    hiccup and goes through the normal consecutive-failure tally instead.
+    """
+    return 400 <= exc.code < 500
 
 
 class ChromaEngine(BaseEngine):
@@ -46,6 +63,8 @@ class ChromaEngine(BaseEngine):
         self._devices = tuple((cfg or ChromaConfig()).devices)
         self._url = url
         self._session_uri: str | None = None
+        #: Consecutive failed calls on the current session — see `_note_call_result`.
+        self._failures = 0
 
     @property
     def active(self) -> bool:
@@ -87,6 +106,7 @@ class ChromaEngine(BaseEngine):
             self.note_failure("Chroma unavailable (no Razer devices / Synapse not running?)")
             return False
         self._session_uri = uri
+        self._failures = 0
         self.clear_cooldown()
         log.info("Chroma session opened: %s", uri)
         return True
@@ -96,8 +116,14 @@ class ChromaEngine(BaseEngine):
             return
         try:
             self._put(self._session_uri + "/heartbeat", None, timeout=_CALL_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            log.debug("Chroma heartbeat rejected: %r", e)
+            self._note_call_result(False, fatal=_is_session_gone(e))
         except Exception as e:
             log.debug("Chroma heartbeat failed: %r", e)
+            self._note_call_result(False)
+        else:
+            self._note_call_result(True)
 
     def set_color(self, r: int, g: int, b: int) -> None:
         """Set every targeted device to one solid colour. Never raises."""
@@ -105,14 +131,42 @@ class ChromaEngine(BaseEngine):
             return  # no session (no devices / Chroma unavailable) — status still tracked
         bgr = (b << 16) | (g << 8) | r  # Chroma packs colour as BGR, not RGB
         payload = {"effect": "CHROMA_STATIC", "param": {"color": bgr}}
+        painted = False
+        fatal = False
         for device in self._devices:
             try:
                 self._put(self._session_uri + "/" + device, payload, timeout=_CALL_TIMEOUT)
                 # DEBUG, not INFO: the blink loop alone calls this twice a second and
                 # would otherwise dominate the log with routine, uninteresting lines.
                 log.debug("chroma set_color %s -> %s (bgr=%06x)", device, (r, g, b), bgr)
+                painted = True
+            except urllib.error.HTTPError as e:
+                log.debug("chroma set_color %s REJECTED: %r", device, e)
+                fatal = fatal or _is_session_gone(e)
             except Exception as e:
                 log.debug("chroma set_color %s FAILED: %r", device, e)
+        # One device refusing (asleep, unplugged) is not a dead session; every device
+        # refusing is, so the tally only counts a call where nothing painted at all.
+        self._note_call_result(painted, fatal=fatal and not painted)
+
+    def _note_call_result(self, ok: bool, *, fatal: bool = False) -> None:
+        """Track consecutive failures and drop the session once they say it is dead.
+
+        Failures used to be swallowed with `active` left True, so a restarted Synapse
+        was never noticed: the controller saw an open session, never called `open()`
+        again, and every PUT for the rest of the run went to a URI nobody was serving.
+        """
+        if ok:
+            self._failures = 0
+            return
+        self._failures += 1
+        if not fatal and self._failures < _SESSION_FAILURE_LIMIT:
+            return
+        uri = self._session_uri
+        self._session_uri = None
+        self._failures = 0
+        log.info("Chroma session %s is no longer answering — will reopen on the next "
+                 "status change", uri)
 
     def close(self) -> None:
         """Release the session. Synapse takes back its own lighting automatically."""
@@ -120,6 +174,7 @@ class ChromaEngine(BaseEngine):
             return
         uri = self._session_uri
         self._session_uri = None
+        self._failures = 0
         try:
             self._delete(uri, timeout=_CALL_TIMEOUT)
             log.info("Chroma session released: %s", uri)

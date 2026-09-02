@@ -131,12 +131,10 @@ def blockers(env: GHubEnvironment) -> list[str]:
             "Windows 11 Dynamic Lighting is on — turn it off in Settings > "
             "Personalization > Dynamic lighting"
         )
-    if env.integration == "off":
-        lines.append(
-            "TintaView lighting is disabled in G HUB — enable it under Integrations "
-            "(or Games)"
-        )
-    elif env.integration == "absent":
+    # No `== "off"` branch: `_integration_state` only ever answers "absent"/"unknown",
+    # because the per-app lighting-toggle field name in settings.db is unconfirmed and
+    # guessing it would report a working install as broken.
+    if env.integration == "absent":
         lines.append(
             "TintaView is not in G HUB's Integrations list yet — open one agent session "
             "so it registers, then enable lighting for it"

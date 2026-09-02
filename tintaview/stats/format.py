@@ -58,7 +58,9 @@ def reset_at_time(dt: datetime) -> str:
         "usage.reset.at_time",
         weekday=weekday_name(dt),
         hour12=dt.hour % 12 or 12,
-        hour24=dt.hour,
+        # Zero-padded: every 24-hour catalogue reads "09:05", not "9:05". (hour12 is
+        # deliberately NOT padded — a 12-hour clock writes "9:05 PM".)
+        hour24=f"{dt.hour:02d}",
         minute=f"{dt.minute:02d}",
         ampm=t("usage.ampm.am") if dt.hour < 12 else t("usage.ampm.pm"),
     )

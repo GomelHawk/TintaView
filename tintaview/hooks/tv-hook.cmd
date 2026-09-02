@@ -44,7 +44,14 @@ REM Grab one line of piped stdin, if any. `set /p` returns immediately (LINE sta
 REM undefined) when stdin is already at EOF, which is what an empty pipe looks like;
 REM it only blocks waiting for a line on a real interactive console with nothing
 REM redirected in, same as any other `set /p` in a batch script.
+REM Every variable this script tests with `if defined` must be cleared first: a hook
+REM inherits the agent's whole environment, so an unset TOKEN/AFTER/CHECK would silently
+REM pick up whatever the user happens to export under that name — and TOKEN in particular
+REM is very often a real API secret, which would then be sent as ?sid=.
 set "LINE="
+set "TOKEN="
+set "AFTER="
+set "CHECK="
 set /p LINE=
 
 set "SID=default"

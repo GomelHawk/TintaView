@@ -32,6 +32,13 @@ log = logging.getLogger(__name__)
 _PROBE_LABEL = "TintaView-probe"
 _OPEN_LABEL = "TintaView"
 
+#: Consecutive `set_color` calls in which no device could be written before the
+#: connection is dropped. OpenRGB's server is routinely restarted (it is a desktop app
+#: like any other), and a dead socket used to leave `active` True forever: the
+#: controller saw an open session, never called `open()` again, and the rig stayed on
+#: whatever colour it had when the server went away.
+_SET_FAILURE_LIMIT = 3
+
 
 class OpenRGBEngine(BaseEngine):
     """Drives non-Chroma RGB devices through the OpenRGB SDK. RGB colour order."""
@@ -48,6 +55,8 @@ class OpenRGBEngine(BaseEngine):
         # anything. Keyed by identity, not name/index: names collide across devices of
         # the same model and this only needs to live for one open()/close() pair.
         self._snapshot: dict[int, tuple] = {}
+        #: Consecutive set_color calls where nothing could be written — see `_note_set`.
+        self._failures = 0
 
     @property
     def active(self) -> bool:
@@ -165,6 +174,7 @@ class OpenRGBEngine(BaseEngine):
         self._client = client
         self._targets = candidates
         self._snapshot = snapshot
+        self._failures = 0
         self.clear_cooldown()
         log.info("OpenRGB session opened: %d device(s)", len(candidates))
         return True
@@ -181,13 +191,41 @@ class OpenRGBEngine(BaseEngine):
         except ImportError:
             return
         color = RGBColor(r, g, b)  # RGB order here — do not reuse Chroma's BGR packing
+        painted = False
         for device in self._targets:
             try:
                 device.set_color(color)
                 # DEBUG, not INFO: the blink loop calls this twice a second.
                 log.debug("openrgb set_color %s -> %s", device.name, (r, g, b))
+                painted = True
             except Exception as e:
                 log.debug("openrgb set_color %s FAILED: %r", device.name, e)
+        # One device refusing is not a dead server; every device refusing, repeatedly,
+        # is exactly what a restarted OpenRGB looks like from here.
+        self._note_set(painted)
+
+    def _note_set(self, painted: bool) -> None:
+        """Drop the connection after `_SET_FAILURE_LIMIT` writes that reached nothing.
+
+        No restore is attempted: the socket these devices were reached through is what
+        just failed, so the only thing left to do is let `active` read False and have
+        the controller open a fresh connection (and take a fresh snapshot) next time.
+        """
+        if painted:
+            self._failures = 0
+            return
+        self._failures += 1
+        if self._failures < _SET_FAILURE_LIMIT:
+            return
+        client = self._client
+        self._client = None
+        self._targets = []
+        self._snapshot = {}
+        self._failures = 0
+        log.info("OpenRGB stopped accepting writes — dropping the connection; it will "
+                 "be reopened on the next status change")
+        if client is not None:
+            self._disconnect(client)
 
     def close(self) -> None:
         """Best-effort restore of whatever open() overwrote, then disconnect."""
@@ -199,6 +237,7 @@ class OpenRGBEngine(BaseEngine):
         self._client = None
         self._targets = []
         self._snapshot = {}
+        self._failures = 0
 
         if self._cfg.restore_on_release:
             for device in targets:

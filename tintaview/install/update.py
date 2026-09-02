@@ -374,6 +374,10 @@ def _update_windows(version: str, assets: list[dict[str, Any]]) -> int:
     # of the venv it is about to replace, and on `tintaview update` from the tray or the
     # installed CLI that process is *this* one. Waiting on the script would mean waiting
     # for something that is about to kill the waiter.
+    #
+    # Which is also why the download's temp directory is deliberately NOT cleaned up here,
+    # unlike `_update_posix`: the detached script has not run yet, and deleting the .ps1
+    # out from under it would abort the update. The OS reclaims %TEMP% instead.
     try:
         subprocess.Popen(argv)
     except OSError as exc:
@@ -390,13 +394,27 @@ def _update_posix(version: str, assets: list[dict[str, Any]]) -> int:
     if script_path is None:
         return 1
 
-    print(f"Running `sh {script_path}` — it is idempotent and upgrades TintaView in place.")
+    argv = ["sh", str(script_path)]
+    prefix = _install_prefix()
+    if prefix is not None:
+        # Same reason as the Windows `-Prefix`: install.sh defaults to
+        # ~/.local/share/tintaview, so a `--prefix`ed install that updated without this
+        # got a *second* install alongside the one it was upgrading, and kept running the
+        # old code.
+        argv += ["--prefix", str(prefix)]
+
+    print(f"Running `{' '.join(argv[1:])}` — it is idempotent and upgrades TintaView in place.")
     print("Config and every agent's hook configuration are untouched by this — the hook path is stable.")
     try:
-        result = subprocess.run(["sh", str(script_path)], check=False)
+        result = subprocess.run(argv, check=False)
     except OSError as exc:
         print(f"Could not run the install script: {exc}")
         return 1
+    finally:
+        # Synchronous, so by here the script has been read and run — unlike the detached
+        # Windows path, which must leave its copy on disk. `mkdtemp` is never cleaned up
+        # by anyone else, and `tintaview update` runs on a timer from the tray.
+        shutil.rmtree(script_path.parent, ignore_errors=True)
     return result.returncode
 
 
@@ -416,7 +434,10 @@ def _check_failure_reason() -> str:
         headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT},
     )
     try:
-        urllib.request.urlopen(req, timeout=10.0)
+        # `with`, so the connection is closed even on the success path — this runs from
+        # the tray's update check, where a leaked socket per failed check adds up.
+        with urllib.request.urlopen(req, timeout=10.0):
+            pass
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return (

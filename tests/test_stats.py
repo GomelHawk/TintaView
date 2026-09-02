@@ -23,8 +23,10 @@ from pathlib import Path
 import pytest
 
 from tintaview.core.config import AgentConfig, Config
+from tintaview.stats import _scan as scan_mod
 from tintaview.stats.cache import UsageCache
 from tintaview.stats.model import UsageProvider, UsageResult, UsageRow
+from tintaview.stats.providers import codex as codex_mod
 from tintaview.stats.providers import copilot as copilot_mod
 from tintaview.stats.providers import jetbrains as jetbrains_mod
 from tintaview.stats.providers.claude import ClaudeUsageProvider
@@ -375,14 +377,35 @@ class TestClaudeAuthAndRateLimit:
 # --------------------------------------------------------------------------- Codex
 
 
-def _write_codex_session(home: Path, name: str, content: str, mtime: float | None = None) -> Path:
-    session_dir = home / "sessions" / "2026" / "07" / "24"
+def _write_codex_session(
+    home: Path,
+    name: str,
+    content: str,
+    mtime: float | None = None,
+    when: datetime | None = None,
+) -> Path:
+    """Write one rollout file into Codex's real `sessions/YYYY/MM/DD` layout.
+
+    `when` defaults to today, because that is where a session Codex is actually writing
+    to lands — and the provider prunes date directories whose whole range is outside the
+    7-day window before it ever lists them.
+    """
+    day = (when or datetime.now(UTC)).astimezone()
+    session_dir = home / "sessions" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
     session_dir.mkdir(parents=True, exist_ok=True)
     path = session_dir / name
     path.write_text(content, encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
+
+
+def _codex_token_record(ts: datetime, total: int, **extra) -> str:
+    """One `token_count` line with a cumulative `total_token_usage` of `total`."""
+    info = {"total_token_usage": {"input_tokens": total, "output_tokens": 0, "total_tokens": total}}
+    payload = {"type": "token_count", "info": info, "rate_limits": {"primary": None, "secondary": None}}
+    payload.update(extra)
+    return json.dumps({"timestamp": _iso(ts), "type": "event_msg", "payload": payload})
 
 
 class TestCodex:
@@ -465,6 +488,211 @@ class TestCodex:
         result = CodexUsageProvider().fetch(AgentConfig(home=str(tmp_path / "does_not_exist")))
         assert not result.ok
         assert result.error
+
+    def test_the_five_hour_row_counts_only_what_the_session_spent_in_those_hours(self, tmp_path):
+        """`total_token_usage` is cumulative for the whole session.
+
+        A session opened three days ago and touched ten minutes ago belongs in the
+        5-hour window — but only for what it spent there. Adding its running total
+        charged the 5h row with every token the session had ever used, which is how
+        "Last 5 hours" ended up larger than "Last 7 days".
+        """
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        lines = [
+            _codex_token_record(now - timedelta(hours=30), 1_000_000),   # long before the window
+            _codex_token_record(now - timedelta(hours=6), 1_800_000),    # the baseline
+            _codex_token_record(now - timedelta(minutes=10), 1_850_000),  # 50k spent inside 5h
+        ]
+        _write_codex_session(home, "rollout-long.jsonl", "\n".join(lines) + "\n")
+
+        result = CodexUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert result.ok
+        by_label = {row.label: row for row in result.rows}
+        assert by_label["Last 5 hours"].right == "50k tokens"   # 1,850,000 - 1,800,000
+        assert by_label["Last 7 days"].right == "1.85M tokens"  # the session's whole total
+
+    def test_a_session_that_started_inside_the_window_counts_in_full(self, tmp_path):
+        """No snapshot from before the cutoff means the running total IS the window."""
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        lines = [
+            _codex_token_record(now - timedelta(hours=1), 20_000),
+            _codex_token_record(now - timedelta(minutes=2), 90_000),
+        ]
+        _write_codex_session(home, "rollout-fresh.jsonl", "\n".join(lines) + "\n")
+
+        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).rows}
+        assert by_label["Last 5 hours"].right == "90k tokens"
+
+    def test_a_session_last_touched_before_the_window_is_not_in_the_five_hour_row(self, tmp_path):
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        lines = [
+            _codex_token_record(now - timedelta(hours=30), 100_000),
+            _codex_token_record(now - timedelta(hours=8), 400_000),
+        ]
+        _write_codex_session(home, "rollout-stale.jsonl", "\n".join(lines) + "\n")
+
+        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).rows}
+        assert by_label["Last 5 hours"].right == "0k tokens"
+        assert by_label["Last 7 days"].right == "400k tokens"
+
+    def test_a_counter_that_goes_backwards_never_subtracts(self, tmp_path):
+        """A resumed session can re-report from scratch; a negative delta would eat
+        another session's usage out of the same bucket."""
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        lines = [
+            _codex_token_record(now - timedelta(hours=6), 900_000),
+            _codex_token_record(now - timedelta(minutes=5), 10_000),
+        ]
+        _write_codex_session(home, "rollout-reset.jsonl", "\n".join(lines) + "\n")
+
+        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).rows}
+        assert by_label["Last 5 hours"].right == "0k tokens"
+
+    def test_an_unchanged_file_is_not_re_read_on_the_next_poll(self, tmp_path, monkeypatch):
+        """The memo is the whole point of `_scan.FileMemo` here: over a WSL-split UNC
+        path a re-read is a round trip per session file, every five minutes."""
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        _write_codex_session(home, "rollout-1.jsonl",
+                             _codex_token_record(now - timedelta(minutes=5), 5_000) + "\n")
+
+        parsed: list[Path] = []
+        real_scan = codex_mod._scan_tail
+        monkeypatch.setattr(codex_mod, "_scan_tail",
+                            lambda path: parsed.append(path) or real_scan(path))
+        # A fresh memo, so this test does not depend on what an earlier one cached.
+        monkeypatch.setattr(codex_mod, "_TAIL_MEMO", scan_mod.FileMemo())
+
+        provider = CodexUsageProvider()
+        assert provider.fetch(AgentConfig(home=str(home))).ok
+        assert len(parsed) == 1
+        assert provider.fetch(AgentConfig(home=str(home))).ok
+        assert len(parsed) == 1, "an unchanged rollout file was parsed twice"
+
+    def test_a_file_that_grew_is_re_read(self, tmp_path, monkeypatch):
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        path = _write_codex_session(
+            home, "rollout-1.jsonl", _codex_token_record(now - timedelta(minutes=9), 5_000) + "\n"
+        )
+        monkeypatch.setattr(codex_mod, "_TAIL_MEMO", scan_mod.FileMemo())
+        provider = CodexUsageProvider()
+        first = provider.fetch(AgentConfig(home=str(home)))
+        assert first.ok
+
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(_codex_token_record(now - timedelta(minutes=1), 700_000) + "\n")
+        os.utime(path, (time.time(), time.time()))
+
+        by_label = {r.label: r for r in provider.fetch(AgentConfig(home=str(home))).rows}
+        assert by_label["Last 7 days"].right == "700k tokens"
+
+    def test_the_memo_forgets_files_that_left_the_window(self, tmp_path, monkeypatch):
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        _write_codex_session(home, "rollout-1.jsonl",
+                             _codex_token_record(now - timedelta(minutes=5), 1_000) + "\n")
+        memo = scan_mod.FileMemo()
+        monkeypatch.setattr(codex_mod, "_TAIL_MEMO", memo)
+
+        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).ok
+        assert len(memo) == 1
+
+        stale = _write_codex_session(home, "rollout-2.jsonl",
+                                     _codex_token_record(now - timedelta(minutes=5), 1_000) + "\n")
+        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).ok
+        assert len(memo) == 2
+
+        old = time.time() - 30 * 86400
+        os.utime(stale, (old, old))
+        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).ok
+        assert len(memo) == 1, "the memo kept a file that dropped out of the 7-day window"
+
+
+# --------------------------------------------------------------------------- Codex date dirs
+
+
+class TestCodexDateDirPruning:
+    """`sessions/` gains a directory per day and never loses one.
+
+    Globbing `**/rollout-*.jsonl` re-walked every day the user had ever run Codex on
+    every 5-minute poll, over a UNC path where each directory is a round trip. The
+    pruner has to be aggressive enough to matter and conservative enough never to drop a
+    file whose mtime is inside the window.
+    """
+
+    def _skip(self, cutoff_days_ago: float = 7.0):
+        root = Path("/codex/sessions")
+        return codex_mod._make_skip_dir(root, time.time() - cutoff_days_ago * 86400), str(root)
+
+    def test_a_year_entirely_before_the_window_is_pruned(self):
+        skip, root = self._skip()
+        assert skip(root, "2019") is True
+
+    def test_the_current_year_month_and_day_are_never_pruned(self):
+        skip, root = self._skip()
+        today = datetime.now().astimezone()
+        assert skip(root, f"{today.year:04d}") is False
+        assert skip(f"{root}/{today.year:04d}", f"{today.month:02d}") is False
+        assert skip(f"{root}/{today.year:04d}/{today.month:02d}", f"{today.day:02d}") is False
+
+    def test_yesterday_survives_a_month_boundary(self):
+        """The month directory of a day inside the window must not be pruned just
+        because most of that month is outside it."""
+        skip, root = self._skip()
+        for days in range(0, 7):
+            day = datetime.now().astimezone() - timedelta(days=days)
+            year, month = f"{day.year:04d}", f"{day.month:02d}"
+            assert skip(root, year) is False, day
+            assert skip(f"{root}/{year}", month) is False, day
+            assert skip(f"{root}/{year}/{month}", f"{day.day:02d}") is False, day
+
+    def test_a_day_directory_keeps_a_grace_period(self):
+        """Codex names the directory for when the session *started*; one left open
+        overnight keeps appending, so its file's mtime outlives its directory's date."""
+        skip, root = self._skip()
+        edge = datetime.now().astimezone() - timedelta(days=8)
+        parent = f"{root}/{edge.year:04d}/{edge.month:02d}"
+        assert skip(parent, f"{edge.day:02d}") is False
+        ancient = datetime.now().astimezone() - timedelta(days=40)
+        assert skip(f"{root}/{ancient.year:04d}/{ancient.month:02d}", f"{ancient.day:02d}") is True
+
+    @pytest.mark.parametrize("name", ["backup", "2019x", "19", "not-a-date", "202"])
+    def test_a_directory_that_is_not_a_date_is_never_pruned(self, name):
+        """A name we do not recognise might be anything; losing real sessions is far
+        worse than walking a few extra directories."""
+        skip, root = self._skip()
+        assert skip(root, name) is False
+
+    @pytest.mark.parametrize("parts,ok", [
+        (["2020", "13"], False),   # month 13
+        (["2020", "02", "31"], False),  # no such day
+        (["2020", "12"], True),    # December rolls the year over, not the month
+    ])
+    def test_impossible_dates_are_not_pruned(self, parts, ok):
+        assert (codex_mod._date_dir_end(parts) is not None) is ok
+
+    def test_pruned_directories_are_never_listed(self, tmp_path):
+        """End to end: an old date tree must not even be walked."""
+        home = tmp_path / "codex_home"
+        now = datetime.now(UTC)
+        _write_codex_session(home, "rollout-today.jsonl",
+                             _codex_token_record(now - timedelta(minutes=1), 1_000) + "\n")
+        # A file with a *fresh* mtime sitting in a two-year-old date directory: it is
+        # pruned by its path, which is exactly the trade the grace period bounds.
+        ancient = home / "sessions" / "2019" / "01" / "02"
+        ancient.mkdir(parents=True)
+        (ancient / "rollout-ancient.jsonl").write_text(
+            _codex_token_record(now, 9_000_000) + "\n", encoding="utf-8"
+        )
+
+        files = codex_mod._recent_session_files(home)
+        assert [p.name for p in files] == ["rollout-today.jsonl"]
 
 
 # --------------------------------------------------------------------------- Cursor
@@ -1002,6 +1230,35 @@ class TestUsageCache:
         assert cache.get("codex") is None
 
 
+    def test_update_many_persists_every_result_in_one_write(self, tmp_path, monkeypatch):
+        """One file rewrite per poll, not one per provider.
+
+        `StatsService` used to call `update()` from each provider's thread, so a
+        five-provider poll produced five temp files and five `os.replace` calls on the
+        same path — five chances for a reader to catch a half-finished set.
+        """
+        path = tmp_path / "usage_cache.json"
+        cache = UsageCache(path=path)
+        saves: list[int] = []
+        real_save = cache._save
+        monkeypatch.setattr(cache, "_save", lambda: saves.append(1) or real_save())
+
+        cache.update_many([
+            UsageResult(agent="claude", rows=[UsageRow(label="a", pct=1.0)]),
+            UsageResult(agent="codex", rows=[UsageRow(label="b", pct=2.0)]),
+        ])
+
+        assert saves == [1]
+        reloaded = UsageCache(path=path)
+        assert reloaded.get("claude") is not None
+        assert reloaded.get("codex") is not None
+
+    def test_update_many_with_nothing_to_store_writes_nothing(self, tmp_path):
+        path = tmp_path / "usage_cache.json"
+        UsageCache(path=path).update_many([])
+        assert not path.exists()
+
+
 # --------------------------------------------------------------------------- service
 
 
@@ -1129,6 +1386,68 @@ class TestStatsService:
         )
         results = service.fetch_all()
         assert set(results) == {"claude"}
+
+    def test_a_poll_rewrites_the_cache_file_once(self, tmp_path, monkeypatch):
+        """Not once per provider — see `TestUsageCache.test_update_many_...`."""
+        def ok(agent_config, timeout):
+            return UsageResult(agent="x", rows=[UsageRow(label="x", pct=1.0)], source="official")
+
+        cache = UsageCache(path=tmp_path / "cache.json")
+        saves: list[int] = []
+        real_save = cache._save
+        monkeypatch.setattr(cache, "_save", lambda: saves.append(1) or real_save())
+
+        cfg = self._cfg(["claude", "codex", "cursor"])
+        service = StatsService(cfg, cache=cache, providers={
+            k: _FakeProvider(k, ok) for k in ("claude", "codex", "cursor")
+        })
+        service.fetch_all()
+
+        assert saves == [1], f"{len(saves)} cache writes for one poll"
+
+    def test_a_failed_provider_does_not_rewrite_the_cache_with_its_own_cached_copy(
+        self, tmp_path, monkeypatch
+    ):
+        """A `source="cache"` result is what was already on disk — writing it back is
+        pure I/O for no change, and this poll runs every five minutes forever."""
+        state = {"mode": "ok"}
+
+        def flaky(agent_config, timeout):
+            if state["mode"] == "ok":
+                return UsageResult(agent="claude", rows=[UsageRow(label="x", pct=7.0)], source="official")
+            return UsageResult(agent="claude", error="temporary failure")
+
+        cache = UsageCache(path=tmp_path / "cache.json")
+        cfg = self._cfg(["claude"])
+        service = StatsService(cfg, cache=cache, providers={"claude": _FakeProvider("claude", flaky)})
+        service.fetch_all()
+
+        saves: list[int] = []
+        real_save = cache._save
+        monkeypatch.setattr(cache, "_save", lambda: saves.append(1) or real_save())
+        state["mode"] = "fail"
+        assert service.fetch_all()["claude"].source == "cache"
+        assert saves == []
+
+    def test_the_poll_never_creates_an_agent_table(self, tmp_path):
+        """`Config.agent()` inserts as a side effect of being asked, from whichever
+        stats thread got there first — while `dumps()` iterates that same dict on the
+        GUI thread during a settings save. The poll must use `agent_config()`."""
+        cfg = Config()
+        cfg.enabled_agents = ["claude", "codex"]
+        assert cfg.agents == {}
+
+        service = StatsService(
+            cfg,
+            cache=UsageCache(path=tmp_path / "cache.json"),
+            providers={
+                k: _FakeProvider(k, lambda c, t: UsageResult(agent="x", rows=[UsageRow(label="x", pct=1.0)]))
+                for k in ("claude", "codex")
+            },
+        )
+        service.fetch_all()
+
+        assert cfg.agents == {}, "the stats poll mutated the config"
 
 
 def test_codex_window_label_follows_window_minutes():

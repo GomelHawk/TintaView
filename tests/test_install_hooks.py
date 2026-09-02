@@ -213,3 +213,47 @@ def test_status_reports_missing_partial_installed_and_stale(cfg_file: Path):
     # A moved TintaView install: entries exist but point at a path we no longer use.
     H.apply(H.plan_install(adapter, HOOK_BIN))
     assert H.status(adapter, Path("/somewhere/else/tv-hook.sh")) == H.STATUS_STALE_PATH
+
+
+def test_status_reports_unreadable_for_corrupt_json(cfg_file: Path):
+    """Corrupt JSON is `unreadable`, never `missing`.
+
+    `missing` is the state that sends the user (and the settings dialog) to the install
+    flow, which would plan a CREATE over a file we simply failed to parse.
+    """
+    cfg_file.write_text("{ this is not json")
+    assert H.status(NestedAdapter(cfg_file), HOOK_BIN) == H.STATUS_UNREADABLE
+
+
+def test_status_reports_unreadable_when_the_file_cannot_be_opened(cfg_file: Path, monkeypatch):
+    """A locked file or a sleeping WSL distro's UNC path raises OSError, not FileNotFound.
+
+    Simulated rather than chmod'ed: `chmod` is a no-op on Windows and root ignores it.
+    """
+    cfg_file.write_text('{"hooks": {}}')
+
+    def boom(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    assert H.status(NestedAdapter(cfg_file), HOOK_BIN) == H.STATUS_UNREADABLE
+
+
+def test_plan_install_refuses_to_treat_an_unreadable_file_as_empty(cfg_file: Path, monkeypatch):
+    """The bug this guards: every OSError meant "empty config", so planning chose CREATE
+    and the merge replaced a settings.json full of the user's own hooks with only ours."""
+    cfg_file.write_text('{"hooks": {"PreToolUse": [{"hooks": [{"command": "mine"}]}]}}')
+
+    def boom(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(OSError):
+        H.plan_install(NestedAdapter(cfg_file), HOOK_BIN)
+
+
+def test_missing_file_is_still_an_empty_config(cfg_file: Path):
+    cfg_file.unlink(missing_ok=True)
+    adapter = NestedAdapter(cfg_file)
+    assert H.status(adapter, HOOK_BIN) == H.STATUS_MISSING
+    assert H.plan_install(adapter, HOOK_BIN).action == H.ACTION_CREATE

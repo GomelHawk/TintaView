@@ -34,7 +34,9 @@ if TYPE_CHECKING:  # pragma: no cover - types only
 log = logging.getLogger(__name__)
 
 STATE_POLL_MS = 1500
-ANIM_TICK_MS = 100  # working-pulse redraw rate
+# Working-pulse redraw rate. Was 100 ms: the breathe is quantised to icons.PULSE_STEPS
+# levels, so a faster tick mostly re-set an icon the shell had already drawn.
+ANIM_TICK_MS = 200
 USAGE_MIN_REFRESH_S = 30.0  # ignore flyout-open refreshes more frequent than this
 CLICK_REOPEN_GUARD_S = 0.25  # guards against "the click that just closed it" reopening it
 ICON_SIZE = 128
@@ -124,20 +126,66 @@ def run_console_setup() -> None:
         QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.wizard.open_failed"))
 
 
-class StatsWorker(QtCore.QObject):
+class _GuardedWorker(QtCore.QObject):
+    """Base for the tray's background workers: **one run at a time**, later requests
+    dropped rather than queued.
+
+    Everything below is triggered by something the user can repeat freely (the "Refresh
+    usage" menu item, "Check for updates", a timer that also fires on demand) and each run
+    is seconds of real I/O. Unguarded they stack: several concurrent Cursor RPCs against a
+    ~300 MB `state.vscdb`, or — worse — two `doctor` runs whose process-global
+    `redirect_stdout` unwinds in the wrong order and leaves `sys.stdout` pointing at a dead
+    buffer for the rest of the process's life. A non-blocking lock makes a request that
+    arrives mid-run a no-op, which is what "refresh" means to a user anyway.
+
+    `_run()` is deliberately callable directly (the tests do): the lock lives in `_start`,
+    not in the body, so a synchronous call is never asked to release a lock it never took.
+    """
+
+    #: Thread name for the default `fetch()` entry point.
+    _thread_name = "tv-tray-worker"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._inflight = threading.Lock()
+
+    def _start(self, fn: Any, name: str) -> bool:
+        """Run `fn` on a daemon thread unless one is already in flight. True if started."""
+        if not self._inflight.acquire(blocking=False):
+            return False
+
+        def run() -> None:
+            try:
+                fn()
+            finally:
+                self._inflight.release()
+
+        try:
+            threading.Thread(target=run, daemon=True, name=name).start()
+        except Exception:
+            self._inflight.release()
+            raise
+        return True
+
+    def fetch(self) -> None:
+        self._start(self._run, self._thread_name)
+
+    def _run(self) -> None:  # pragma: no cover - always overridden
+        raise NotImplementedError
+
+
+class StatsWorker(_GuardedWorker):
     """Runs `StatsService.fetch_all()` off the GUI thread — it's real network/disk
     I/O (Claude/Codex JSONL scans, a Cursor RPC call) and must never block painting.
     """
 
     results_ready = QtCore.Signal(dict)  # dict[str, UsageResult]
+    _thread_name = "tv-tray-stats"
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
         self._cfg = cfg
         self._svc: Any = None  # built lazily, off the GUI thread, on first use
-
-    def fetch(self) -> None:
-        threading.Thread(target=self._run, daemon=True, name="tv-tray-stats").start()
 
     def _run(self) -> None:
         try:
@@ -147,6 +195,9 @@ class StatsWorker(QtCore.QObject):
             # time instead of at first use.
             from tintaview.stats.service import StatsService
 
+            # Built here rather than in __init__ and, thanks to `_GuardedWorker`, only
+            # ever by one thread at a time — two overlapping fetches used to be able to
+            # construct (and cache-open) two services.
             if self._svc is None:
                 self._svc = StatsService(self._cfg)
             results = self._svc.fetch_all()
@@ -158,20 +209,18 @@ class StatsWorker(QtCore.QObject):
         self.results_ready.emit(results)
 
 
-class StateWorker(QtCore.QObject):
+class StateWorker(_GuardedWorker):
     """HTTP fallback path only — see module docstring. Direct `state_payload()`
     reads happen straight on the GUI thread in `TrayApp._poll_state`, since that
     call is documented as an in-process lock + dict build, not I/O.
     """
 
     state_ready = QtCore.Signal(dict)
+    _thread_name = "tv-tray-state-http"
 
     def __init__(self, server: Any) -> None:
         super().__init__()
         self._server = server
-
-    def fetch(self) -> None:
-        threading.Thread(target=self._run, daemon=True, name="tv-tray-state-http").start()
 
     def _run(self) -> None:
         import json
@@ -186,7 +235,7 @@ class StateWorker(QtCore.QObject):
         self.state_ready.emit(payload)
 
 
-class UpdateCheckWorker(QtCore.QObject):
+class UpdateCheckWorker(_GuardedWorker):
     """One-shot background check against the GitHub Releases API, off the GUI thread —
     same reasoning as `StatsWorker`: real network I/O must never block painting.
 
@@ -196,6 +245,7 @@ class UpdateCheckWorker(QtCore.QObject):
     """
 
     update_available = QtCore.Signal(str, str)  # (latest_tag, current_version)
+    _thread_name = "tv-tray-update-check"
 
     def __init__(self, channel: str = "stable") -> None:
         super().__init__()
@@ -205,9 +255,6 @@ class UpdateCheckWorker(QtCore.QObject):
 
     def set_channel(self, channel: str) -> None:
         self._channel = channel
-
-    def fetch(self) -> None:
-        threading.Thread(target=self._run, daemon=True, name="tv-tray-update-check").start()
 
     def _run(self) -> None:
         from tintaview import __version__
@@ -230,21 +277,21 @@ class UpdateCheckWorker(QtCore.QObject):
         self.update_available.emit(tag, __version__)
 
 
-class DoctorWorker(QtCore.QObject):
+class DoctorWorker(_GuardedWorker):
     """Runs `tintaview doctor` off the GUI thread and hands back its report as text.
 
     `doctor` writes a human report to stdout and returns an exit code; a windowed build
     has no stdout anyone can read, so it is captured and shown in a dialog instead.
-    `redirect_stdout` is process-global, which is safe here only because a tray process
-    has no other stdout writer — and it is worth it: the alternative is spawning a
-    console the user has to keep open, on a platform where the tray runs as pythonw
-    precisely so that no console ever appears.
+    `run_doctor` has no "write to this stream" parameter, so the capture stays
+    `redirect_stdout` — which is process-global, and therefore only safe because
+    `_GuardedWorker` serialises runs: two overlapping ones unwind their redirects in the
+    wrong order and leave `sys.stdout` bound to a StringIO nobody reads again. It is worth
+    it: the alternative is spawning a console the user has to keep open, on a platform
+    where the tray runs as pythonw precisely so that no console ever appears.
     """
 
     report_ready = QtCore.Signal(str)
-
-    def fetch(self) -> None:
-        threading.Thread(target=self._run, daemon=True, name="tv-tray-doctor").start()
+    _thread_name = "tv-tray-doctor"
 
     def _run(self) -> None:
         import io
@@ -274,6 +321,141 @@ class DoctorWorker(QtCore.QObject):
         self.report_ready.emit(buffer.getvalue().strip())
 
 
+class ManualUpdateWorker(_GuardedWorker):
+    """The "Check for updates" menu item's background half — the *check* and the
+    *install*, both off the GUI thread.
+
+    Neither is anything a GUI thread may run. `latest_release()` is an HTTPS call with a
+    10 s timeout, and `run_update()` on Linux/macOS is a blocking `sh install.sh` that
+    tears down and rebuilds the private venv — minutes, not seconds. Run inline they froze
+    the tray icon, the flyout and every one of the broker's own Qt callbacks, with no
+    window on screen to say why. (On Windows `run_update` detaches the installer and
+    returns immediately; a thread is harmless there and keeps one code path.)
+
+    The check and the install share one in-flight lock: they are two halves of the same
+    user action, and starting a second check while an install is running makes no sense.
+    """
+
+    #: `outcome` values carried by `check_ready`. Deliberately not translated strings —
+    #: the wording lives in the catalogue, this is the state the GUI slot switches on.
+    OUTCOME_UNSUPPORTED = "unsupported"
+    OUTCOME_FAILED = "failed"
+    OUTCOME_CURRENT = "current"
+    OUTCOME_AVAILABLE = "available"
+
+    check_ready = QtCore.Signal(str, str, str)  # (outcome, latest_tag, release_notes)
+    install_done = QtCore.Signal(int)  # run_update()'s exit code
+
+    #: Release notes are the project's own published text, quoted as written (the rule
+    #: every usage provider follows) — just not all of it in a message box.
+    NOTES_LIMIT = 500
+
+    def check(self, channel: str) -> bool:
+        """Start a check. False if a check or an install is already running."""
+        return self._start(lambda: self._check(channel), "tv-tray-update-manual")
+
+    def install(self, channel: str) -> bool:
+        """Start the install. False if a check or an install is already running."""
+        return self._start(lambda: self._install(channel), "tv-tray-update-install")
+
+    def _check(self, channel: str) -> None:
+        from tintaview import __version__
+
+        try:
+            from tintaview.install import update as update_mod
+        except ImportError:
+            self.check_ready.emit(self.OUTCOME_UNSUPPORTED, "", "")
+            return
+
+        try:
+            release = update_mod.latest_release(channel=channel)
+            if release is None:
+                self.check_ready.emit(self.OUTCOME_FAILED, "", "")
+                return
+            tag = str(release.get("tag_name") or "").lstrip("vV").strip()
+            if not tag or update_mod.compare_versions(__version__, tag) >= 0:
+                self.check_ready.emit(self.OUTCOME_CURRENT, "", "")
+                return
+            notes = str(release.get("body") or "").strip()
+        except Exception:
+            log.exception("manual update check failed")
+            self.check_ready.emit(self.OUTCOME_FAILED, "", "")
+            return
+
+        if len(notes) > self.NOTES_LIMIT:
+            notes = notes[: self.NOTES_LIMIT].rstrip() + "…"
+        self.check_ready.emit(self.OUTCOME_AVAILABLE, tag, notes)
+
+    def _install(self, channel: str) -> None:
+        try:
+            from tintaview.install import update as update_mod
+
+            code = update_mod.run_update(check_only=False, channel=channel)
+        except Exception:
+            log.exception("update install failed")
+            code = 1
+        self.install_done.emit(int(code))
+
+
+class HookDriftWorker(_GuardedWorker):
+    """Re-checks every enabled agent's hooks on the shared usage cadence.
+
+    AGENTS.md's "Drift detection": agents rewrite their own config files on upgrade, so
+    hooks that were installed can disappear and TintaView simply stops hearing about
+    sessions — which reads as "the lights are broken", not "setup came undone". Off the
+    GUI thread because in a WSL-split install every one of these reads crosses a UNC path
+    into the distro, which can block for as long as `wsl.exe` takes to wake it up.
+    """
+
+    #: Display names of agents whose hooks need (re)installing, in `enabled_agents` order.
+    drift_ready = QtCore.Signal(list)
+    _thread_name = "tv-tray-hook-drift"
+
+    def __init__(self, cfg: Config) -> None:
+        super().__init__()
+        self._cfg = cfg
+
+    def _run(self) -> None:
+        try:
+            from tintaview.agents import base as agents_base
+            from tintaview.core import config as config_mod
+            from tintaview.install import hooks as hooks_mod
+            from tintaview.install import wsl
+        except ImportError:
+            return
+
+        # Only these three mean "the wizard can fix this". `hooks.status()` may grow other
+        # values (a config file it could not read, say), and sending someone into a
+        # diff-and-confirm install flow that cannot address them is worse than silence.
+        needs_install = {
+            hooks_mod.STATUS_MISSING,
+            hooks_mod.STATUS_PARTIAL,
+            hooks_mod.STATUS_STALE_PATH,
+        }
+        try:
+            hook_bin = config_mod.hook_bin_path()
+        except Exception:
+            log.exception("hook drift check: could not resolve the hook binary path")
+            return
+
+        drifted: list[str] = []
+        for key in list(self._cfg.enabled_agents):
+            adapter = agents_base.get(key)
+            if adapter is None:
+                continue  # a stats-only provider (jetbrains, copilot) — no hooks by design
+            try:
+                # Resolved against `agents.<key>.home`, never the bare adapter: on the
+                # Windows half of a WSL split the adapter answers from C:\Users\you and
+                # every agent would be reported as missing its hooks.
+                state = hooks_mod.status(wsl.configured_adapter(self._cfg, adapter), hook_bin)
+            except Exception:
+                log.exception("hook drift check failed for %s", key)
+                continue
+            if state in needs_install:
+                drifted.append(adapter.display_name)
+        self.drift_ready.emit(drifted)
+
+
 class TrayApp(QtCore.QObject):
     """Owns the tray icon, the flyout and the polling timers.
 
@@ -288,6 +470,11 @@ class TrayApp(QtCore.QObject):
     #: a queued signal is Qt's supported way across that boundary.
     show_requested = QtCore.Signal()
 
+    #: Emitted from an HTTP worker thread when `GET /quit` asks this instance to exit
+    #: (`StatusServer.on_quit`). Same reason as `show_requested`: quitting a
+    #: QApplication from a non-GUI thread is not something Qt supports.
+    quit_requested = QtCore.Signal()
+
     def __init__(self, cfg: Config, server: Any, app: QtWidgets.QApplication) -> None:
         super().__init__()
         self._cfg = cfg
@@ -300,6 +487,13 @@ class TrayApp(QtCore.QObject):
         set_language(cfg.ui.language)
 
         self._prev_effective = "none"
+        #: What the tray icon and tooltip currently show. `_poll_state` runs every 1.5 s
+        #: and the answer is almost always the same one as last time — `setIcon` makes the
+        #: shell rebuild and repaint the tray item, so re-setting an identical icon is
+        #: pure cost. None means "unknown, set it".
+        self._icon_key: tuple[Any, ...] | None = None
+        self._anim_key: tuple[Any, ...] | None = None
+        self._tooltip_key: tuple[Any, ...] | None = None
         self._blink_on = True
         self._sound_action: QtGui.QAction | None = None  # set by _build_menu below
         self._usage_results: dict[str, UsageResult] = {}
@@ -320,15 +514,37 @@ class TrayApp(QtCore.QObject):
         self._update_worker = UpdateCheckWorker(cfg.update.channel)
         self._update_worker.update_available.connect(self._on_update_available)
 
+        self._manual_update_worker = ManualUpdateWorker()
+        self._manual_update_worker.check_ready.connect(self._on_manual_check)
+        self._manual_update_worker.install_done.connect(self._on_update_installed)
+
         self._doctor_worker = DoctorWorker()
         self._doctor_worker.report_ready.connect(self._show_doctor_report)
         self._doctor_dialog: QtWidgets.QDialog | None = None
+
+        #: Display names from the last hook-drift check, latched so the balloon fires on a
+        #: change of state rather than on every poll.
+        self._drifted_agents: list[str] = []
+        self._hooks_action: QtGui.QAction | None = None  # set by _build_menu below
+        self._drift_worker = HookDriftWorker(cfg)
+        self._drift_worker.drift_ready.connect(self._on_hook_drift)
+
+        #: One engine rebuild at a time — see `_refresh_lighting`. The thread is kept so
+        #: tests can join it; nothing in the app waits on it.
+        self._lighting_lock = threading.Lock()
+        self._lighting_thread: threading.Thread | None = None
 
         self.show_requested.connect(self._on_show_requested)
         # A second launch of TintaView pops this instance's panel instead of exiting in
         # silence. Guarded because `server` may be any object with a state payload.
         with contextlib.suppress(AttributeError):
             server.on_show = self.show_requested.emit
+        # `GET /quit`, wired exactly like `/show`: the handler runs on an HTTP worker
+        # thread, so it may only ever *signal* the GUI thread. Guarded the same way —
+        # `server` may be any stand-in, and older StatusServers have no `on_quit` at all.
+        self.quit_requested.connect(self._on_quit_requested)
+        with contextlib.suppress(AttributeError):
+            server.on_quit = self.quit_requested.emit
 
         self.flyout = Flyout(
             collapsed=cfg.ui.collapsed_agents,
@@ -356,6 +572,10 @@ class TrayApp(QtCore.QObject):
         self.usage_timer = QtCore.QTimer(self)
         self.usage_timer.setInterval(usage_ms)
         self.usage_timer.timeout.connect(self._stats_worker.fetch)
+        # Hook drift rides the same cadence rather than getting a timer of its own: both
+        # are "check on the slow loop", and an agent's config file changes about as often
+        # as its quota does (AGENTS.md, "Drift detection").
+        self.usage_timer.timeout.connect(self._check_hook_drift)
         self.usage_timer.start()
 
         self.blink_timer = QtCore.QTimer(self)
@@ -368,6 +588,7 @@ class TrayApp(QtCore.QObject):
 
         self._poll_state()
         self._stats_worker.fetch()
+        self._check_hook_drift()
         if cfg.update.check:
             self._update_worker.fetch()
 
@@ -401,6 +622,11 @@ class TrayApp(QtCore.QObject):
 
         menu.addSeparator()
         menu.addAction(t("tray.menu.settings"), self._open_settings)
+        # Only visible once the drift check has actually found something: a permanently
+        # present "Fix hooks" reads as though something is always wrong.
+        hooks_action = menu.addAction(t("tray.menu.fix_hooks"), run_console_setup)
+        hooks_action.setVisible(bool(self._drifted_agents))
+        self._hooks_action = hooks_action
         menu.addAction(t("tray.menu.check_updates"), self._check_updates)
         menu.addAction(t("tray.menu.open_logs"), self._open_logs)
         menu.addAction(t("tray.menu.diagnostics"), self._run_diagnostics)
@@ -598,6 +824,10 @@ class TrayApp(QtCore.QObject):
             set_language(self._cfg.ui.language)
             self._menu = self._build_menu()
             self.tray.setContextMenu(self._menu)
+            # The tooltip is only re-set when its (status, count) changes, and a language
+            # switch changes neither — so drop the latch or the old language's tooltip
+            # survives until the next session opens or closes.
+            self._tooltip_key = None
 
         # The context menu's own copy of chime_on_confirm. Signals blocked so setting the
         # check mark doesn't re-enter `_set_sound` and save the config a second time.
@@ -614,30 +844,71 @@ class TrayApp(QtCore.QObject):
         self._reorder_results()
         self.flyout.set_results(self._usage_results)
 
-        if engine_changed:
-            controller = getattr(self._server, "controller", None)
-            if controller is not None:
-                try:
-                    controller.reset_engine()
-                except Exception:
-                    log.exception("could not reset lighting engine after a settings change")
-        # Unconditional, not just on an engine change: `reset_engine` only drops the old
-        # engine, and nothing else calls `apply()` until the *next* status transition, so
-        # a mid-session engine switch would leave the lights dark and a colour change
-        # wouldn't reach the hardware at all.
-        self._reapply_lighting()
+        # Unconditional re-apply, not just on an engine change: `reset_engine` only drops
+        # the old engine, and nothing else calls `apply()` until the *next* status
+        # transition, so a mid-session engine switch would leave the lights dark and a
+        # colour change wouldn't reach the hardware at all.
+        self._refresh_lighting(reset=engine_changed)
 
         self._stats_worker.fetch()
         self._poll_state()
 
-    def _reapply_lighting(self) -> None:
-        """Re-send the current effective status to the controller, so a config change
-        takes effect on the hardware now rather than at the next status transition."""
-        controller = getattr(self._server, "controller", None)
-        state = getattr(self._server, "state", None)
-        if controller is None or state is None:
+    def _refresh_lighting(self, reset: bool) -> None:
+        """Rebuild (when `reset`) and re-paint the lighting engine — on a worker thread.
+
+        This pair is the slowest thing the settings dialog can trigger: `reset_engine()`
+        closes the engine and the `apply()` behind it opens a new one and paints, i.e. a
+        Chroma REST open + heartbeat, an OpenRGB snapshot of every device, or a G HUB
+        sidecar process restart. On the GUI thread that froze the tray for seconds every
+        time OK was pressed. The in-flight guard stops a second OK — or an OK arriving
+        while the first rebuild is still opening the engine — from opening it twice.
+        """
+        if self._controller() is None:
             return
+        if not self._lighting_lock.acquire(blocking=False):
+            return
+
+        def run() -> None:
+            try:
+                if reset:
+                    controller = self._controller()
+                    try:
+                        if controller is not None:
+                            controller.reset_engine()
+                    except Exception:
+                        log.exception("could not reset lighting engine after a settings change")
+                self._reapply_lighting()
+            finally:
+                self._lighting_lock.release()
+
+        thread = threading.Thread(target=run, daemon=True, name="tv-tray-engine")
+        self._lighting_thread = thread
         try:
+            thread.start()
+        except Exception:
+            self._lighting_lock.release()
+            raise
+
+    def _reapply_lighting(self) -> None:
+        """Re-send the current effective status, so a config change takes effect on the
+        hardware now rather than at the next status transition.
+
+        Through `StatusServer.apply_status()` rather than `controller.apply()`: the server
+        owns a single-slot applier thread that every hook event already goes through, so
+        calling the controller directly would both skip its newest-wins coalescing and put
+        the vendor SDK call on whichever thread happened to ask. Falls back to the
+        controller for a stand-in server that has no `apply_status` (the tray is documented
+        as working against any object with a state payload).
+        """
+        apply_status = getattr(self._server, "apply_status", None)
+        try:
+            if callable(apply_status):
+                apply_status()
+                return
+            controller = self._controller()
+            state = getattr(self._server, "state", None)
+            if controller is None or state is None:
+                return
             controller.apply(state.effective())
         except Exception:
             log.exception("could not re-apply lighting after a settings change")
@@ -690,39 +961,43 @@ class TrayApp(QtCore.QObject):
         )
 
     def _check_updates(self) -> None:
-        """Check for a newer release and offer to install it.
+        """Check for a newer release and offer to install it — nothing here blocks.
 
-        Deliberately does not call run_update(), which prints its progress to stdout:
-        a windowed build has no console, so that output would go nowhere the user can
-        see it. Everything here reports through dialogs instead.
+        Both halves used to run inline on the GUI thread, contradicting this docstring's
+        own promise: `latest_release()` is a 10 s-timeout HTTPS call, and on Linux/macOS
+        `run_update()` runs `sh install.sh` synchronously, which rebuilds the private venv
+        and takes minutes. The tray, the flyout and the broker's Qt callbacks were all
+        dead for the duration, with only a frozen icon to show for it. The work moved to
+        `ManualUpdateWorker`; everything below reports through dialogs and balloons, since
+        a windowed build has no console for `run_update`'s own progress output.
         """
+        if not self._manual_update_worker.check(self._cfg.update.channel):
+            return  # a check or an install is already running
+        self.tray.showMessage(
+            t("tray.update.balloon_title"),
+            t("tray.update.checking"),
+            QtWidgets.QSystemTrayIcon.Information,
+            4000,
+        )
+
+    def _on_manual_check(self, outcome: str, tag: str, notes: str) -> None:
+        """The manual check came back — on the GUI thread, via a queued signal."""
         from tintaview import __version__
 
-        try:
-            from tintaview.install import update as update_mod
-        except ImportError:
+        worker = ManualUpdateWorker
+        if outcome == worker.OUTCOME_UNSUPPORTED:
             QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.unsupported"))
             return
-
-        release = update_mod.latest_release(channel=self._cfg.update.channel)
-        if release is None:
+        if outcome == worker.OUTCOME_FAILED:
             QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.check_failed"))
             return
-
-        tag = str(release.get("tag_name") or "").lstrip("vV").strip()
-        if not tag or update_mod.compare_versions(__version__, tag) >= 0:
+        if outcome == worker.OUTCOME_CURRENT:
             QtWidgets.QMessageBox.information(
                 None, "TintaView", t("tray.update.up_to_date", version=__version__)
             )
             return
 
-        # The release notes are the project's own published text, quoted as written —
-        # the same rule the usage providers follow for anything an API hands back.
-        notes = str(release.get("body") or "").strip()
-        if len(notes) > 500:
-            notes = notes[:500].rstrip() + "…"
         notes_block = f"\n\n{notes}" if notes else ""
-
         answer = QtWidgets.QMessageBox.question(
             None, "TintaView",
             t("tray.update.confirm", latest=tag, current=__version__, notes=notes_block),
@@ -732,10 +1007,65 @@ class TrayApp(QtCore.QObject):
             return
 
         # The installer replaces files this process is running from, so hand off and let
-        # run_update's own platform logic (verify SHA-256, run silently) take over.
-        code = update_mod.run_update(check_only=False, channel=self._cfg.update.channel)
+        # run_update's own platform logic (verify SHA-256, run silently, detach on
+        # Windows) take over — on a worker thread, with a balloon rather than a modal
+        # dialog, because on Linux/macOS it does not return for minutes.
+        if not self._manual_update_worker.install(self._cfg.update.channel):
+            return
+        self.tray.showMessage(
+            t("tray.update.balloon_title"),
+            t("tray.update.installing"),
+            QtWidgets.QSystemTrayIcon.Information,
+            15000,
+        )
+
+    def _on_update_installed(self, code: int) -> None:
+        """The install finished — on the GUI thread, however long it took.
+
+        Success is worth saying out loud rather than staying silent like the startup
+        check does: this process is still running the *old* code out of a venv the
+        installer has just replaced, so "it worked" is only half the message.
+        """
         if code != 0:
             QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.update.failed"))
+            return
+        self.tray.showMessage(
+            t("tray.update.balloon_title"),
+            t("tray.update.installed"),
+            QtWidgets.QSystemTrayIcon.Information,
+            15000,
+        )
+
+    def _check_hook_drift(self) -> None:
+        """Kick off a hook-drift check. A named slot rather than connecting the worker's
+        `fetch` directly, so the worker stays replaceable (and the timer wiring testable)."""
+        self._drift_worker.fetch()
+
+    def _on_hook_drift(self, agents: list) -> None:
+        """A hook-drift check finished: balloon once per *change*, and offer the wizard.
+
+        Latched on the agent list rather than fired every poll — the drift check runs on
+        the 5-minute usage cadence, and a notification every five minutes for a condition
+        the user has already decided not to fix now is how a tray icon gets muted.
+        """
+        agents = [str(a) for a in agents]
+        if agents == self._drifted_agents:
+            return
+        self._drifted_agents = agents
+        if self._hooks_action is not None:
+            self._hooks_action.setVisible(bool(agents))
+        if not agents:
+            return
+        self.tray.showMessage(
+            t("tray.hooks.balloon_title"),
+            t("tray.hooks.balloon_body", agents=", ".join(agents)),
+            QtWidgets.QSystemTrayIcon.Warning,
+            10000,
+        )
+
+    def _on_quit_requested(self) -> None:
+        """`GET /quit` asked this instance to exit — marshalled onto the GUI thread."""
+        self._app.quit()
 
     # --- state / icon -------------------------------------------------------------
 
@@ -764,7 +1094,8 @@ class TrayApp(QtCore.QObject):
             if not self.blink_timer.isActive():
                 self._blink_on = True
                 self.blink_timer.start()
-                self.tray.setIcon(icons.state_icon(self._cfg.colors.rgb("confirm"), ICON_SIZE))
+                self._set_icon(("confirm", self._cfg.colors.rgb("confirm")),
+                               lambda: icons.state_icon(self._cfg.colors.rgb("confirm"), ICON_SIZE))
         elif effective == "working":
             self.blink_timer.stop()
             if not self.anim_timer.isActive():
@@ -773,14 +1104,35 @@ class TrayApp(QtCore.QObject):
         else:
             self.blink_timer.stop()
             self.anim_timer.stop()
-            self.tray.setIcon(self._icon_for_status(effective))
+            rgb = None if effective in (STATUS_NONE, "idle") else self._cfg.colors.rgb(effective)
+            self._set_icon((effective, rgb), lambda: self._icon_for_status(effective))
 
         if effective == "confirm" and self._prev_effective != "confirm":
             self._chime()
         self._prev_effective = effective
 
         self._surface_engine_note(payload)
-        self.tray.setToolTip(self._tooltip_for(payload))
+
+        # Tooltip likewise: it is a function of exactly these two values, and this runs
+        # every 1.5 s. `_apply_settings` clears the latch on a language change.
+        tooltip_key = (effective, payload.get("count", 0))
+        if tooltip_key != self._tooltip_key:
+            self._tooltip_key = tooltip_key
+            self.tray.setToolTip(self._tooltip_for(payload))
+
+    def _set_icon(self, key: tuple[Any, ...], build) -> None:
+        """`setIcon` only when the icon would actually differ.
+
+        `key` identifies what would be drawn (status plus, where it matters, the colour it
+        is drawn in, so a colour change in Settings still repaints). Qt has no cheap "is
+        this the same icon" test and `setIcon` makes the platform shell rebuild the tray
+        item either way, so the guard has to live here.
+        """
+        if key == self._icon_key:
+            return
+        self._icon_key = key
+        self._anim_key = None  # the pulse no longer owns the icon
+        self.tray.setIcon(build())
 
     def _surface_engine_note(self, payload: dict) -> None:
         """Balloon once when the lighting engine reports a new problem note.
@@ -822,16 +1174,28 @@ class TrayApp(QtCore.QObject):
         self._blink_on = not self._blink_on
         confirm_rgb = self._cfg.colors.rgb("confirm")
         rgb = confirm_rgb if self._blink_on else _dim(confirm_rgb)
-        self.tray.setIcon(icons.state_icon(rgb, ICON_SIZE))
+        self._set_icon(("blink", rgb), lambda: icons.state_icon(rgb, ICON_SIZE))
 
     def _update_anim_icon(self) -> None:
         """Redraws the breathing working icon for the current instant.
 
         Called on every anim_timer tick and isn't reset when working is (re-)entered,
         so it runs off the shared monotonic clock rather than a per-state-entry phase.
+
+        The brightness is quantised (`icons.pulse_step`), which does two things: the
+        handful of resulting colours land in `state_icon`'s cache instead of re-rendering
+        nine pixmaps per tick, and a tick that lands on the same step as the last one skips
+        `setIcon` entirely — near the top and bottom of the cosine most of them do. The
+        local clock is `now`, not `t`: `t` is this module's i18n lookup.
         """
-        t = time.monotonic()
-        self.tray.setIcon(icons.pulse_icon(self._cfg.colors.rgb("working"), t, ICON_SIZE))
+        now = time.monotonic()
+        rgb = self._cfg.colors.rgb("working")
+        key = (rgb, icons.pulse_step(now))
+        if key == self._anim_key:
+            return
+        self._anim_key = key
+        self._icon_key = None  # the pulse owns the icon now
+        self.tray.setIcon(icons.pulse_icon_for_step(rgb, key[1], ICON_SIZE))
 
     def _tooltip_for(self, payload: dict) -> str:
         # One line per agent used to run here, but that list can only grow (JetBrains

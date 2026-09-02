@@ -9,6 +9,8 @@ of even `pytest.importorskip`.
 from __future__ import annotations
 
 import os
+import sys
+import threading
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -61,19 +63,31 @@ def test_state_icon_is_cached(qapp):
     assert a is b
 
 
-def test_state_icon_falls_back_when_asset_missing(qapp, monkeypatch, tmp_path):
-    # Point every asset lookup at a directory that doesn't exist, forcing the
-    # procedural burst-icon fallback for a (rgb, size) combo not used elsewhere.
+def test_state_icon_cache_ignores_the_size_argument(qapp):
+    """`size` used to be part of the cache key while contributing nothing to the drawing:
+    every icon carries all of TRAY_ICON_SIZES, so two calls that differed only in `size`
+    rendered the same nine pixmaps twice and stored them twice."""
+    assert icons.state_icon((4, 5, 6), size=16) is icons.state_icon((4, 5, 6), size=256)
+    assert icons.brand_icon(16) is icons.brand_icon(256)
+
+
+def test_state_icon_needs_no_asset_on_disk(qapp, monkeypatch, tmp_path):
+    """The mark is drawn, not loaded — there is no PNG behind the status icons at all.
+
+    (This replaced a test that monkeypatched `asset_path` to "force the procedural
+    fallback": both the silhouette PNGs and the fallback burst it selected are gone, so
+    the test was asserting the drawn path either way while claiming otherwise.)
+    """
     monkeypatch.setattr(icons, "asset_path", lambda name: tmp_path / "missing" / name)
 
     icon = icons.state_icon((250, 60, 60), size=77)
     assert not icon.isNull()
 
-    image = icon.pixmap(77, 77).toImage()
-    # Ray 0 points straight up from centre before rotation — sample a point along
-    # it, safely inside the outer radius, and expect it filled with the tint.
-    cx = 77 / 2.0
-    x, y = int(cx), int(cx - 77 * 0.3)
+    image = icon.pixmap(64, 64).toImage()
+    # Spoke 0 points straight up from the centre — sample a point along it, safely
+    # between MARK_INNER and MARK_OUTER, and expect it filled with the tint.
+    x = 32
+    y = int(32 - 64 * (icons.MARK_INNER + icons.MARK_OUTER) / 2)
     color = image.pixelColor(x, y)
     assert color.alpha() > 0
     assert (color.red(), color.green(), color.blue()) == (250, 60, 60)
@@ -215,6 +229,10 @@ def tray(qapp, monkeypatch, tmp_path):
     # Same reasoning: the startup update check is real network I/O on a background
     # thread, which every other tray test would otherwise trigger unattended.
     monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
+    # And the hook-drift check, which reads the developer's own ~/.claude/settings.json
+    # (and, on a WSL-split box, a UNC path into a distro). `HookDriftWorker._run` is
+    # exercised directly, against a fake registry, further down.
+    monkeypatch.setattr(tray_mod.HookDriftWorker, "fetch", lambda self: None)
 
     cfg = Config()
     cfg.enabled_agents = ["claude", "codex"]
@@ -349,6 +367,7 @@ def test_update_check_worker_silent_when_already_current_or_unreachable(qapp, mo
 def test_tray_runs_update_check_on_start_only_when_enabled(qapp, monkeypatch, tmp_path):
     monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
     monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(tray_mod.HookDriftWorker, "fetch", lambda self: None)
     calls = []
     monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: calls.append(1))
 
@@ -557,6 +576,19 @@ def tray_with_controller(tray):
     return app_instance, server
 
 
+def _join_lighting(app_instance, timeout: float = 5.0) -> None:
+    """Wait for the engine reset/re-apply `_apply_settings` kicked off.
+
+    That pair is a full engine close + open + paint (a Chroma REST round-trip, an OpenRGB
+    snapshot, a G HUB sidecar restart) and no longer runs on the GUI thread, so a test
+    asserting on the controller has to wait for it rather than assume it already happened.
+    """
+    thread = app_instance._lighting_thread
+    if thread is not None:
+        thread.join(timeout)
+        assert not thread.is_alive(), "the lighting refresh thread never finished"
+
+
 def _accepted_copy(app_instance, **changes) -> Config:
     """A stand-in for what `SettingsDialog.result_cfg` hands back: a deep copy of the
     live config with some fields changed."""
@@ -710,6 +742,7 @@ def test_apply_settings_reapplies_lighting_after_an_engine_change(tray_with_cont
     app_instance, server = tray_with_controller
 
     app_instance._apply_settings(_accepted_copy(app_instance, **{"engine.mode": "openrgb"}))
+    _join_lighting(app_instance)
 
     assert server.controller.resets == 1
     assert server.controller.applied == ["working"]  # the live effective status
@@ -721,6 +754,7 @@ def test_apply_settings_reapplies_lighting_after_a_colour_change(tray_with_contr
     app_instance, server = tray_with_controller
 
     app_instance._apply_settings(_accepted_copy(app_instance, **{"colors.device.working": "#ABCDEF"}))
+    _join_lighting(app_instance)
 
     assert server.controller.resets == 0  # engine unchanged — nothing to rebuild
     assert server.controller.applied == ["working"]
@@ -949,3 +983,431 @@ def test_flyout_set_status_still_accepts_a_status_map_alone(qapp):
     flyout.set_status({"claude": "idle"})
     assert flyout._tools == {}
     flyout.render(QtGui.QPixmap(flyout.size()))
+
+
+# --------------------------------------------------------------------------- off the GUI thread
+
+
+class _RecordingUpdateModule:
+    """Stand-in for `tintaview.install.update`, recording which thread called it.
+
+    The whole point of the tests below: `latest_release()` is an HTTPS call with a 10 s
+    timeout and `run_update()` on Linux/macOS is a synchronous `sh install.sh` that
+    rebuilds the venv. Either one on the GUI thread freezes the tray, the flyout and the
+    broker's own Qt callbacks with nothing on screen to explain why.
+    """
+
+    CHANNEL_STABLE = "stable"
+
+    def __init__(self, release: dict | None) -> None:
+        self._release = release
+        self.check_threads: list[threading.Thread] = []
+        self.update_threads: list[threading.Thread] = []
+
+    def latest_release(self, channel: str = "stable"):
+        self.check_threads.append(threading.current_thread())
+        return self._release
+
+    def compare_versions(self, a: str, b: str) -> int:
+        return -1  # "b is newer", always: the release below is what's under test
+
+    def run_update(self, check_only: bool = False, channel: str | None = None) -> int:
+        self.update_threads.append(threading.current_thread())
+        return 0
+
+
+def _install_fake_update_module(monkeypatch, fake) -> None:
+    """Make `from tintaview.install import update as update_mod` yield `fake`.
+
+    The tray imports it lazily inside the worker (so a headless build without it still
+    starts), so patching the attribute on the package is what the import actually reads.
+    """
+    import tintaview.install
+
+    monkeypatch.setattr(tintaview.install, "update", fake, raising=False)
+    monkeypatch.setitem(sys.modules, "tintaview.install.update", fake)
+
+
+def test_manual_update_check_never_runs_on_the_calling_thread(qapp, monkeypatch):
+    fake = _RecordingUpdateModule({"tag_name": "v9.9.9", "body": "Notes"})
+    _install_fake_update_module(monkeypatch, fake)
+
+    worker = tray_mod.ManualUpdateWorker()
+    seen: list[tuple] = []
+    worker.check_ready.connect(lambda *a: seen.append(a))
+
+    caller = threading.current_thread()
+    assert worker.check("stable") is True
+    _drain(worker)
+
+    assert fake.check_threads, "latest_release() was never called"
+    assert all(t is not caller for t in fake.check_threads), (
+        "latest_release() ran on the thread that asked for the check"
+    )
+    qapp.processEvents()  # the signal is queued across the thread boundary
+    assert seen and seen[0][0] == tray_mod.ManualUpdateWorker.OUTCOME_AVAILABLE
+    assert seen[0][1] == "9.9.9"
+
+
+def test_manual_update_install_never_runs_on_the_calling_thread(qapp, monkeypatch):
+    fake = _RecordingUpdateModule({"tag_name": "v9.9.9"})
+    _install_fake_update_module(monkeypatch, fake)
+
+    worker = tray_mod.ManualUpdateWorker()
+    codes: list[int] = []
+    worker.install_done.connect(codes.append)
+
+    caller = threading.current_thread()
+    assert worker.install("stable") is True
+    _drain(worker)
+
+    assert fake.update_threads, "run_update() was never called"
+    assert all(t is not caller for t in fake.update_threads), (
+        "run_update() ran on the thread that asked for the install"
+    )
+    qapp.processEvents()
+    assert codes == [0]
+
+
+def test_check_updates_menu_item_touches_no_network_on_the_gui_thread(tray, monkeypatch):
+    """The menu item itself must return immediately — the whole reason this moved."""
+    app_instance, _server = tray
+    fake = _RecordingUpdateModule({"tag_name": "v9.9.9"})
+    _install_fake_update_module(monkeypatch, fake)
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage", lambda self, *a, **k: None
+    )
+    # The check's reply is a queued signal into `_on_manual_check`, which opens a modal
+    # message box. Stub both boxes and flush the queue here, so the dialog can never be
+    # delivered (and block on its own nested event loop) inside some later test.
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None)
+    )
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "question",
+        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.No),
+    )
+
+    gui_thread = threading.current_thread()
+    app_instance._check_updates()
+    _drain(app_instance._manual_update_worker)
+    QtWidgets.QApplication.instance().processEvents()
+
+    assert fake.check_threads
+    assert all(t is not gui_thread for t in fake.check_threads)
+
+
+def _drain(worker, timeout: float = 5.0) -> None:
+    """Wait for a `_GuardedWorker`'s in-flight run to finish."""
+    assert worker._inflight.acquire(timeout=timeout), "the worker never finished"
+    worker._inflight.release()
+
+
+def test_workers_drop_a_second_request_while_one_is_running(qapp):
+    """Repeated "Refresh usage" clicks used to stack a thread — and a Cursor RPC against
+    a ~300 MB state.vscdb — each. Two overlapping DoctorWorkers were worse: their
+    process-global `redirect_stdout` unwinds in the wrong order and leaves `sys.stdout`
+    bound to a StringIO nobody ever reads again."""
+    started = threading.Event()
+    release = threading.Event()
+    runs: list[int] = []
+
+    class _Slow(tray_mod._GuardedWorker):
+        def _run(self) -> None:
+            runs.append(1)
+            started.set()
+            release.wait(5.0)
+
+    worker = _Slow()
+    worker.fetch()
+    assert started.wait(5.0)
+
+    worker.fetch()  # must be a no-op while the first is still running
+    worker.fetch()
+    assert runs == [1]
+
+    release.set()
+    _drain(worker)
+    assert runs == [1]
+
+    worker.fetch()  # ...and the guard clears once it finishes
+    _drain(worker)
+    assert runs == [1, 1]
+
+
+def test_engine_reset_and_reapply_run_off_the_gui_thread(tray_with_controller):
+    """A full engine close + open + paint is seconds of blocking I/O; on the GUI thread
+    it froze the tray every time Settings was accepted."""
+    app_instance, server = tray_with_controller
+    seen: list[threading.Thread] = []
+    server.controller.reset_engine = lambda: seen.append(threading.current_thread())
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"engine.mode": "openrgb"}))
+    _join_lighting(app_instance)
+
+    assert seen and seen[0] is not threading.current_thread()
+
+
+def test_engine_refresh_does_not_overlap_itself(tray_with_controller):
+    app_instance, server = tray_with_controller
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow_reset() -> None:
+        server.controller.resets += 1
+        started.set()
+        release.wait(5.0)
+
+    server.controller.reset_engine = slow_reset
+
+    app_instance._refresh_lighting(reset=True)
+    assert started.wait(5.0)
+    app_instance._refresh_lighting(reset=True)  # dropped, not queued
+    release.set()
+    _join_lighting(app_instance)
+
+    assert server.controller.resets == 1
+
+
+# --------------------------------------------------------------------------- repaint guards
+
+
+def test_the_icon_is_not_re_set_on_every_poll(tray, monkeypatch):
+    """`_poll_state` runs every 1.5 s; `setIcon` makes the shell rebuild and repaint the
+    tray item, so re-setting an identical icon is pure cost for the whole session."""
+    app_instance, server = tray
+    calls: list[object] = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "setIcon", lambda self, icon: calls.append(icon)
+    )
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "setToolTip", lambda self, text: calls.append(text)
+    )
+
+    payload = {
+        "effective": "idle",
+        "agents": {"claude": {"effective": "idle", "count": 1}},
+        "count": 1,
+    }
+    server.set(payload)
+    app_instance._poll_state()
+    assert len(calls) == 2  # one icon, one tooltip
+
+    for _ in range(5):
+        app_instance._poll_state()
+    assert len(calls) == 2, "an unchanged state re-set the icon and tooltip"
+
+    server.set({"effective": "none", "agents": {}, "count": 0})
+    app_instance._poll_state()
+    assert len(calls) == 4  # a real change does get through
+
+
+def test_a_colour_change_still_repaints_an_unchanged_status(tray_with_controller):
+    """The guard keys on what would be *drawn*, not just on the status name — otherwise
+    picking a new idle colour in Settings did nothing until the next session opened."""
+    app_instance, server = tray_with_controller
+    server.set({
+        "effective": "confirm",
+        "agents": {"claude": {"effective": "confirm", "count": 1}},
+        "count": 1,
+    })
+    app_instance._poll_state()
+    before = app_instance.tray.icon().cacheKey()
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"colors.confirm": "#123456"}))
+    _join_lighting(app_instance)
+    app_instance.blink_timer.stop()
+    app_instance._on_blink()
+
+    assert app_instance.tray.icon().cacheKey() != before
+
+
+def test_flyout_set_status_skips_the_repaint_when_nothing_changed(qapp, monkeypatch):
+    flyout = Flyout()
+    flyout.set_results(_sample_results())
+    repaints: list[int] = []
+    monkeypatch.setattr(Flyout, "update", lambda self, *a, **k: repaints.append(1))
+
+    flyout.set_status({"claude": "working"}, {"claude": "Bash"})
+    assert repaints == [1]
+
+    flyout.set_status({"claude": "working"}, {"claude": "Bash"})
+    flyout.set_status({"claude": "working"}, {"claude": "Bash"})
+    assert repaints == [1], "an unchanged status map repainted the whole card"
+
+    flyout.set_status({"claude": "idle"}, {"claude": "Bash"})
+    assert repaints == [1, 1]
+
+
+# --------------------------------------------------------------------------- working pulse
+
+
+def test_the_pulse_is_quantised_and_cached(qapp):
+    """The breathe used to be continuous: every 100 ms tick got a distinct brightness, so
+    nothing could be cached and the tray rebuilt nine pixmaps and called `setIcon` ten
+    times a second, forever, for as long as an agent was working."""
+    steps = {icons.pulse_step(x / 1000.0) for x in range(0, 7000)}  # two full periods
+    assert steps == set(range(icons.PULSE_STEPS))
+
+    # Quantised colours land in the one icon cache, so a whole cycle costs PULSE_STEPS
+    # renders and not one per tick.
+    a = icons.pulse_icon_for_step((0, 200, 0), 5)
+    b = icons.pulse_icon_for_step((0, 200, 0), 5)
+    assert a is b
+    assert icons.pulse_icon_for_step((0, 200, 0), 6) is not a
+
+    # The period is unchanged — the tick got slower, the breathe did not.
+    assert icons.PULSE_PERIOD_S == 3.5
+    assert tray_mod.ANIM_TICK_MS == 200
+
+
+def test_the_pulse_skips_seticon_while_the_step_is_unchanged(tray, monkeypatch):
+    app_instance, _server = tray
+    calls: list[object] = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "setIcon", lambda self, icon: calls.append(icon)
+    )
+    monkeypatch.setattr(tray_mod.icons, "pulse_step", lambda now: 7)
+
+    app_instance._update_anim_icon()
+    app_instance._update_anim_icon()
+    app_instance._update_anim_icon()
+
+    assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- hook drift
+
+
+class _FakeAdapter:
+    def __init__(self, key: str, name: str) -> None:
+        self.key = key
+        self.display_name = name
+
+
+def _fake_hooks_module(states: dict[str, str]):
+    class _Hooks:
+        STATUS_INSTALLED = "installed"
+        STATUS_MISSING = "missing"
+        STATUS_PARTIAL = "partial"
+        STATUS_STALE_PATH = "stale-path"
+
+        def __init__(self) -> None:
+            self.checked: list = []
+
+        def status(self, adapter, hook_bin, scope="user", project_dir=None):
+            self.checked.append(adapter)
+            return states[adapter.key]
+
+    return _Hooks()
+
+
+def test_hook_drift_reports_only_the_statuses_the_wizard_can_fix(qapp, monkeypatch):
+    """`hooks.status()` may grow values beyond the four it has today — an unreadable
+    config file, say — and none of those are a reason to send someone into a
+    diff-and-confirm install flow that cannot address them."""
+    import tintaview.agents.base as agents_base
+    import tintaview.install
+    import tintaview.install.wsl as wsl_mod
+
+    adapters = {
+        "claude": _FakeAdapter("claude", "Claude Code"),
+        "codex": _FakeAdapter("codex", "Codex CLI"),
+        "cursor": _FakeAdapter("cursor", "Cursor"),
+        "jetbrains": None,  # stats-only: no adapter at all, and that is expected
+    }
+    hooks = _fake_hooks_module({
+        "claude": "installed",
+        "codex": "missing",
+        "cursor": "config-unreadable",  # a value this build has never seen
+    })
+    monkeypatch.setattr(agents_base, "get", adapters.get)
+    # The tray does `from tintaview.install import hooks`, which reads the attribute on
+    # the already-imported package — patching sys.modules alone would not be seen.
+    monkeypatch.setattr(tintaview.install, "hooks", hooks)
+    monkeypatch.setattr(wsl_mod, "configured_adapter", lambda cfg, adapter: adapter)
+
+    cfg = Config()
+    cfg.enabled_agents = ["claude", "codex", "cursor", "jetbrains"]
+    worker = tray_mod.HookDriftWorker(cfg)
+    seen: list[list] = []
+    worker.drift_ready.connect(seen.append)
+
+    worker._run()
+
+    assert seen == [["Codex CLI"]]
+
+
+def test_hook_drift_resolves_the_adapter_through_the_configured_home(qapp, monkeypatch):
+    """AGENTS.md, "WSL split install": a bare adapter answers from C:\\Users\\you, which is
+    the wrong side of the boundary, and every agent is then reported as broken."""
+    import tintaview.agents.base as agents_base
+    import tintaview.install
+    import tintaview.install.wsl as wsl_mod
+
+    adapter = _FakeAdapter("claude", "Claude Code")
+    remote = _FakeAdapter("claude", "Claude Code (remote)")
+    hooks = _fake_hooks_module({"claude": "installed"})
+    monkeypatch.setattr(agents_base, "get", lambda key: adapter if key == "claude" else None)
+    monkeypatch.setattr(tintaview.install, "hooks", hooks)
+    monkeypatch.setattr(wsl_mod, "configured_adapter", lambda cfg, a: remote)
+
+    cfg = Config()
+    cfg.enabled_agents = ["claude"]
+    tray_mod.HookDriftWorker(cfg)._run()
+
+    assert hooks.checked == [remote]
+
+
+def test_hook_drift_balloons_once_per_state_change_and_offers_the_wizard(tray, monkeypatch):
+    """The check runs on the 5-minute usage cadence; a balloon every five minutes for a
+    condition the user has already chosen not to fix is how a tray icon gets muted."""
+    app_instance, _server = tray
+    balloons: list[tuple] = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage",
+        lambda self, title, message, *a, **k: balloons.append((title, message)),
+    )
+    assert app_instance._hooks_action.isVisible() is False
+
+    app_instance._on_hook_drift(["Codex CLI"])
+    assert len(balloons) == 1
+    assert "Codex CLI" in balloons[0][1]
+    assert app_instance._hooks_action.isVisible() is True
+
+    app_instance._on_hook_drift(["Codex CLI"])  # same state, no second balloon
+    assert len(balloons) == 1
+
+    app_instance._on_hook_drift([])  # fixed: menu item goes away, silently
+    assert len(balloons) == 1
+    assert app_instance._hooks_action.isVisible() is False
+
+    app_instance._on_hook_drift(["Cursor"])  # a new problem does balloon again
+    assert len(balloons) == 2
+
+
+def test_the_drift_check_rides_the_usage_cadence(tray):
+    """One slow loop, not a timer of its own: an agent's config file changes about as
+    often as its quota does."""
+    app_instance, _server = tray
+    calls: list[int] = []
+    app_instance._drift_worker.fetch = lambda: calls.append(1)  # type: ignore[method-assign]
+    app_instance.usage_timer.timeout.emit()
+    assert calls == [1]
+
+
+# --------------------------------------------------------------------------- second launch / quit
+
+
+def test_the_server_gets_a_quit_hook(tray, monkeypatch):
+    """`GET /quit` runs on an HTTP worker thread, so it may only ever *signal* the GUI
+    thread — the same rule `/show` follows."""
+    app_instance, server = tray
+    assert callable(server.on_quit)
+    quits: list[int] = []
+    monkeypatch.setattr(QtWidgets.QApplication, "quit", lambda self: quits.append(1))
+
+    server.on_quit()  # what StatusServer calls, from an HTTP thread
+    QtWidgets.QApplication.instance().processEvents()
+
+    assert quits == [1]

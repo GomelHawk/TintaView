@@ -1,9 +1,11 @@
 """Tray icons: the TintaView mark, tinted per status, plus a brand-coloured variant
 for the "no session" state.
 
-The mark is a white silhouette PNG (alpha only) that gets recoloured by compositing a
-solid fill through its alpha channel — so one asset serves every status colour instead
-of needing one PNG per colour.
+The mark is **drawn** (see `_draw_mark` and the MARK_* geometry below), not loaded from a
+PNG. A tray asks for 16-24px, and resampling the artwork down to that softens the capsule
+ends into mush; drawing each requested size outright keeps them crisp and turns capsule
+thickness into a number instead of an image filter. The only asset still read at runtime
+is `logo_full.png`, for the About dialog.
 """
 
 from __future__ import annotations
@@ -14,20 +16,14 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui
 from PySide6.QtCore import Qt
 
-#: Sizes actually generated on disk (assets/generated/mark_*_<n>.png) — used to pick
-#: the closest pre-rendered size instead of upscaling a tiny one or downscaling the
-#: full-res original every call.
-_GENERATED_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
-
-#: Fallback burst: 8 tapered rays, echoing the ray count implied by the real mark's
-#: silhouette.
-RAYS = 8
-
-# Icons are cheap to recompute but get requested constantly (the confirm blink timer
-# alternates two colours every `blink_ms`) — cache per (rgb, size) so blinking never
-# touches disk or re-runs QPainter after the first pass through each colour.
-_state_icon_cache: dict[tuple[int, int, int, int], QtGui.QIcon] = {}
-_brand_icon_cache: dict[int, QtGui.QIcon] = {}
+# Icons are cheap to recompute but get requested constantly (the confirm blink alternates
+# two colours every `blink_ms`, and the working pulse steps through a fixed ladder of
+# brightnesses) — cache per rgb so neither ever re-runs QPainter after the first pass
+# through a colour. Keyed on the colour alone: every icon is multi-resolution over
+# TRAY_ICON_SIZES regardless of the caller's `size`, so keying on `size` too only rendered
+# the same nine pixmaps a second time.
+_state_icon_cache: dict[tuple[int, int, int], QtGui.QIcon] = {}
+_brand_icon: QtGui.QIcon | None = None
 
 #: Sizes baked into every state icon. Covers the usual tray requests (16-24),
 #: HiDPI multiples of those, and the larger sizes menus and dialogs ask for.
@@ -40,7 +36,7 @@ def asset_path(name: str) -> Path:
     The assets live *inside* the package (tintaview/assets/generated), not at the repo
     root, specifically so that a plain `pip install` ships them — which is how TintaView
     is installed on every platform. Anything placed at the repo root would be dropped from
-    the wheel and the tray would silently fall back to the drawn placeholder.
+    the wheel and the About dialog would come up with no logo at all.
     """
     # tintaview/ui/icons.py -> tintaview/
     base = Path(__file__).resolve().parents[1]
@@ -88,26 +84,13 @@ def logo_pixmap(width: int = 480) -> QtGui.QPixmap:
     return cropped.scaledToWidth(width, Qt.SmoothTransformation)
 
 
-def _closest_size(size: int) -> int:
-    return min(_GENERATED_SIZES, key=lambda s: abs(s - size))
-
-
-def _load_pixmap(base_name: str, size: int) -> QtGui.QPixmap:
-    """Best-matching generated PNG for `size`, falling back to the un-suffixed
-    original. Returns a null QPixmap (never raises) if nothing is found — Qt loading
-    a missing path is already safe, so callers just check `.isNull()`.
-    """
-    exact = _closest_size(size)
-    for name in (f"{base_name}_{exact}.png", f"{base_name}.png"):
-        pm = QtGui.QPixmap(str(asset_path(name)))
-        if not pm.isNull():
-            return pm
-    return QtGui.QPixmap()
-
-
 def state_icon(rgb: tuple[int, int, int], size: int = 128) -> QtGui.QIcon:
-    """The mark drawn in `rgb`, cached per (rgb, size)."""
-    key = (rgb[0], rgb[1], rgb[2], size)
+    """The mark drawn in `rgb`, cached per colour.
+
+    `size` is accepted for call-site readability only — the icon carries every size in
+    TRAY_ICON_SIZES — so it is deliberately not part of the cache key.
+    """
+    key = (rgb[0], rgb[1], rgb[2])
     cached = _state_icon_cache.get(key)
     if cached is not None:
         return cached
@@ -124,9 +107,9 @@ def state_icon(rgb: tuple[int, int, int], size: int = 128) -> QtGui.QIcon:
     return icon
 
 
-#: The mark's geometry, as fractions of the icon's size — **measured from
-#: assets/generated/mark_silhouette.png**, not eyeballed. Reproducing these values agrees
-#: with the shipped artwork on 96.6% of pixels.
+#: The mark's geometry, as fractions of the icon's size — **measured from the source
+#: artwork (assets/source/icon.png, keyed to a silhouette by scripts/build_assets.py)**,
+#: not eyeballed. Reproducing these values agrees with the artwork on 96.6% of pixels.
 #:
 #: The mark is eight long, slim capsules on 45-degree spokes around a wide-open centre,
 #: plus a single accent dot sitting *outside* the ring at the lower right. Two mistakes
@@ -181,6 +164,13 @@ MARK_BRAND_DOT = (254, 151, 4)  # orange
 #: once every PULSE_PERIOD_S seconds.
 PULSE_PERIOD_S = 3.5
 PULSE_MIN = 0.75
+
+#: Brightness levels the breathe is quantised to. A continuous `t` gave every tick a
+#: distinct colour, so nothing could ever be cached and the tray rebuilt nine pixmaps and
+#: called `setIcon` ten times a second. 24 steps over a 25% brightness range is well below
+#: what the eye resolves on a 16px icon, and it makes the pulse a finite ladder of colours
+#: that `state_icon`'s cache absorbs after one cycle.
+PULSE_STEPS = 24
 
 
 def _draw_mark(
@@ -240,74 +230,52 @@ def _scale_value(rgb: tuple[int, int, int], factor: float) -> tuple[int, int, in
     return (out.red(), out.green(), out.blue())
 
 
+def pulse_step(t: float) -> int:
+    """Which of `PULSE_STEPS` brightness levels the breathe is on at monotonic time `t`.
+
+    Exposed so the tray can skip `setIcon` entirely while the step is unchanged — at a
+    200 ms tick most ticks land on the step before them near the top and bottom of the
+    cosine, and re-setting an identical icon still makes the shell repaint the tray.
+    """
+    phase = (t % PULSE_PERIOD_S) / PULSE_PERIOD_S
+    level = 0.5 - 0.5 * math.cos(2 * math.pi * phase)
+    return min(PULSE_STEPS - 1, int(level * PULSE_STEPS))
+
+
 def pulse_icon(rgb: tuple[int, int, int], t: float, size: int = 128) -> QtGui.QIcon:
     """The working icon: `rgb` breathing between PULSE_MIN and full brightness on
     a cosine, once every PULSE_PERIOD_S seconds — a gentle pulse to signal "busy"
     without the sharp on/off of the confirm blink.
-
-    Not cached — `t` is continuous, so every call gets a distinct brightness and a
-    cache entry would never be reused. Drawing is cheap enough that this is fine
-    (see the module docstring on `state_icon`'s cache, which exists for a
-    different reason: reusing exactly two colours across a blink).
     """
-    phase = (t % PULSE_PERIOD_S) / PULSE_PERIOD_S
-    brightness = PULSE_MIN + (1.0 - PULSE_MIN) * (0.5 - 0.5 * math.cos(2 * math.pi * phase))
-    pulsed = _scale_value(rgb, brightness)
-    icon = QtGui.QIcon()
-    for px in TRAY_ICON_SIZES:
-        icon.addPixmap(_draw_mark(pulsed, px))
-    return icon
+    return pulse_icon_for_step(rgb, pulse_step(t), size)
+
+
+def pulse_icon_for_step(rgb: tuple[int, int, int], step: int, size: int = 128) -> QtGui.QIcon:
+    """The breathe icon at one quantised brightness step.
+
+    Routed through `state_icon` on purpose: quantising makes the pulse a fixed ladder of
+    colours, so it can share the one icon cache rather than needing a second one.
+    """
+    brightness = PULSE_MIN + (1.0 - PULSE_MIN) * (step / (PULSE_STEPS - 1))
+    return state_icon(_scale_value(rgb, brightness), size)
 
 
 def brand_icon(size: int = 128) -> QtGui.QIcon:
     """The multicolour mark, used for the "no session" state.
 
-    Drawn from MARK_BRAND_COLORS rather than loaded from mark_color.png so that it shares
-    the status icons' geometry exactly: same capsule width, same open centre, same dot.
-    An idle tray then reads as the logo at rest instead of as a differently-weighted icon.
+    Drawn from MARK_BRAND_COLORS rather than from the artwork so that it shares the status
+    icons' geometry exactly: same capsule width, same open centre, same dot. An idle tray
+    then reads as the logo at rest instead of as a differently-weighted icon.
+
+    `size` is accepted for symmetry with `state_icon` and, for the same reason, ignored:
+    there is only ever one brand icon, carrying every size in TRAY_ICON_SIZES.
     """
-    cached = _brand_icon_cache.get(size)
-    if cached is not None:
-        return cached
+    global _brand_icon
+    if _brand_icon is not None:
+        return _brand_icon
 
     icon = QtGui.QIcon()
     for px in TRAY_ICON_SIZES:
         icon.addPixmap(_draw_mark(None, px, colors=MARK_BRAND_COLORS, dot_color=MARK_BRAND_DOT))
-    _brand_icon_cache[size] = icon
+    _brand_icon = icon
     return icon
-
-
-def _draw_burst_icon(rgb: tuple[int, int, int], size: int = 128) -> QtGui.QIcon:
-    """Procedural fallback used only if a mark asset is missing at runtime: an
-    8-ray tapered burst plus a small accent dot at the lower right, echoing the
-    TintaView mark's shape.
-    """
-    pm = QtGui.QPixmap(size, size)
-    pm.fill(Qt.transparent)
-    p = QtGui.QPainter(pm)
-    p.setRenderHint(QtGui.QPainter.Antialiasing)
-    p.setPen(Qt.NoPen)
-    p.setBrush(QtGui.QColor(*rgb))
-
-    center = size / 2.0
-    inner, outer = size * 0.06, size * 0.44
-    mid, halfw = (inner + outer) / 2.0, size * 0.085
-    p.save()
-    p.translate(center, center)
-    for i in range(RAYS):
-        p.save()
-        p.rotate(i * (360.0 / RAYS))
-        path = QtGui.QPainterPath()
-        path.moveTo(0, -inner)
-        path.quadTo(halfw, -mid, 0, -outer)
-        path.quadTo(-halfw, -mid, 0, -inner)
-        path.closeSubpath()
-        p.drawPath(path)
-        p.restore()
-    p.restore()
-
-    # Small accent dot, lower-right — the mark's signature accent.
-    dot_r = size * 0.065
-    p.drawEllipse(QtCore.QPointF(size * 0.78, size * 0.78), dot_r, dot_r)
-    p.end()
-    return QtGui.QIcon(pm)

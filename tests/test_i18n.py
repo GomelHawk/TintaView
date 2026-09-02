@@ -99,6 +99,14 @@ def test_keys_match_english_exactly(code: str, english: dict):
 #: because English reads "3:59 PM" and German, Polish and Russian read "15:59".
 _EXTRA_PLACEHOLDERS = {"usage.reset.at_time": {"hour24"}}
 
+#: The mirror image: placeholders a catalogue is *allowed* to leave out. The same clock
+#: line and the same reason — a 24-hour locale renders `{hour24}` and drops `{hour12}` and
+#: `{ampm}`, an English-shaped one does the opposite. Nothing else may go missing: a
+#: translation that quietly drops `{version}` or `{latest}` still renders, still reads like
+#: a finished sentence, and silently stops telling the user the one fact it exists to
+#: carry — which is exactly the class of bug the tests around it are for.
+_OPTIONAL_PLACEHOLDERS = {"usage.reset.at_time": {"hour12", "hour24", "ampm"}}
+
 
 @pytest.mark.parametrize("code", OTHER_LANGUAGES)
 def test_placeholders_match_english(code: str, english: dict):
@@ -107,12 +115,15 @@ def test_placeholders_match_english(code: str, english: dict):
         expected = set(_EXTRA_PLACEHOLDERS.get(key, ()))
         for template in _forms(source).values():
             expected |= _placeholders(template)
+        optional = _OPTIONAL_PLACEHOLDERS.get(key, frozenset())
         for form, template in _forms(catalog[key]).items():
             got = _placeholders(template)
-            # A translation may leave one out (Russian's clock line drops {ampm}), but it
-            # may never ask for a placeholder the caller doesn't pass — that renders as
-            # the English string, or as nothing useful at all.
+            # Never a placeholder the caller doesn't pass: that renders as the English
+            # string, or as nothing useful at all.
             assert got <= expected, f"{code}.json {key} [{form}] wants unknown {sorted(got - expected)}"
+            # ...and never one silently dropped, unless it is on the allowlist above.
+            dropped = expected - got - optional
+            assert not dropped, f"{code}.json {key} [{form}] silently drops {sorted(dropped)}"
 
 
 @pytest.mark.parametrize("code", i18n.LANGUAGE_CODES)

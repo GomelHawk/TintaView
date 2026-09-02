@@ -8,12 +8,15 @@ tables — the wizard is the writer of record.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "TintaView"
 DEFAULT_PORT = 8777
@@ -247,8 +250,18 @@ class Config:
     path: Path | None = None  # where this was loaded from; None for defaults
 
     def agent(self, key: str) -> AgentConfig:
-        """Config for one agent, falling back to defaults for agents never configured."""
+        """Config for one agent, falling back to defaults for agents never configured.
+
+        Inserts the table, so the wizard and the settings dialog can edit it in place.
+        Hot paths (the HTTP handler, the stats poll) must use `agent_config()` instead:
+        this mutates `agents` from whichever thread calls it, while `dumps()` iterates
+        that same dict on the GUI thread during a settings save.
+        """
         return self.agents.setdefault(key, AgentConfig())
+
+    def agent_config(self, key: str) -> AgentConfig:
+        """Read-only lookup: the configured table, or defaults, without inserting."""
+        return self.agents.get(key) or AgentConfig()
 
     def is_enabled(self, key: str) -> bool:
         return key in self.enabled_agents
@@ -273,18 +286,77 @@ def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
 # --------------------------------------------------------------------------- load/save
 
 
-def _build(cls: type, data: Any):
+#: Returned by `_coerce_value` for a value no amount of coercion can rescue.
+_INVALID = object()
+
+
+def _coerce_value(value: Any, default: Any) -> Any:
+    """`value` as the type `default` declares, or `_INVALID`.
+
+    TOML is typed, but the file is hand-edited: `port = "8777"` and `blink_ms = "fast"`
+    both parse fine and only blow up much later — in a socket call, or on the blink
+    thread. A quoted number is accepted (the intent is obvious); anything else falls
+    back to the field default.
+    """
+    if isinstance(default, bool):  # before int: bool is an int subclass
+        return value if isinstance(value, bool) else _INVALID
+    if isinstance(default, int):
+        if isinstance(value, bool):
+            return _INVALID
+        if isinstance(value, int):
+            return value
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return _INVALID
+    if isinstance(default, float):
+        if isinstance(value, bool):
+            return _INVALID
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return _INVALID
+    if isinstance(default, str):
+        return value if isinstance(value, str) else _INVALID
+    if isinstance(default, list):
+        # Every list field in the schema is a list of strings (device types, engine
+        # order, enabled agents), so a stray number in one is coerced rather than
+        # dropping the whole list the user clearly meant.
+        return [str(v) for v in value] if isinstance(value, list) else _INVALID
+    return value
+
+
+def _build(cls: type, data: Any, table: str = ""):
     """Instantiate a flat dataclass from a plain dict, ignoring unknown keys.
 
     Unknown keys are dropped rather than raising: a config written by a newer TintaView
     must not stop an older one from starting. Nested tables (engine.chroma, agents.*) are
     assembled explicitly in :func:`load` — `from __future__ import annotations` turns
     field types into strings, so they can't be introspected reliably here.
+
+    Every value is then forced to the type its default declares. `load()` documents that
+    it never raises and always returns something usable, and a wrong-typed value used to
+    sail straight through it into whatever consumed the field.
     """
     if not isinstance(data, dict):
         return cls()
     names = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in data.items() if k in names})
+    obj = cls(**{k: v for k, v in data.items() if k in names})
+    defaults = cls()
+    for f in fields(cls):
+        default = getattr(defaults, f.name)
+        if is_dataclass(default) or default is None:
+            continue  # nested tables are built by the caller; `path` has no default type
+        value = getattr(obj, f.name)
+        coerced = _coerce_value(value, default)
+        if coerced is _INVALID:
+            log.warning("config: %s%s = %r is not usable, using %r",
+                        f"{table}." if table else "", f.name, value, default)
+            coerced = default
+        setattr(obj, f.name, coerced)
+    return obj
 
 
 def _migrate_engine_order(order: list[str], version: int) -> list[str]:
@@ -305,8 +377,21 @@ def _migrate_engine_order(order: list[str], version: int) -> list[str]:
     return ["ghub", *order]
 
 
+def _int_or_default(value: Any, key: str, default: int) -> int:
+    coerced = _coerce_value(value, default)
+    if coerced is _INVALID:
+        log.warning("config: %s = %r is not usable, using %r", key, value, default)
+        return default
+    return coerced
+
+
 def load(path: Path | None = None) -> Config:
-    """Load the config, returning defaults when the file is missing or unreadable."""
+    """Load the config, returning defaults when the file is missing or unreadable.
+
+    Never raises, and never returns a field a consumer can choke on: unknown keys are
+    dropped, wrong-typed values fall back to the field default (`_build`), and every
+    colour is parsed here rather than at the point of use (`_colors`).
+    """
     p = path or config_path()
     try:
         with open(p, "rb") as fh:
@@ -316,13 +401,13 @@ def load(path: Path | None = None) -> Config:
         cfg.path = p
         return cfg
 
-    version = int(raw.get("version", CONFIG_VERSION))
+    version = _int_or_default(raw.get("version", CONFIG_VERSION), "version", CONFIG_VERSION)
 
     engine_raw = raw.get("engine", {}) or {}
-    engine = _build(EngineConfig, engine_raw)
-    engine.chroma = _build(ChromaConfig, engine_raw.get("chroma", {}))
-    engine.ghub = _build(GHubConfig, engine_raw.get("ghub", {}))
-    engine.openrgb = _build(OpenRGBConfig, engine_raw.get("openrgb", {}))
+    engine = _build(EngineConfig, engine_raw, "engine")
+    engine.chroma = _build(ChromaConfig, engine_raw.get("chroma", {}), "engine.chroma")
+    engine.ghub = _build(GHubConfig, engine_raw.get("ghub", {}), "engine.ghub")
+    engine.openrgb = _build(OpenRGBConfig, engine_raw.get("openrgb", {}), "engine.openrgb")
 
     migrated_order = _migrate_engine_order(list(engine.order), version)
     if migrated_order != engine.order:
@@ -331,17 +416,24 @@ def load(path: Path | None = None) -> Config:
 
     agents_raw = dict(raw.get("agents", {}) or {})
     enabled = agents_raw.pop("enabled", None) or ["claude"]
-    agents = {k: _build(AgentConfig, v) for k, v in agents_raw.items() if isinstance(v, dict)}
+    if not isinstance(enabled, list):
+        log.warning("config: agents.enabled = %r is not a list, using ['claude']", enabled)
+        enabled = ["claude"]
+    agents = {
+        k: _build(AgentConfig, v, f"agents.{k}")
+        for k, v in agents_raw.items()
+        if isinstance(v, dict)
+    }
 
     cfg = Config(
         version=version,
-        server=_build(ServerConfig, raw.get("server", {})),
+        server=_build(ServerConfig, raw.get("server", {}), "server"),
         engine=engine,
         colors=_colors(raw.get("colors", {})),
-        stats=_build(StatsConfig, raw.get("stats", {})),
-        ui=_build(UIConfig, raw.get("ui", {})),
-        update=_build(UpdateConfig, raw.get("update", {})),
-        enabled_agents=list(enabled),
+        stats=_build(StatsConfig, raw.get("stats", {}), "stats"),
+        ui=_build(UIConfig, raw.get("ui", {}), "ui"),
+        update=_build(UpdateConfig, raw.get("update", {}), "update"),
+        enabled_agents=[str(a) for a in enabled],
         agents=agents,
         path=p,
     )
@@ -363,6 +455,31 @@ def _toml_value(value: Any) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
+def _validate_colors(obj: Any, table: str, *, blank_ok: bool) -> None:
+    """Replace any colour `hex_to_rgb` can't parse with the field's default.
+
+    Every colour is checked here, on load, because the places that read one are all
+    places an exception is a disaster: the blink thread (which died permanently, leaving
+    `/state` promising a blink forever), the tray's QTimer slot, and `paintEvent`. A
+    hand-edited `confirm = "red"` is a typo, not a reason for the lights to stop.
+    `blank_ok` is the device palette's `""` = "fall back to the icon colour".
+    """
+    defaults = type(obj)()
+    for f in fields(obj):
+        value = getattr(obj, f.name)
+        if not isinstance(value, str):
+            continue  # blink_ms and friends are handled by `_build`
+        if blank_ok and value == "":
+            continue
+        try:
+            hex_to_rgb(value)
+        except (ValueError, AttributeError):
+            default = getattr(defaults, f.name)
+            log.warning("config: %s.%s = %r is not a hex colour, using %r",
+                        table, f.name, value, default)
+            setattr(obj, f.name, default)
+
+
 def _colors(raw: Any) -> ColorsConfig:
     """Assemble `[colors]` plus its nested `[colors.device]`.
 
@@ -371,9 +488,11 @@ def _colors(raw: Any) -> ColorsConfig:
     `[colors.device]` section gets the saturated defaults rather than inheriting the
     brand palette, which is the whole point: hardware and icon want different colours.
     """
-    cfg = _build(ColorsConfig, raw)
+    cfg = _build(ColorsConfig, raw, "colors")
     if isinstance(raw, dict):
-        cfg.device = _build(DeviceColorsConfig, raw.get("device", {}))
+        cfg.device = _build(DeviceColorsConfig, raw.get("device", {}), "colors.device")
+    _validate_colors(cfg, "colors", blank_ok=False)
+    _validate_colors(cfg.device, "colors.device", blank_ok=True)
     return cfg
 
 

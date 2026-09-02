@@ -126,3 +126,96 @@ def test_dumps_does_not_invent_tables_for_unconfigured_agents(tmp_path):
     cfg = Config()  # enabled_agents defaults to ["claude"], cfg.agents is empty
     tables = [line for line in config_mod.dumps(cfg).splitlines() if line.startswith("[agents.")]
     assert tables == ["[agents.claude]"]
+
+
+# --------------------------------------------------------------------------- defensive load
+
+
+def test_load_never_raises_on_wrong_types(tmp_path):
+    """`load()` promises defaults rather than an exception, but a non-int `version` used
+    to raise straight out of it and a string `port` flowed all the way to `bind()`."""
+    path = tmp_path / "config.toml"
+    _write(path, """
+version = 'two'
+
+[server]
+port = 'eight-seven-seven-seven'
+watchdog_timeout = 'never'
+
+[colors]
+blink_ms = 'fast'
+
+[stats]
+poll_seconds = 'often'
+enabled = 'yes'
+
+[agents.cursor]
+stall_seconds = 'soon'
+""")
+
+    cfg = config_mod.load(path)
+
+    assert cfg.version == CONFIG_VERSION
+    assert cfg.server.port == config_mod.DEFAULT_PORT
+    assert cfg.server.watchdog_timeout == 600
+    assert cfg.colors.blink_ms == 400
+    assert cfg.stats.poll_seconds == 300
+    assert cfg.stats.enabled is True
+    assert cfg.agent_config("cursor").stall_seconds == 8.0
+
+
+def test_quoted_numbers_are_accepted(tmp_path):
+    """A quoted number is an obvious typo with an obvious intent — honour it rather than
+    silently reverting a port the user meant."""
+    path = tmp_path / "config.toml"
+    _write(path, """
+version = '2'
+
+[server]
+port = '9000'
+
+[agents.cursor]
+stall_seconds = '12'
+""")
+
+    cfg = config_mod.load(path)
+    assert cfg.server.port == 9000
+    assert cfg.agent_config("cursor").stall_seconds == 12.0
+
+
+def test_unparseable_colours_fall_back_to_the_defaults(tmp_path):
+    """A hand-edited `confirm = "red"` used to kill the blink thread for good (and the
+    tray's QTimer slot with it), because every reader called `hex_to_rgb` at paint time.
+    """
+    path = tmp_path / "config.toml"
+    _write(path, """
+[colors]
+confirm = 'red'
+idle = '#0F0'
+
+[colors.device]
+working = 'amber'
+confirm = ''
+""")
+
+    cfg = config_mod.load(path)
+
+    assert cfg.colors.confirm == Config().colors.confirm
+    assert cfg.colors.idle == "#0F0"  # a valid 3-digit hex is left alone
+    assert cfg.colors.device.working == Config().colors.device.working
+    # "" is not an error in the device palette: it means "use the icon's colour".
+    assert cfg.colors.device.confirm == ""
+    assert cfg.colors.device_rgb("confirm") == cfg.colors.rgb("confirm")
+
+    for status in ("idle", "working", "confirm", "none"):
+        cfg.colors.rgb(status)  # must not raise for any status
+        cfg.colors.device_rgb(status)
+
+
+def test_a_non_list_enabled_agents_falls_back(tmp_path):
+    path = tmp_path / "config.toml"
+    _write(path, """
+[agents]
+enabled = 'claude'
+""")
+    assert config_mod.load(path).enabled_agents == ["claude"]

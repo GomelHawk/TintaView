@@ -358,18 +358,46 @@ class _CallPump:
         self._cond = threading.Condition()
         self._pending: list[_Call] = []
         self._in_flight = False
+        self._stopped = False
         self._thread: threading.Thread | None = None
 
-    def _ensure_started(self) -> None:
+    def _ensure_started_locked(self) -> None:
+        """Start (or restart) the pump thread. Caller holds `_cond`."""
+        self._stopped = False
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._run, daemon=True, name="tintaview-ghub")
             self._thread.start()
 
+    def stop(self, timeout: float = 1.0) -> None:
+        """Retire the pump thread, waking it and joining briefly.
+
+        The pump used to run until the process exited, so every `GHubEngine` ever built
+        kept a `tintaview-ghub` thread alive — and the sidecar worker built a new engine
+        on every `open`, leaking one per reconnect. `GHubEngine.close()` calls this; a
+        later `open()` starts a fresh thread through `_ensure_started_locked` (the SDK
+        is re-initialised there anyway, since `close()` had to `LogiLedShutdown`).
+        """
+        with self._cond:
+            self._stopped = True
+            thread = self._thread
+            self._thread = None
+            # Anything still queued can never run now; release its waiter rather than
+            # leaving a `call()` parked until its timeout.
+            for pending in self._pending:
+                pending.superseded = True
+                pending.done.set()
+            self._pending = []
+            self._cond.notify_all()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+
     def _run(self) -> None:
         while True:
             with self._cond:
-                while not self._pending:
+                while not self._pending and not self._stopped:
                     self._cond.wait()
+                if self._stopped:
+                    return
                 call = self._pending.pop(0)
                 call.started = True
                 self._in_flight = True
@@ -417,8 +445,8 @@ class _CallPump:
             self._cond.notify_all()
 
     def _enqueue(self, call: _Call) -> None:
-        self._ensure_started()
         with self._cond:
+            self._ensure_started_locked()
             if call.key is not None:
                 # A new paint drops stale paints *and* stale commits; a new commit only
                 # drops other commits — see `_COMMIT_KEY`.
@@ -827,11 +855,20 @@ class GHubEngine(BaseEngine):
 
         Measured: `RestoreLighting` (even per-zone) leaves the mouse on our last colour;
         only `LogiLedShutdown` returns G HUB's profile. So we restore best-effort, then
-        always Shutdown, and clear `_initialized` so the next `open()` re-inits on the
-        same pump thread.
+        always Shutdown, and clear `_initialized` so the next `open()` re-inits on a
+        fresh pump thread.
 
-        Drops pending colour commits first so a posted 1% nudge cannot run after restore.
+        Drops pending colour commits first so a posted 1% nudge cannot run after restore,
+        and always retires the pump thread on the way out: the SDK has to be
+        re-initialised by the next `open()` regardless, and a thread that outlives its
+        engine is a real leak in the sidecar worker, which built one engine per `open`.
         """
+        try:
+            self._close_session()
+        finally:
+            self._pump.stop()
+
+    def _close_session(self) -> None:
         if not self._saved:
             return
         self._saved = False

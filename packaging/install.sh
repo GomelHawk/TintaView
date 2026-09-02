@@ -170,10 +170,16 @@ info "Using $PY ($PY_VERSION)"
 
 # If this script is running from inside a TintaView checkout (not piped from curl, where
 # $0 is just "sh" with no directory component), install straight from there. Otherwise
-# download the source for the latest tagged release and install from that instead — never
-# reach outside a venv to `pip install`, which is exactly the operation Debian/Ubuntu
-# 24.04+ refuse with "externally-managed-environment" (PEP 668). The venv's own pip has no
-# such restriction, so this script never needs `--break-system-packages` anywhere.
+# download the latest tagged release's WHEEL and install that — never reach outside a venv
+# to `pip install`, which is exactly the operation Debian/Ubuntu 24.04+ refuse with
+# "externally-managed-environment" (PEP 668). The venv's own pip has no such restriction,
+# so this script never needs `--break-system-packages` anywhere.
+#
+# The wheel, and not GitHub's auto-generated source tarball, because the wheel is what
+# `SHA256SUMS.txt` covers (build.yml checksums the wheel, the sdist and both install
+# scripts). The auto tarball is generated on demand and is not reproducible, so it can
+# never appear in that file and could therefore never be verified. Same artifact as
+# install.ps1 downloads, same checksum file, same fail-closed rule.
 REPO_ROOT=""
 case "$0" in
     */*)
@@ -189,7 +195,12 @@ esac
 
 WORKDIR=""
 cleanup() {
-    [ -n "$WORKDIR" ] && rm -rf "$WORKDIR"
+    # `if`, not `[ … ] && rm`: an EXIT trap whose last command is false sets the script's
+    # exit status, so with no WORKDIR (installing from a local checkout) a completely
+    # successful run reported failure — and `tintaview update` reads that exit code.
+    if [ -n "$WORKDIR" ]; then
+        rm -rf "$WORKDIR"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -217,44 +228,113 @@ fetch_stdout() {
     fi
 }
 
+verify_checksum() {
+    # verify_checksum DIR FILE SUMSFILE — fail closed, exactly like install.ps1's
+    # Assert-Checksum. A missing entry or a mismatched digest deletes the download and
+    # aborts: an installer that skipped the check whenever it was inconvenient would be
+    # no check at all, and this is the one place a supply-chain slip is catastrophic.
+    _dir="$1"
+    _file="$2"
+    _sums="$3"
+
+    # sha256sum writes "<hex>  name" (text) or "<hex> *name" (binary); accept both, and
+    # pull out only the one line we care about so an unrelated entry can never satisfy
+    # the check below.
+    _line=$(awk -v want="$_file" '
+        /^[[:space:]]*#/ { next }
+        NF >= 2 { name = $NF; sub(/^\*/, "", name); if (name == want) { print; exit } }
+    ' "$_dir/$_sums")
+    if [ -z "$_line" ]; then
+        rm -f "$_dir/$_file"
+        die "No checksum for $_file in the release's SHA256SUMS.txt — refusing to install an unverified download."
+    fi
+    printf '%s\n' "$_line" >"$_dir/expected.sha256"
+
+    # sha256sum on Linux (coreutils), shasum on macOS (which ships no sha256sum). Both
+    # resolve the filename in the checksums line relative to the working directory,
+    # hence the subshell cd.
+    if command -v sha256sum >/dev/null 2>&1; then
+        _verified=$( (cd "$_dir" && sha256sum -c expected.sha256 >/dev/null 2>&1) && echo yes || echo no )
+    elif command -v shasum >/dev/null 2>&1; then
+        _verified=$( (cd "$_dir" && shasum -a 256 -c expected.sha256 >/dev/null 2>&1) && echo yes || echo no )
+    else
+        rm -f "$_dir/$_file"
+        die "Neither sha256sum nor shasum was found, so $_file cannot be verified.
+Install one (coreutils on Linux, shasum ships with Perl on macOS) and re-run — an
+unverified build is never installed."
+    fi
+
+    if [ "$_verified" != yes ]; then
+        rm -f "$_dir/$_file"
+        die "SHA-256 mismatch for $_file: it does not match the release's SHA256SUMS.txt.
+The download has been deleted — an unverified build is never installed."
+    fi
+    info "SHA-256 verified for $_file"
+}
+
+RELEASES_URL="https://github.com/$GITHUB_REPO/releases"
+
 if [ -n "$REPO_ROOT" ]; then
     info "Installing from local checkout at $REPO_ROOT"
     PKG_SPEC="$REPO_ROOT"
+elif [ -n "${TINTAVIEW_SOURCE_URL:-}" ]; then
+    # Explicit developer/CI override: install exactly what the caller pointed at, with no
+    # checksum to verify it against. Loud on purpose — nobody should reach this by
+    # accident, and it is the only path in this script that installs unverified code.
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        die "Neither curl nor wget is available to download $TINTAVIEW_SOURCE_URL."
+    fi
+    warn "TINTAVIEW_SOURCE_URL is set — installing from $TINTAVIEW_SOURCE_URL WITHOUT any
+SHA-256 verification. This override exists for development; unset it to install a
+checksum-verified release."
+    WORKDIR=$(mktemp -d)
+    fetch "$TINTAVIEW_SOURCE_URL" "$WORKDIR/src.tar.gz" \
+        || die "Could not download $TINTAVIEW_SOURCE_URL."
+    tar -xzf "$WORKDIR/src.tar.gz" -C "$WORKDIR"
+    SRC_DIR=$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    [ -n "$SRC_DIR" ] || die "Downloaded archive did not contain a source directory."
+    PKG_SPEC="$SRC_DIR"
 else
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-        die "Neither curl nor wget is available to download the TintaView release."
+        die "Neither curl nor wget is available to download the TintaView release.
+  Debian/Ubuntu:  sudo apt install curl
+  Fedora/RHEL:    sudo dnf install curl
+  macOS:          curl is preinstalled — check your PATH"
     fi
 
-    TARBALL_URL="${TINTAVIEW_SOURCE_URL:-}"
-    if [ -z "$TARBALL_URL" ]; then
-        info "Looking up the latest TintaView release"
-        release_json=$(fetch_stdout "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null || true)
-        tag=$(printf '%s\n' "$release_json" \
-            | grep -m1 '"tag_name"' \
-            | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
-        if [ -n "$tag" ]; then
-            TARBALL_URL="https://github.com/$GITHUB_REPO/archive/refs/tags/$tag.tar.gz"
-        fi
+    info "Looking up the latest TintaView release"
+    release_json=$(fetch_stdout "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null || true)
+    TAG=$(printf '%s\n' "$release_json" \
+        | grep -m1 '"tag_name"' \
+        | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
+    if [ -z "$TAG" ]; then
+        # Never fall back to `pip install tintaview`: TintaView is deliberately not
+        # published to PyPI (AGENTS.md, non-goals), so that name is unclaimed and
+        # squattable — installing from it would run a stranger's code.
+        die "Could not resolve a release tag from GitHub, so there is nothing to install.
+Check $RELEASES_URL and your network, then re-run this script. If you already have a
+checkout, run it from there instead:  sh packaging/install.sh"
     fi
 
-    if [ -n "$TARBALL_URL" ]; then
-        WORKDIR=$(mktemp -d)
-        info "Downloading source from $TARBALL_URL"
-        if fetch "$TARBALL_URL" "$WORKDIR/src.tar.gz"; then
-            tar -xzf "$WORKDIR/src.tar.gz" -C "$WORKDIR"
-            SRC_DIR=$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-            if [ -z "$SRC_DIR" ]; then
-                die "Downloaded archive did not contain a source directory."
-            fi
-            PKG_SPEC="$SRC_DIR"
-        else
-            warn "Could not download $TARBALL_URL; falling back to 'pip install tintaview'."
-            PKG_SPEC="tintaview"
-        fi
-    else
-        warn "Could not resolve a release tag from GitHub; falling back to 'pip install tintaview'."
-        PKG_SPEC="tintaview"
-    fi
+    VERSION="${TAG#v}"
+    # PEP 427: the distribution part of a wheel filename uses underscores. "tintaview"
+    # has none, but normalising here means a future rename cannot silently break the URL
+    # — same reasoning as install.ps1's $wheelName.
+    WHEEL_NAME="tintaview-$VERSION-py3-none-any.whl"
+    SUMS_NAME="SHA256SUMS.txt"
+    BASE_URL="$RELEASES_URL/download/$TAG"
+
+    WORKDIR=$(mktemp -d)
+    info "Downloading $WHEEL_NAME"
+    fetch "$BASE_URL/$WHEEL_NAME" "$WORKDIR/$WHEEL_NAME" \
+        || die "Could not download $BASE_URL/$WHEEL_NAME.
+The release may still be building — check $RELEASES_URL and try again shortly."
+    fetch "$BASE_URL/$SUMS_NAME" "$WORKDIR/$SUMS_NAME" \
+        || die "Could not download $BASE_URL/$SUMS_NAME, so $WHEEL_NAME cannot be verified.
+Refusing to install an unverified build. Check $RELEASES_URL and try again shortly."
+
+    verify_checksum "$WORKDIR" "$WHEEL_NAME" "$SUMS_NAME"
+    PKG_SPEC="$WORKDIR/$WHEEL_NAME"
 fi
 
 # --------------------------------------------------------------------------- venv
@@ -283,6 +363,14 @@ fi
 
 info "Installing $APP_NAME ($EXTRA_SPEC) — this may take a minute the first time"
 "$VENV_PY" -m pip install --quiet --upgrade "$EXTRA_SPEC"
+
+# ...and then plant TintaView's own code unconditionally, the same repair pass install.ps1
+# runs. `--upgrade` compares version numbers and does nothing when they match, so without
+# this a re-run cannot repair a damaged install, and any release that reuses a version
+# string (a re-tag, or a dev build) silently leaves the old code in place while reporting
+# success. `--no-deps` keeps it to the one artifact, so the dependency resolution above is
+# not repeated.
+"$VENV_PY" -m pip install --quiet --force-reinstall --no-deps "$PKG_SPEC"
 
 # --------------------------------------------------------------------------- launcher
 

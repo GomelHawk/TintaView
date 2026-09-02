@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import queue
 import threading
 
 import pytest
@@ -129,8 +130,17 @@ class _FakeProc:
 
 
 def _sidecar_with(proc):
+    """A sidecar wired to `proc`, with the persistent stdout reader the real `start()`
+    would have launched (one per worker, not one per request)."""
     sidecar = sc.GHubSidecar(GHubConfig())
     sidecar._proc = proc
+    sidecar._replies = queue.Queue()
+    reader = threading.Thread(
+        target=sidecar._pump_stdout, args=(proc, sidecar._replies), daemon=True,
+        name="tv-ghub-sidecar-out",
+    )
+    reader.start()
+    sidecar._reader_thread = reader
     return sidecar
 
 
@@ -213,3 +223,68 @@ def test_engine_reports_inactive_when_the_sidecar_was_never_built(monkeypatch):
     engine._saved = True
     assert engine._sidecar is None
     assert engine.active is False
+
+
+def test_the_stdout_reader_is_one_thread_per_worker_not_per_request():
+    """It used to be a thread per `readline()` — one created and abandoned on every
+    paint, i.e. twice a second for the whole of a confirm blink."""
+    proc = _FakeProc(replies=[f'{{"id": {i}, "ok": true}}\n' for i in range(1, 6)])
+    sidecar = _sidecar_with(proc)
+    before = threading.active_count()
+    for _ in range(5):
+        assert sidecar._request("ping", {})["ok"] is True
+    assert threading.active_count() <= before
+
+
+def test_a_discarded_worker_cannot_answer_a_later_request():
+    """`_discard` replaces the reply queue, so a line the dying worker already wrote can
+    never be handed to the next request as its answer — that desync is permanent."""
+    proc = _FakeProc(replies=['{"id": 99, "ok": true}\n', '{"id": 2, "ok": true}\n'])
+    sidecar = _sidecar_with(proc)
+    with pytest.raises(RuntimeError, match="id mismatch"):
+        sidecar._request("ping", {})
+    assert sidecar._replies.empty()
+    assert sidecar.alive is False
+
+
+def test_worker_reuses_the_engine_when_the_config_is_unchanged(monkeypatch):
+    """`worker_main` built a new `GHubEngine` per `open`, leaking its SDK pump thread and
+    an atexit entry every time the parent reconnected."""
+    built: list[object] = []
+
+    class _FakeEngine:
+        def __init__(self, cfg):
+            built.append(self)
+            self.cfg = cfg
+            self._active = False
+            self.closes = 0
+
+        @property
+        def active(self):
+            return self._active
+
+        def open(self):
+            self._active = True
+            return True
+
+        def close(self):
+            self._active = False
+            self.closes += 1
+
+    from tintaview.engines import ghub as ghub_mod
+
+    monkeypatch.setattr(ghub_mod, "GHubEngine", _FakeEngine)
+    lines = [
+        json.dumps({"id": 1, "cmd": "open", "cfg": sc._cfg_payload(GHubConfig())}),
+        json.dumps({"id": 2, "cmd": "close"}),
+        json.dumps({"id": 3, "cmd": "open", "cfg": sc._cfg_payload(GHubConfig())}),
+        json.dumps({"id": 4, "cmd": "close"}),
+        # ...and a *different* config must not be answered by the old engine.
+        json.dumps({"id": 5, "cmd": "open",
+                    "cfg": sc._cfg_payload(GHubConfig(device_types=["rgb"]))}),
+    ]
+    monkeypatch.setattr(sc.sys, "stdin", io.StringIO("\n".join(lines) + "\n"))
+    assert sc.worker_main() == 0
+
+    assert len(built) == 2
+    assert built[1].cfg.device_types == ["rgb"]

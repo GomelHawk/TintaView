@@ -850,3 +850,59 @@ def test_a_genuinely_unknown_agent_key_still_warns(capsys):
     assert reporter.warns == 1
     assert "nonesuch: not a known agent" in out
     assert "claude/codex/cursor" in out  # listed from the registry, not hardcoded
+
+
+# --------------------------------------------------------------------------- unreadable hooks
+
+
+def test_unreadable_agent_config_is_a_warning_that_does_not_say_run_install(capsys):
+    """A settings.json that exists but cannot be parsed must not read as "missing".
+
+    "Missing" tells the user to run `hooks install`, which plans a CREATE and would
+    replace a file full of their own hooks with only TintaView's.
+    """
+    from tintaview.install import detect as detect_mod
+
+    cfg = _write_config(enabled_agents=["claude"])
+    settings = agents_base.get("claude").hooks_config_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{ not json at all", encoding="utf-8")
+    env = detect_mod.Environment(platform=detect_mod.PLATFORM_LINUX, mode=detect_mod.MODE_NATIVE)
+    reporter = D._Reporter(verbose=True)
+
+    D._check_agent_hooks(reporter, cfg, env)
+
+    out = capsys.readouterr().out
+    assert reporter.warns == 1 and reporter.fails == 0, out
+    assert "could not be read or parsed" in out
+    assert "hooks missing" not in out
+    assert "do NOT run" in out
+
+
+# --------------------------------------------------------------------------- wsl.exe cost
+
+
+def test_run_doctor_resolves_the_wsl_split_home_only_once(tmp_path, monkeypatch):
+    """`_wsl_split_home` shells out to `wsl.exe` with a 20-second timeout.
+
+    The hook-script check and the agent-hooks check each used to call it, so a stopped
+    distro cost `doctor` two full timeouts back to back.
+    """
+    from tintaview.install import detect as detect_mod
+
+    _write_config(enabled_agents=["claude"])
+    env = detect_mod.Environment(
+        platform=detect_mod.PLATFORM_WINDOWS, mode=detect_mod.MODE_WSL_SPLIT, distro="Ubuntu"
+    )
+    monkeypatch.setattr(D, "_check_environment", lambda reporter: env)
+
+    calls = []
+
+    def counting(passed_env):
+        calls.append(passed_env)
+        return None  # distro unreachable — degrade to the local checks
+
+    monkeypatch.setattr(D, "_wsl_split_home", counting)
+    D.run_doctor(verbose=False)
+
+    assert len(calls) == 1, f"wsl.exe was consulted {len(calls)} times, not once"

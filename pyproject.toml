@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68", "setuptools-scm>=8"]
+# setuptools>=77 for PEP 639: `license` as an SPDX expression plus `license-files`.
+# Older setuptools rejects the string form outright rather than ignoring it.
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +10,8 @@ dynamic = ["version"]
 description = "Agent-status lighting and usage tray for Claude Code, Codex CLI and Cursor"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 
 # The core (status broker + hooks + engines) is deliberately stdlib-only apart from
 # tomlkit: it has to run on a bare WSL distro without dragging in a compiler toolchain,

@@ -1,29 +1,39 @@
 #!/usr/bin/env python3
-"""Generate TintaView's tray/icon/logo assets from the source artwork.
+"""Generate TintaView's two runtime image assets from the source artwork.
 
 Reads the read-only sources under ``assets/source/`` and (re)writes everything
-under ``assets/generated/``:
+under ``tintaview/assets/generated/``:
 
-  mark_silhouette.png / mark_silhouette_<N>.png  - white burst, alpha only, for tray recolouring
-  mark_color.png      / mark_color_<N>.png       - burst in its original gradient colours
-  tintaview.ico                                   - Windows multi-resolution icon
-  tintaview.icns (or a .iconset/ folder if icns writing is unsupported here)
-  logo_full.png / logo_transparent.png            - wordmark lockups for docs/wizard
+  logo_full.png   - the wordmark lockup, loaded by ui/icons.py for the About dialog
+  tintaview.ico   - Windows multi-resolution icon, used by packaging/install.ps1
+
+That is the whole list on purpose. This script used to also emit sixteen sized
+``mark_silhouette_<N>.png`` / ``mark_color_<N>.png`` files, their un-suffixed
+originals, ``logo_transparent.png`` and a ``tintaview.icns`` - about a megabyte
+shipped inside every wheel and loaded by nothing. The tray mark is *drawn* (see
+``tintaview/ui/icons.py``: a tray asks for 16-24px, where resampling a PNG turns
+the capsule ends to mush), the About dialog deliberately uses the opaque logo
+rather than the transparent one, and there is no macOS ``.app`` bundle for a
+``.icns`` to live in - packaging is a pure-Python wheel on every platform
+(AGENTS.md, "Packaging"). If a macOS bundle ever happens, add the ``.icns`` back
+*outside* the package directory so it stays out of the wheel.
 
 Run as:
 
     python3 scripts/build_assets.py            # (re)generate everything
-    python3 scripts/build_assets.py --check    # verify artifacts exist (CI)
+    python3 scripts/build_assets.py --check    # fail if the committed files are stale
 
-The script is idempotent: given unchanged sources it writes byte-identical
-output (Pillow's PNG/ICO encoders are deterministic for a given pixel buffer
-and save options).
+``--check`` regenerates into a temporary directory and compares bytes, which it
+can do because the script is idempotent: given unchanged sources it writes
+byte-identical output (Pillow's PNG/ICO encoders are deterministic for a given
+pixel buffer and save options).
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +48,8 @@ OUT_DIR = REPO_ROOT / "tintaview" / "assets" / "generated"
 
 ICON_SRC = SRC_DIR / "icon.png"
 FULL_LOGO_SRC = SRC_DIR / "full_logo.png"
-TRANSPARENT_SRC = SRC_DIR / "transparent.png"
+# assets/source/transparent.png is kept as source artwork but no longer generated
+# from: logo_transparent.png had no runtime reader (see the module docstring).
 
 # --- luminance keying -------------------------------------------------------
 # The mark sources sit on a near-black (~lum 6-11) square background. Sampling
@@ -81,10 +92,12 @@ TARGET_MARK_SPAN = 0.94
 MARGIN_FRACTION = (1.0 - TARGET_MARK_SPAN) / (2.0 * TARGET_MARK_SPAN)
 
 # Output size sets.
-PNG_SIZES = [16, 24, 32, 48, 64, 128, 256, 512]
 ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
-BASE_SIZE = 512
 LOGO_MAX_WIDTH = 1024
+
+#: Only used to report the mark's alpha coverage after a build — a cheap sanity signal
+#: that the luminance keying above still separates mark from background.
+COVERAGE_SIZES = (512, 16)
 
 
 def _smoothstep(x: np.ndarray) -> np.ndarray:
@@ -194,8 +207,9 @@ def _premultiplied_resize(img: Image.Image, size: int) -> Image.Image:
     return Image.fromarray(out, "RGBA")
 
 
-def _build_marks() -> tuple[Image.Image, Image.Image]:
-    """Return (silhouette, colour) base RGBA images at BASE_SIZE, trimmed+padded."""
+def _build_mark() -> Image.Image:
+    """The colour mark as an RGBA image at the source's native resolution, trimmed and
+    re-padded so it fills its frame (see MARGIN_FRACTION)."""
     src = Image.open(ICON_SRC).convert("RGB")
     rgb = np.asarray(src)
     lum = _luminance(rgb.astype(np.float64))
@@ -203,36 +217,13 @@ def _build_marks() -> tuple[Image.Image, Image.Image]:
     bg = _estimate_background(rgb, lum)
 
     clean_rgb = _unpremultiply_edges(rgb, alpha, bg)
-
     padded_rgb, padded_alpha = _trim_and_pad(clean_rgb, alpha)
-
-    white_rgb = np.full_like(padded_rgb, 255)
-    silhouette_native = Image.fromarray(
-        np.dstack([white_rgb, padded_alpha]), "RGBA"
-    )
-    color_native = Image.fromarray(np.dstack([padded_rgb, padded_alpha]), "RGBA")
-
-    silhouette = _premultiplied_resize(silhouette_native, BASE_SIZE)
-    color = _premultiplied_resize(color_native, BASE_SIZE)
-    return silhouette, color, silhouette_native, color_native
+    return Image.fromarray(np.dstack([padded_rgb, padded_alpha]), "RGBA")
 
 
-def _write_size_set(native: Image.Image, base_512: Image.Image, name: str) -> list[Path]:
-    written = []
-    base_path = OUT_DIR / f"{name}.png"
-    base_512.save(base_path)
-    written.append(base_path)
-    for size in PNG_SIZES:
-        img = base_512 if size == BASE_SIZE else _premultiplied_resize(native, size)
-        path = OUT_DIR / f"{name}_{size}.png"
-        img.save(path)
-        written.append(path)
-    return written
-
-
-def _write_ico(color_native: Image.Image) -> Path:
-    path = OUT_DIR / "tintaview.ico"
-    sized = [_premultiplied_resize(color_native, s) for s in ICO_SIZES]
+def _write_ico(mark: Image.Image, out_dir: Path) -> Path:
+    path = out_dir / "tintaview.ico"
+    sized = [_premultiplied_resize(mark, s) for s in ICO_SIZES]
     largest = sized[-1]
     largest.save(
         path,
@@ -243,51 +234,6 @@ def _write_ico(color_native: Image.Image) -> Path:
     return path
 
 
-def _write_icns(color_native: Image.Image) -> tuple[Path | None, Path | None]:
-    """Try to write a real .icns; fall back to a documented .iconset/ folder."""
-    icns_path = OUT_DIR / "tintaview.icns"
-    icns_sizes = [16, 32, 64, 128, 256, 512, 1024]
-    try:
-        sized = [_premultiplied_resize(color_native, s) for s in icns_sizes]
-        largest = sized[-1]
-        largest.save(icns_path, format="ICNS", append_images=sized[:-1])
-        if icns_path.exists() and icns_path.stat().st_size > 0:
-            return icns_path, None
-    except Exception:
-        pass
-
-    if icns_path.exists():
-        icns_path.unlink()
-
-    # Fallback: write the .iconset folder Apple's iconutil expects, plus a
-    # README documenting how to finish the conversion on a macOS host.
-    iconset_dir = OUT_DIR / "tintaview.iconset"
-    iconset_dir.mkdir(exist_ok=True)
-    iconset_map = {
-        "icon_16x16.png": 16,
-        "icon_16x16@2x.png": 32,
-        "icon_32x32.png": 32,
-        "icon_32x32@2x.png": 64,
-        "icon_128x128.png": 128,
-        "icon_128x128@2x.png": 256,
-        "icon_256x256.png": 256,
-        "icon_256x256@2x.png": 512,
-        "icon_512x512.png": 512,
-        "icon_512x512@2x.png": 1024,
-    }
-    for filename, size in iconset_map.items():
-        _premultiplied_resize(color_native, size).save(iconset_dir / filename)
-
-    readme = iconset_dir / "README.txt"
-    readme.write_text(
-        "Pillow could not write a .icns directly in this environment.\n"
-        "This folder is a ready .iconset - finish the conversion on macOS with:\n\n"
-        "    iconutil -c icns tintaview.iconset -o tintaview.icns\n\n"
-        "then move tintaview.icns into assets/generated/.\n"
-    )
-    return None, iconset_dir
-
-
 def _resize_to_max_width(img: Image.Image, max_width: int) -> Image.Image:
     if img.width <= max_width:
         return img.copy()
@@ -295,77 +241,70 @@ def _resize_to_max_width(img: Image.Image, max_width: int) -> Image.Image:
     return img.resize((max_width, new_height), Image.LANCZOS)
 
 
-def _write_logos() -> list[Path]:
-    written = []
-
+def _write_logo(out_dir: Path) -> Path:
     full_logo = Image.open(FULL_LOGO_SRC).convert("RGB")
-    full_out = _resize_to_max_width(full_logo, LOGO_MAX_WIDTH)
-    full_path = OUT_DIR / "logo_full.png"
-    full_out.save(full_path)
-    written.append(full_path)
-
-    transparent_logo = Image.open(TRANSPARENT_SRC).convert("RGBA")
-    transparent_out = _resize_to_max_width(transparent_logo, LOGO_MAX_WIDTH)
-    transparent_path = OUT_DIR / "logo_transparent.png"
-    transparent_out.save(transparent_path)
-    written.append(transparent_path)
-
-    return written
+    path = out_dir / "logo_full.png"
+    _resize_to_max_width(full_logo, LOGO_MAX_WIDTH).save(path)
+    return path
 
 
-def expected_artifacts() -> dict[str, list[Path]]:
-    """Manifest of everything build() should produce, for --check."""
-    manifest: dict[str, list[Path]] = {
-        "mark_color": [OUT_DIR / "mark_color.png"]
-        + [OUT_DIR / f"mark_color_{s}.png" for s in PNG_SIZES],
-        "mark_silhouette": [OUT_DIR / "mark_silhouette.png"]
-        + [OUT_DIR / f"mark_silhouette_{s}.png" for s in PNG_SIZES],
-        "ico": [OUT_DIR / "tintaview.ico"],
-        "logos": [OUT_DIR / "logo_full.png", OUT_DIR / "logo_transparent.png"],
-    }
-    return manifest
-
-
-def build() -> dict[str, object]:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    silhouette, color, silhouette_native, color_native = _build_marks()
-
-    silhouette_files = _write_size_set(silhouette_native, silhouette, "mark_silhouette")
-    color_files = _write_size_set(color_native, color, "mark_color")
-    ico_file = _write_ico(color_native)
-    icns_file, iconset_dir = _write_icns(color_native)
-    logo_files = _write_logos()
-
+def expected_artifacts(out_dir: Path = OUT_DIR) -> dict[str, list[Path]]:
+    """Manifest of everything build() produces, for --check."""
     return {
-        "silhouette_files": silhouette_files,
-        "color_files": color_files,
-        "ico_file": ico_file,
-        "icns_file": icns_file,
-        "iconset_dir": iconset_dir,
-        "logo_files": logo_files,
-        "silhouette_512": silhouette,
+        "ico": [out_dir / "tintaview.ico"],
+        "logo": [out_dir / "logo_full.png"],
     }
+
+
+def build(out_dir: Path = OUT_DIR) -> dict[str, object]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    mark = _build_mark()
+    ico_file = _write_ico(mark, out_dir)
+    logo_file = _write_logo(out_dir)
+
+    return {"ico_file": ico_file, "logo_file": logo_file, "mark": mark}
 
 
 def check() -> bool:
-    ok = True
-    manifest = expected_artifacts()
-    for group, paths in manifest.items():
-        for path in paths:
-            if not path.exists() or path.stat().st_size == 0:
-                print(f"MISSING or EMPTY [{group}]: {path}", file=sys.stderr)
-                ok = False
+    """Regenerate into a temp directory and compare bytes with the committed files.
 
-    icns_path = OUT_DIR / "tintaview.icns"
-    iconset_dir = OUT_DIR / "tintaview.iconset"
-    if icns_path.exists() and icns_path.stat().st_size > 0:
-        pass
-    elif iconset_dir.is_dir() and any(iconset_dir.glob("*.png")):
-        print(f"NOTE: tintaview.icns not present, using fallback {iconset_dir}", file=sys.stderr)
-    else:
-        print("MISSING: tintaview.icns (and no fallback tintaview.iconset/)", file=sys.stderr)
-        ok = False
+    An existence check was worse than nothing here. Every one of these files is derived
+    from artwork under assets/source/, so the failure that actually happens is a re-exported
+    source whose output nobody regenerated — at which point all the files still exist, are
+    all non-empty, and are all wrong. Byte comparison catches exactly that, and it does not
+    false-alarm because the pipeline is reproducible (see the module docstring).
+    """
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        fresh_dir = Path(tmp)
+        build(fresh_dir)
+        for group, paths in expected_artifacts().items():
+            for path in paths:
+                if not path.exists() or path.stat().st_size == 0:
+                    print(f"MISSING or EMPTY [{group}]: {path}", file=sys.stderr)
+                    ok = False
+                    continue
+                if path.read_bytes() != (fresh_dir / path.name).read_bytes():
+                    print(
+                        f"STALE [{group}]: {path} differs from a fresh build — "
+                        "run `python scripts/build_assets.py`",
+                        file=sys.stderr,
+                    )
+                    ok = False
+
+    # Leftovers matter as much as staleness: every file under this directory is shipped
+    # inside the wheel, so one the script no longer produces is dead weight in every
+    # install until somebody notices.
+    expected_names = {p.name for paths in expected_artifacts().values() for p in paths}
+    for path in sorted(OUT_DIR.glob("*")):
+        if path.name not in expected_names:
+            print(
+                f"UNEXPECTED: {path} is not produced by this script and is shipped in "
+                "the wheel for nothing — delete it",
+                file=sys.stderr,
+            )
+            ok = False
 
     return ok
 
@@ -375,7 +314,7 @@ def main() -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="verify all expected artifacts exist and are non-empty; do not regenerate",
+        help="regenerate into a temp dir and fail if the committed files differ",
     )
     args = parser.parse_args()
 
@@ -384,23 +323,12 @@ def main() -> int:
 
     result = build()
 
-    silhouette_512 = result["silhouette_512"]
-    alpha = np.asarray(silhouette_512)[..., 3]
-    coverage_512 = (alpha > 0).mean() * 100
-
-    small = _premultiplied_resize(
-        Image.open(OUT_DIR / "mark_silhouette.png").convert("RGBA"), 16
-    )
-    alpha_16 = np.asarray(small)[..., 3]
-    coverage_16 = (alpha_16 > 0).mean() * 100
-
+    mark = result["mark"]
     print(f"Generated assets under {OUT_DIR}")
-    print(f"  mark_silhouette.png alpha coverage @512: {coverage_512:.1f}%")
-    print(f"  mark_silhouette.png alpha coverage @16 : {coverage_16:.1f}%")
-    if result["icns_file"]:
-        print(f"  tintaview.icns written: {result['icns_file']}")
-    else:
-        print(f"  tintaview.icns NOT supported here; wrote {result['iconset_dir']} instead")
+    for size in COVERAGE_SIZES:
+        alpha = np.asarray(_premultiplied_resize(mark, size))[..., 3]
+        print(f"  mark alpha coverage @{size}: {(alpha > 0).mean() * 100:.1f}%")
+    print(f"  {result['logo_file'].name}, {result['ico_file'].name}")
 
     return 0
 

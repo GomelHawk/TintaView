@@ -206,6 +206,30 @@ class RemotePathAdapter:
         return self._path
 
 
+def configured_adapter(cfg: Any, adapter: Any) -> Any:
+    """`adapter`, but with `hooks_config_path()` resolved against `agents.<key>.home`.
+
+    A bare adapter answers from `Path.home()`, which on the Windows half of a WSL-split
+    install is `C:\\Users\\you` — the wrong side of the boundary entirely. The config
+    already records where each agent really lives (the wizard writes the distro's UNC
+    path there), so every hooks check — `doctor`, `tintaview hooks status`, the settings
+    dialog and the tray's drift check — must resolve through here rather than the bare
+    adapter, or a working split install is reported as "hooks missing".
+    """
+    from ..core import config as config_mod
+
+    acfg = cfg.agents.get(adapter.key) if hasattr(cfg, "agents") else None
+    if acfg is None or not acfg.home:
+        return adapter
+    home = config_mod.expand(acfg.home)
+    if home == adapter.default_home():
+        return adapter
+    # Derived from the adapter's own paths rather than re-spelling ".claude/settings.json"
+    # here, exactly as `agent_config_unc_path` does.
+    rel = adapter.hooks_config_path("user").relative_to(adapter.default_home())
+    return RemotePathAdapter(adapter, home / rel)
+
+
 def agent_config_unc_path(distro: str, home: str, adapter: Any) -> Path:
     """The `\\\\wsl.localhost\\...` path to `adapter`'s hooks config file inside `distro`.
 
