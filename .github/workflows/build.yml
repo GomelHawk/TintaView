@@ -44,7 +44,7 @@ jobs:
       # The test run below constructs real QWidgets; see ci.yml for why offscreen.
       QT_QPA_PLATFORM: offscreen
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # setuptools-scm derives the version from `git describe --tags`, which needs
           # the tag history available locally -- a shallow (depth-1) checkout leaves
