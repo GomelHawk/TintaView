@@ -17,6 +17,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -24,6 +25,7 @@ import pytest
 
 from tintaview.core.config import AgentConfig, Config
 from tintaview.stats import _scan as scan_mod
+from tintaview.stats import format as fmt
 from tintaview.stats.cache import UsageCache
 from tintaview.stats.model import UsageProvider, UsageResult, UsageRow
 from tintaview.stats.providers import codex as codex_mod
@@ -64,6 +66,13 @@ class _FakeResponse:
 
     def read(self) -> bytes:
         return self._payload
+
+
+def _row_text(row: UsageRow) -> str:
+    """The right-hand text a row actually shows, exactly as `Flyout.paintEvent` builds
+    it: a row carrying a `reset_at` is worded at render time, so asserting on `.right`
+    alone would test a field the user never sees."""
+    return fmt.reset_row_text(row.reset_at, row.reset_style) if row.reset_at else row.right
 
 
 def _http_error(code: int, reason: str = "error") -> urllib.error.HTTPError:
@@ -114,6 +123,12 @@ class TestClaudeOfficial:
         assert five_hour.show_pct is True
         assert five_hour.kind == "limit"
         assert five_hour.severity == "normal"
+        # The reset time is carried as an instant, not as pre-worded text — `right`
+        # stays empty and the wording happens at render time.
+        assert five_hour.right == ""
+        assert five_hour.reset_at > 0
+        assert five_hour.reset_style == fmt.RESET_RELATIVE
+        assert _row_text(five_hour).startswith("Resets ")
 
         weekly = by_label["Weekly · all models"]
         assert weekly.pct == 88.0
@@ -180,11 +195,14 @@ class TestClaudeOfficial:
 
         opus = next(r for r in result.rows if r.label == "Weekly · Opus")
         assert opus.pct == 10.0
-        assert opus.right != "Not used yet"
+        assert opus.reset_at > 0  # it has been used, so it has a reset instant
+        assert _row_text(opus) != "Not used yet"
 
         fable = next(r for r in result.rows if r.label == "Weekly · Fable")
         assert fable.pct == 0.0
+        # Static text, so it stays in `right`; no instant to word.
         assert fable.right == "Not used yet"
+        assert fable.reset_at == 0.0
 
 
 class TestClaudeFallback:
@@ -317,6 +335,9 @@ class TestClaudeAuthAndRateLimit:
         assert result.error is not None
         assert "expired" in result.error
         assert "claude" in result.error.lower()
+        # The classification `StatsService` acts on: a dead login is not a blip the
+        # next poll fixes, so cached rows must not be allowed to stand in for it.
+        assert result.error_kind == "auth"
 
     def test_429_does_not_fall_back_to_estimate(self, tmp_path, monkeypatch):
         home = tmp_path / "claude_home"
@@ -346,6 +367,9 @@ class TestClaudeAuthAndRateLimit:
         assert result.rows == []
         assert result.source == "official"  # never downgraded to "estimate"
         assert "429" in result.error or "rate" in result.error.lower()
+        # Transient, not auth: nobody is signed out, so cached rows may still stand in
+        # for this one however long it lasts.
+        assert result.error_kind == "transient"
 
     def test_service_keeps_cached_rows_across_a_rate_limit(self, tmp_path, monkeypatch):
         """End-to-end: StatsService must not let a 429 blank out a previous good
@@ -756,10 +780,40 @@ class TestCursor:
         # must never stand in for either bar.
         assert cursor_models.pct != other_models.pct
 
-        assert "Resets" in cursor_models.right
+        # The cycle end is carried as an instant and worded at render time — the row
+        # that used to read "Resets 6 Sep" on 7 Sep because the wording was frozen in.
+        assert cursor_models.right == ""
+        assert cursor_models.reset_at > 0
+        assert cursor_models.reset_style == fmt.RESET_DATE
+        assert _row_text(cursor_models).startswith("Resets ")
+        # Static text, not a reset time, so this one stays in `right`.
         assert other_models.right == "$20.00 included"
+        assert other_models.reset_at == 0.0
 
         assert self.TOKEN not in caplog.text
+
+    def test_a_dead_session_is_an_auth_failure_but_a_locked_db_is_not(self, tmp_path, monkeypatch):
+        """Both come out of the same `_TokenError` branch and must not be classified
+        together: Cursor holds a write lock on `state.vscdb` while it runs, so an
+        unreadable DB is routine and transient, whereas no token at all means signed
+        out and no future poll will fix it."""
+        db_path = tmp_path / "state.vscdb"
+        _make_state_db(db_path, self.TOKEN)
+
+        # A second rejection after `_post_with_retry` re-read the token = dead session.
+        monkeypatch.setattr(urllib.request, "urlopen",
+                             lambda req, timeout=None: (_ for _ in ()).throw(_http_error(401)))
+        dead = CursorUsageProvider().fetch(AgentConfig(state_db=str(db_path)))
+        assert not dead.ok
+        assert dead.error_kind == "auth"
+        assert "not signed in" in dead.error.lower()
+
+        # A 500 from the same endpoint is just an outage.
+        monkeypatch.setattr(urllib.request, "urlopen",
+                             lambda req, timeout=None: (_ for _ in ()).throw(_http_error(500)))
+        outage = CursorUsageProvider().fetch(AgentConfig(state_db=str(db_path)))
+        assert not outage.ok
+        assert outage.error_kind == "transient"
 
     def test_not_signed_in_when_db_missing(self, tmp_path):
         result = CursorUsageProvider().fetch(AgentConfig(state_db=str(tmp_path / "nope.vscdb")))
@@ -1121,10 +1175,13 @@ class TestCopilot:
         chat, completions = result.rows
         assert chat.pct == pytest.approx(2.6, abs=1e-6)  # 100 - 97.4
         assert chat.show_pct is True
-        assert chat.right == "Resets in 18d"
+        assert _row_text(chat) == "Resets in 18d"
+        assert chat.reset_style == fmt.RESET_DAYS
         assert chat.severity == "normal"
         assert completions.pct == 0.0
-        assert completions.right == "Resets in 18d"
+        # One account-wide reset date shared by every quota row.
+        assert completions.reset_at == chat.reset_at
+        assert _row_text(completions) == "Resets in 18d"
 
         assert token not in caplog.text
 
@@ -1203,6 +1260,7 @@ class TestUsageCache:
             rows=[UsageRow(label="5-hour limit", pct=42.0, right="Resets in 1 hr", kind="limit")],
             header="Your usage limits",
             source="official",
+            fetched_at=1789125077.5,
         )
         UsageCache(path=path).update(result)
 
@@ -1210,6 +1268,9 @@ class TestUsageCache:
         fetched = reloaded.get("claude")
         assert fetched is not None
         assert fetched.to_dict() == result.to_dict()
+        # Persisted, not recomputed on load: the whole point is to know how old these
+        # rows are on a later run, after a restart.
+        assert fetched.fetched_at == 1789125077.5
         assert reloaded.get("codex") is None
 
     def test_corrupt_file_is_tolerated(self, tmp_path):
@@ -1457,7 +1518,7 @@ def test_codex_window_label_follows_window_minutes():
     that "5-hour limit" — as this did until a real payload showed otherwise — makes a
     nearly-exhausted monthly budget look like one that clears over lunch.
     """
-    from tintaview.stats.providers.codex import _fmt_reset, _pct_row, _window_label
+    from tintaview.stats.providers.codex import _pct_row, _reset_epoch, _window_label
 
     monthly = {"used_percent": 92.0, "window_minutes": 43200, "resets_at": 1789125090}
     row = _pct_row(_window_label(monthly, "5-hour limit"), monthly)
@@ -1467,8 +1528,11 @@ def test_codex_window_label_follows_window_minutes():
 
     # resets_at arrives as a Unix epoch int, which `datetime.fromisoformat` rejects;
     # it used to fall through and print the raw number where a usage figure belongs.
-    assert "1789125090" not in row.right
-    assert row.right.startswith("Resets ")
+    # Now it never reaches `right` at all — the row carries the instant instead.
+    assert row.right == ""
+    assert row.reset_at == 1789125090
+    assert "1789125090" not in _row_text(row)
+    assert _row_text(row).startswith("Resets ")
 
     assert _window_label({"window_minutes": 300}, "x") == "5-hour limit"
     assert _window_label({"window_minutes": 10080}, "x") == "Weekly limit"
@@ -1479,5 +1543,280 @@ def test_codex_window_label_follows_window_minutes():
     assert _window_label({"window_minutes": True}, "5-hour limit") == "5-hour limit"
 
     # A reset weeks away must carry a date, not a bare weekday.
-    assert _fmt_reset(resets_in_seconds=30 * 86400).startswith("Resets ")
-    assert any(ch.isdigit() for ch in _fmt_reset(resets_in_seconds=30 * 86400))
+    far = _reset_epoch(resets_in_seconds=30 * 86400)
+    assert far > time.time()
+    far_text = fmt.reset_row_text(far, fmt.RESET_RELATIVE_WEEK)
+    assert far_text.startswith("Resets ")
+    assert any(ch.isdigit() for ch in far_text)
+
+
+# ------------------------------------------------------- auth failures vs. stale cache
+
+
+class TestAuthErrorCachePolicy:
+    """`StatsService` must not hide a signed-out agent behind cached numbers.
+
+    The incident this class exists for: the maintainer's Claude access token expired
+    over a weekend, so every `/api/oauth/usage` call 401'd, and the flyout answered
+    with the last result from Friday evening — a 5-hour window "Resets in 2 hr 59 min"
+    (a string frozen in `usage_cache.json` three days earlier) and a Cursor billing
+    cycle that had already ended. Both read exactly like live data. A transient failure
+    still gets the cache; an auth failure only gets it while it is fresh.
+    """
+
+    def _cfg(self, poll_seconds: int = 300) -> Config:
+        cfg = Config()
+        cfg.enabled_agents = ["claude"]
+        cfg.agents["claude"] = AgentConfig()
+        cfg.stats.poll_seconds = poll_seconds
+        return cfg
+
+    def _service_with_cached_rows(self, tmp_path, age_s: float, failure: UsageResult,
+                                   poll_seconds: int = 300) -> StatsService:
+        """A service whose cache already holds one good result `age_s` old, and whose
+        only provider always fails with `failure`."""
+        cache = UsageCache(path=tmp_path / "cache.json")
+        cache.update(UsageResult(
+            agent="claude",
+            rows=[UsageRow(label="5-hour limit", pct=41.0, right="Resets in 2 hr 59 min")],
+            header="Your usage limits · Team",
+            source="official",
+            fetched_at=time.time() - age_s,
+        ))
+        return StatsService(
+            self._cfg(poll_seconds), cache=cache,
+            providers={"claude": _FakeProvider("claude", lambda cfg, timeout: failure)},
+        )
+
+    def test_stale_cache_gives_way_to_the_auth_error(self, tmp_path):
+        failure = UsageResult(agent="claude", error="login expired", error_kind="auth")
+        service = self._service_with_cached_rows(tmp_path, age_s=3 * 86400, failure=failure)
+
+        result = service.fetch_all()["claude"]
+
+        assert not result.ok
+        assert result.rows == []  # NOT Friday's rows
+        assert result.error == "login expired"
+
+    def test_fresh_cache_survives_an_auth_error(self, tmp_path):
+        """A token that died seconds after a good poll hasn't made those rows wrong.
+
+        This is a real sequence, not a hypothetical: the flyout refreshes when it is
+        opened, off the poll cadence, so a fetch can land moments after a successful
+        one and be the first to see the 401.
+        """
+        failure = UsageResult(agent="claude", error="login expired", error_kind="auth")
+        service = self._service_with_cached_rows(tmp_path, age_s=60.0, failure=failure)
+
+        result = service.fetch_all()["claude"]
+
+        assert result.ok
+        assert result.source == "cache"
+        assert result.rows[0].pct == 41.0
+
+    def test_stale_cache_still_survives_a_transient_error(self, tmp_path):
+        """The other half of the rule: a network blip or a 429 is exactly what the
+        cache is for, and no amount of age changes that — nobody is signed out."""
+        failure = UsageResult(agent="claude", error="rate limited")  # error_kind defaults
+        service = self._service_with_cached_rows(tmp_path, age_s=3 * 86400, failure=failure)
+
+        result = service.fetch_all()["claude"]
+
+        assert result.ok
+        assert result.source == "cache"
+        assert result.rows[0].right == "Resets in 2 hr 59 min"
+
+    def test_grace_window_is_two_poll_intervals_wide(self, tmp_path):
+        """`AUTH_CACHE_GRACE_POLLS` intervals, so the window tracks
+        `stats.poll_seconds` instead of a fixed number of minutes."""
+        failure = UsageResult(agent="claude", error="login expired", error_kind="auth")
+
+        # 900s old, polling every 600s -> inside 2 x 600s.
+        inside = self._service_with_cached_rows(tmp_path / "a", age_s=900.0,
+                                                 failure=failure, poll_seconds=600)
+        assert inside.fetch_all()["claude"].ok
+
+        # The same 900s, polling every 60s -> far outside 2 x 60s.
+        outside = self._service_with_cached_rows(tmp_path / "b", age_s=900.0,
+                                                  failure=failure, poll_seconds=60)
+        assert not outside.fetch_all()["claude"].ok
+
+    def test_cache_without_a_timestamp_is_never_trusted_on_an_auth_error(self, tmp_path):
+        """A `usage_cache.json` written before `fetched_at` existed reads back as 0.0.
+
+        Its age is unknown, which on an auth failure has to mean "don't trust it" —
+        the file on the machine that prompted this change was exactly such a file.
+        """
+        path = tmp_path / "cache.json"
+        path.write_text(json.dumps({"claude": {
+            "agent": "claude",
+            "rows": [{"label": "5-hour limit", "pct": 41.0, "right": "Resets in 2 hr 59 min"}],
+            "header": "Your usage limits · Team",
+            "source": "official",
+            "error": None,
+        }}), encoding="utf-8")
+        cache = UsageCache(path=path)
+        assert cache.get("claude").fetched_at == 0.0  # the pre-field shape, as read back
+
+        service = StatsService(
+            self._cfg(), cache=cache,
+            providers={"claude": _FakeProvider("claude", lambda cfg, timeout: UsageResult(
+                agent="claude", error="login expired", error_kind="auth"))},
+        )
+        assert not service.fetch_all()["claude"].ok
+
+    def test_a_successful_fetch_is_stamped_and_the_stamp_survives_substitution(self, tmp_path):
+        """The age that matters is the age of the *numbers*, not of the poll that
+        failed to replace them — so a substituted result keeps the original stamp and
+        the cache goes on ageing towards the grace limit instead of resetting to now.
+        """
+        state = {"fail": False}
+
+        def flaky(agent_config, timeout):
+            if state["fail"]:
+                return UsageResult(agent="claude", error="login expired", error_kind="auth")
+            return UsageResult(agent="claude", rows=[UsageRow(label="x", pct=1.0)],
+                                source="official")
+
+        service = StatsService(
+            self._cfg(), cache=UsageCache(path=tmp_path / "cache.json"),
+            providers={"claude": _FakeProvider("claude", flaky)},
+        )
+        before = time.time()
+        good = service.fetch_all()["claude"]
+        assert before <= good.fetched_at <= time.time()
+
+        state["fail"] = True
+        substituted = service.fetch_all()["claude"]
+        assert substituted.source == "cache"
+        assert substituted.fetched_at == good.fetched_at  # not re-stamped to "now"
+
+    def test_the_weekend_incident_end_to_end(self, tmp_path, monkeypatch):
+        """Friday's official rows in the cache + today's 401 = the login message.
+
+        Deliberately the real `ClaudeUsageProvider`, not a fake: this asserts that the
+        provider tags its 401 as an auth failure *and* that the service acts on it, the
+        two halves that together produced the wrong flyout.
+        """
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        cfg = Config()
+        cfg.enabled_agents = ["claude"]
+        cfg.agents["claude"] = AgentConfig(home=str(home))
+        cache = UsageCache(path=tmp_path / "cache.json")
+        service = StatsService(cfg, cache=cache, providers={"claude": ClaudeUsageProvider()})
+
+        good_payload = json.loads((FIXTURES / "claude_usage_official.json").read_text())
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(
+            json.dumps(good_payload).encode()
+        ))
+        friday = service.fetch_all()["claude"]
+        assert friday.ok and friday.source == "official"
+
+        # Three days pass and the access token expires.
+        stale = replace(cache.get("claude"), fetched_at=time.time() - 3 * 86400)
+        cache.update(stale)
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: (_ for _ in ()).throw(
+            _http_error(401)
+        ))
+        monday = service.fetch_all()["claude"]
+
+        assert not monday.ok
+        assert monday.rows == []
+        assert "expired" in monday.error
+        # And the message has to say what to do about it, not just that it broke.
+        assert "claude" in monday.error.lower()
+
+
+# ------------------------------------------------- reset times are worded when rendered
+
+
+class TestResetTextIsWordedAtRenderTime:
+    """A row carries the *instant* it resets, never the sentence.
+
+    The second half of the same incident. `UsageRow.right` used to hold the finished
+    wording, computed once when the row was fetched: the panel therefore showed "Resets
+    in 2 hr 59 min" for three days, off a 5-hour window that had closed on the Friday
+    — and even on a healthy poll it was up to a full poll interval behind. `reset_at`
+    plus `stats.format.reset_row_text` moves the wording to render time.
+    """
+
+    def _clock(self, monkeypatch, moment: datetime) -> type[datetime]:
+        """Pin `stats.format`'s idea of "now" so the wording is deterministic.
+
+        A `datetime` subclass rather than a stub object: `reset_row_text` also calls
+        `fromtimestamp`, and `reset_text` does arithmetic on the result.
+        """
+        class _Clock(datetime):
+            now_moment = moment
+
+            @classmethod
+            def now(cls, tz=None):  # noqa: ARG003 - signature must match datetime.now
+                return cls.now_moment
+
+        monkeypatch.setattr(fmt, "datetime", _Clock)
+        return _Clock
+
+    def test_the_same_row_re_words_itself_as_time_passes(self, monkeypatch):
+        fetched = datetime(2026, 9, 4, 20, 0, tzinfo=UTC)
+        row = UsageRow(label="5-hour limit", pct=41.0,
+                        reset_at=datetime(2026, 9, 4, 23, 0, tzinfo=UTC).timestamp(),
+                        reset_style=fmt.RESET_RELATIVE)
+        clock = self._clock(monkeypatch, fetched)
+
+        assert _row_text(row) == "Resets in 3 hr 0 min"
+
+        # Two hours later, without a poll in between. The old code still said "3 hr".
+        clock.now_moment = fetched + timedelta(hours=2)
+        assert _row_text(row) == "Resets in 1 hr 0 min"
+
+        # And the actual incident: the same row, three days on. It no longer claims a
+        # live countdown — and a caller can now tell the window has closed, which was
+        # impossible when all we had was the string.
+        clock.now_moment = fetched + timedelta(days=3)
+        assert _row_text(row) == "Resets now"
+        assert row.reset_at < clock.now_moment.timestamp()
+
+    def test_a_past_billing_cycle_is_no_longer_a_dead_date_string(self, monkeypatch):
+        """Cursor's half: the panel read "Resets 6 Sep" on 7 Sep. The date itself is
+        still shown (it is the cycle end, and that is what Cursor reports), but it is
+        now derived from an instant the renderer can compare against today."""
+        row = UsageRow(label="Cursor Models", pct=17.32,
+                        reset_at=datetime(2026, 9, 6, 12, 0, tzinfo=UTC).timestamp(),
+                        reset_style=fmt.RESET_DATE)
+        self._clock(monkeypatch, datetime(2026, 9, 7, 11, 58, tzinfo=UTC))
+
+        assert "Sep" in _row_text(row)
+        assert row.reset_at < datetime(2026, 9, 7, 11, 58, tzinfo=UTC).timestamp()
+
+    def test_a_row_with_no_instant_still_shows_its_own_text(self):
+        """Rows whose right-hand slot isn't a reset time at all — and rows read back
+        from a `usage_cache.json` written before `reset_at` existed — must keep
+        rendering exactly what they carry."""
+        assert _row_text(UsageRow(label="Other Models", pct=1.5,
+                                   right="$20.00 included")) == "$20.00 included"
+        assert _row_text(UsageRow(label="Weekly · Fable", pct=0.0,
+                                   right="Not used yet")) == "Not used yet"
+
+        pre_field = UsageResult.from_dict({
+            "agent": "claude",
+            "rows": [{"label": "5-hour limit", "pct": 41.0, "right": "Resets in 2 hr 59 min"}],
+        })
+        assert pre_field.rows[0].reset_at == 0.0
+        assert _row_text(pre_field.rows[0]) == "Resets in 2 hr 59 min"
+
+    def test_every_style_renders_and_none_leaks_a_raw_number(self, monkeypatch):
+        """Each `RESET_*` style must produce wording, and an unreadable instant must
+        produce nothing — never a bare epoch in the slot where a usage figure goes
+        (see `stats.format`'s module docstring)."""
+        self._clock(monkeypatch, datetime(2026, 9, 7, 12, 0, tzinfo=UTC))
+        reset_at = datetime(2026, 9, 30, 12, 0, tzinfo=UTC).timestamp()
+
+        for style in (fmt.RESET_RELATIVE, fmt.RESET_RELATIVE_WEEK,
+                       fmt.RESET_DATE, fmt.RESET_DAYS):
+            text = fmt.reset_row_text(reset_at, style)
+            assert text.startswith("Resets "), (style, text)
+            assert str(int(reset_at)) not in text, (style, text)
+
+        assert fmt.reset_row_text(0.0, fmt.RESET_RELATIVE) == ""
+        assert fmt.reset_row_text(1e30, fmt.RESET_RELATIVE) == ""

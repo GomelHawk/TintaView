@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -144,6 +145,114 @@ def test_flyout_row_label_yields_to_the_right_hand_text(qapp):
     pixmap = QtGui.QPixmap(flyout.size())
     flyout.render(pixmap)  # must not raise
     assert not pixmap.isNull()
+
+
+def test_flyout_wraps_a_long_failure_reason_onto_extra_lines(qapp):
+    """An errored section is sized for however many lines its reason wrapped onto.
+
+    It used to get exactly one, elided — which for the reason that matters most cut
+    the remedy off: "Claude Code login expired — current usage can't be shown. Run
+    `claude` to sign in again." does not survive 380px on one line, and the half that
+    gets lost is the half telling the user how to fix it.
+    """
+    from tintaview.ui.flyout import REASON_LINE_H
+
+    long_reason = ("Claude Code login expired — current usage can't be shown. "
+                    "Run `claude` to sign in again.")
+    flyout = Flyout()
+
+    flyout.set_results({"claude": UsageResult(agent="claude", error="Short.")})
+    one_line = flyout.height()
+    sections, _ = flyout._layout()
+    assert len(sections[0].reason_lines) == 1
+
+    flyout.set_results({"claude": UsageResult(agent="claude", error=long_reason)})
+    sections, _ = flyout._layout()
+    lines = sections[0].reason_lines
+    assert len(lines) > 1
+    # The card grew by exactly the extra lines, so nothing is drawn past its own
+    # section (`_layout` sizes from the same list `paintEvent` draws).
+    assert flyout.height() == one_line + int((len(lines) - 1) * REASON_LINE_H)
+    # Wrapped on word boundaries, with the whole sentence — remedy included — intact.
+    assert not any(line.endswith("…") for line in lines)
+    assert " ".join(lines) == long_reason
+
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)  # must not raise
+    assert not pixmap.isNull()
+
+
+def test_every_locale_auth_message_fits_the_space_it_is_given(qapp):
+    """The auth reasons are the only ones a user has to *act* on, so an elided one is
+    a bug: what gets cut is always the tail, and the tail is the remedy.
+
+    This is the guard on a change nobody would otherwise notice — lengthening one of
+    these catalogue entries, or dropping `REASON_MAX_LINES`, clips "Run `claude` to
+    sign in again" off the screen in whichever language the reviewer doesn't read.
+    """
+    from tintaview import i18n
+    from tintaview.ui.flyout import REASON_MAX_LINES
+
+    keys = ("usage.claude.error.login_expired", "usage.cursor.error.not_signed_in")
+    flyout = Flyout()
+    try:
+        for code in i18n.LANGUAGE_CODES:
+            i18n.set_language(code)
+            for key in keys:
+                reason = i18n.t(key)
+                flyout.set_results({"claude": UsageResult(agent="claude", error=reason)})
+                sections, _ = flyout._layout()
+                lines = sections[0].reason_lines
+                assert len(lines) <= REASON_MAX_LINES, (code, key)
+                assert not any(line.endswith("…") for line in lines), (code, key, lines)
+                assert " ".join(lines) == reason, (code, key, lines)
+    finally:
+        i18n.set_language("en")
+
+
+def test_flyout_elides_a_reason_too_long_even_for_the_maximum_lines(qapp):
+    """Text past `REASON_MAX_LINES` still occupies exactly that many, with the
+    overflow elided — a `{detail}` reason quoting a repr can be arbitrarily long."""
+    from tintaview.ui.flyout import REASON_MAX_LINES
+
+    flyout = Flyout()
+    flyout.set_results({"claude": UsageResult(
+        agent="claude",
+        error="Claude usage unavailable: " + "URLError(TimeoutError('timed out')) " * 12,
+    )})
+    sections, _ = flyout._layout()
+    lines = sections[0].reason_lines
+    assert len(lines) == REASON_MAX_LINES
+    assert lines[-1].endswith("…")
+    flyout.render(QtGui.QPixmap(flyout.size()))
+
+
+def test_flyout_words_a_rows_reset_time_when_it_paints(qapp, monkeypatch):
+    """The paint path must derive the right-hand text from `reset_at`, not read a
+    sentence out of `right`.
+
+    This is the wiring, and the wiring is what would silently regress: reverting this
+    one line to `row.right` gives back a countdown frozen at fetch time, which looks
+    perfectly fine on screen right after a poll and lies from then on.
+    """
+    from tintaview.stats import format as fmt
+    from tintaview.ui import flyout as flyout_mod
+
+    calls: list[tuple[float, str]] = []
+    monkeypatch.setattr(flyout_mod.fmt, "reset_row_text",
+                         lambda reset_at, style: calls.append((reset_at, style)) or "Resets soon")
+
+    reset_at = time.time() + 3600
+    flyout = Flyout()
+    flyout.set_results({"claude": UsageResult(agent="claude", rows=[
+        UsageRow(label="5-hour limit", pct=42.0, reset_at=reset_at,
+                  reset_style=fmt.RESET_RELATIVE, kind="limit"),
+        # A row with no instant must not be routed through the reset wording at all.
+        UsageRow(label="Other Models", pct=1.5, right="$20.00 included", kind="limit"),
+    ])})
+    flyout.render(QtGui.QPixmap(flyout.size()))
+
+    assert calls == [(reset_at, fmt.RESET_RELATIVE)]
 
 
 def test_flyout_paints_in_every_language(qapp):

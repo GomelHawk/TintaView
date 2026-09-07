@@ -10,7 +10,9 @@ Flow:
      with that token → current-period usage (plan usage in cents, remaining, percent).
   3. On 401/403, re-read the token from disk once and retry — Cursor rotates it while
      signed in, so a stale in-memory copy looks like an auth failure but usually isn't.
-     There is no login flow here; if the re-read still fails we just report it.
+     There is no login flow here; if the re-read still fails we report it as
+     ``error_kind="auth"``, which stops ``StatsService`` masking a signed-out Cursor
+     with rows from the last period it could read (``stats/service.py``).
 
 Non-negotiable rules (this is a real credential, and the DB is huge and someone else's):
   - Open the DB read-only (`file:...?mode=ro`) and never copy it — it has been observed
@@ -159,35 +161,42 @@ def _find_number(obj: Any, names: tuple[str, ...]) -> float | None:
     return None
 
 
-def _fmt_cycle_end(value: Any) -> str:
-    """Billing-cycle end as "Resets 14 Sep", from an epoch-milliseconds string.
+def _cycle_end_epoch(value: Any) -> float:
+    """Billing-cycle end as epoch seconds, from an epoch-milliseconds string; 0.0 if it
+    can't be read.
 
     Observed as a 13-character digit string (``"1789125077000"``). Seconds are accepted
     too, so a change of unit degrades to a wrong-but-harmless label rather than a crash.
+
+    The instant, not "Resets 14 Sep": `fmt.RESET_DATE` words it at render time, so a
+    cycle end that has since passed is a comparison the renderer can still make instead
+    of a dead date frozen into a string. That was the second half of the incident behind
+    `UsageRow.reset_at` — this row read "Resets 6 Sep" on the 7th.
     """
     if value is None:
-        return ""
+        return 0.0
     text = str(value).strip()
     if not text.lstrip("+-").isdigit():
-        return ""
+        return 0.0
     try:
         number = float(text)
     except ValueError:
-        return ""
+        return 0.0
     if abs(number) > 1e11:  # 1e11 seconds is year 5138 — this is milliseconds
         number /= 1000.0
     try:
-        dt = datetime.fromtimestamp(number, UTC).astimezone()
+        datetime.fromtimestamp(number, UTC)  # reject anything `fmt` couldn't render
     except (OverflowError, OSError, ValueError):
-        return ""
-    return fmt.reset_at_date(dt)
+        return 0.0
+    return number
 
 
-def _usage_row(label: str, pct: Any, right: str) -> UsageRow | None:
+def _usage_row(label: str, pct: Any, right: str = "", reset_at: float = 0.0) -> UsageRow | None:
     if not isinstance(pct, int | float) or isinstance(pct, bool):
         return None
     severity = "critical" if pct >= 90 else "warning" if pct >= 75 else "normal"
-    return UsageRow(label=label, pct=float(pct), right=right, show_pct=True,
+    return UsageRow(label=label, pct=float(pct), right=right, reset_at=reset_at,
+                    reset_style=fmt.RESET_DATE, show_pct=True,
                     severity=severity, kind="limit")
 
 
@@ -211,10 +220,10 @@ def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
     if not isinstance(plan, dict):
         return []
 
-    resets = _fmt_cycle_end(payload.get("billingCycleEnd"))
+    resets = _cycle_end_epoch(payload.get("billingCycleEnd"))
     rows: list[UsageRow] = []
 
-    auto = _usage_row(t("usage.cursor.models"), plan.get("autoPercentUsed"), resets)
+    auto = _usage_row(t("usage.cursor.models"), plan.get("autoPercentUsed"), reset_at=resets)
     if auto is not None:
         rows.append(auto)
 
@@ -222,12 +231,14 @@ def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
     # says "your plan includes at least $20 of API usage" next to this bar. Only shown
     # when the cycle-reset text isn't already occupying the first row's slot.
     api_right = ""
+    api_reset = 0.0
     included = plan.get("includedSpend")
     if isinstance(included, int | float) and not isinstance(included, bool) and included > 0:
         api_right = t("usage.cursor.included", amount=f"${included / 100:,.2f}")
     elif not rows:
-        api_right = resets
-    api = _usage_row(t("usage.cursor.other_models"), plan.get("apiPercentUsed"), api_right)
+        api_reset = resets
+    api = _usage_row(t("usage.cursor.other_models"), plan.get("apiPercentUsed"),
+                      right=api_right, reset_at=api_reset)
     if api is not None:
         rows.append(api)
 
@@ -255,12 +266,22 @@ class CursorUsageProvider(UsageProvider):
         except _TokenError as e:
             log.info("cursor token unavailable: %s", e)  # the exception text, never the token
             if "not found" in str(e) or "not signed in" in str(e):
-                return UsageResult(agent=self.key, error=t("usage.cursor.error.not_signed_in"))
+                # No token at all: an auth failure, not a blip. See `error_kind`.
+                return UsageResult(agent=self.key, error=t("usage.cursor.error.not_signed_in"),
+                                    error_kind="auth")
+            # A locked or unreadable state DB *is* transient — Cursor holds the lock
+            # while it writes — so this one keeps falling back to cached rows.
             return UsageResult(agent=self.key, error=t("usage.cursor.error.db_unreadable"))
 
         try:
             data = self._post_with_retry(token, db_path, timeout)
         except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                # `_post_with_retry` already re-read the token and tried once more, so a
+                # second rejection means the stored session is dead rather than merely
+                # rotated — the same "sign in again" state as having no token at all.
+                return UsageResult(agent=self.key, error=t("usage.cursor.error.not_signed_in"),
+                                    error_kind="auth")
             return UsageResult(agent=self.key, error=t("usage.cursor.error.http", code=e.code))
         except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
             return UsageResult(agent=self.key,

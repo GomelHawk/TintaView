@@ -133,7 +133,7 @@
   "usage.claude.window_week": "Эта неделя",
   "usage.claude.estimate_right": "{tokens} млн токенов · ~{cost}",
   "usage.claude.error.unavailable": "Данные о расходе Claude недоступны: {detail}",
-  "usage.claude.error.login_expired": "Срок входа в Claude Code истёк. Запустите `claude` (или перезапустите Claude Code), войдите заново и повторите попытку.",
+  "usage.claude.error.login_expired": "Срок входа в Claude Code истёк — актуальное потребление недоступно. Запустите `claude`, чтобы войти заново.",
   "usage.claude.error.rate_limited": "Точка доступа Claude ограничила частоту запросов (HTTP 429) — повторите попытку через некоторое время.",
   "usage.claude.error.no_transcripts": "Локальные расшифровки Claude не найдены, оценить расход не по чему.",
 
@@ -160,7 +160,7 @@
   "usage.cursor.models": "Модели Cursor",
   "usage.cursor.other_models": "Другие модели",
   "usage.cursor.included": "{amount} включено в тариф",
-  "usage.cursor.error.not_signed_in": "Вход в Cursor не выполнен.",
+  "usage.cursor.error.not_signed_in": "Вход в Cursor не выполнен — актуальное потребление недоступно. Войдите снова, чтобы увидеть его.",
   "usage.cursor.error.db_unreadable": "Данные о расходе Cursor недоступны (база состояния заблокирована или не читается).",
   "usage.cursor.error.http": "Точка доступа Cursor вернула HTTP {code}.",
   "usage.cursor.error.unavailable": "Данные о расходе Cursor недоступны: {detail}",

@@ -17,10 +17,21 @@ from typing import Any
 class UsageRow:
     label: str  # "5-hour limit"
     pct: float  # 0-100; 0 when the row is informational only
-    right: str = ""  # right-aligned text, e.g. "Resets in 3 hr 12 min"
+    right: str = ""  # right-aligned text, e.g. "$20.00 included"
     show_pct: bool = True
     severity: str = "normal"  # normal | warning | critical
     kind: str = "limit"  # limit | credits | info
+    #: When this limit next resets, epoch seconds; 0.0 for "no reset instant known".
+    #: When set, the renderer words it **on every repaint** through
+    #: `stats.format.reset_row_text` and ignores `right` — so a provider must store the
+    #: instant here rather than a sentence in `right`. Wording it at fetch time is how
+    #: "Resets in 2 hr 59 min" ended up in `usage_cache.json` still counting down to a
+    #: window that had closed three days earlier, and it also left every live row up to
+    #: one poll interval behind between polls.
+    reset_at: float = 0.0
+    #: Which `stats.format.RESET_*` wording `reset_at` gets. Meaningless when
+    #: `reset_at` is 0.0.
+    reset_style: str = "relative"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -33,6 +44,23 @@ class UsageResult:
     header: str = ""  # e.g. "Your usage limits · Max"
     source: str = "official"  # official | estimate | activity | cache
     error: str | None = None  # user-facing reason when rows is empty
+    #: What kind of failure `error` is, and therefore how far `StatsService` may go to
+    #: hide it. **transient** — a network blip, an HTTP 429, a locked state DB: nobody
+    #: is signed out, the next poll will probably work, so cached rows may stand in for
+    #: as long as it lasts. That is what the cache is for, and it stays the default so
+    #: an unclassified failure keeps today's behaviour. **auth** — a 401, an agent that
+    #: is signed out: no poll will refresh those numbers until the user signs in again,
+    #: so cached rows are only trusted while they are still fresh and otherwise give
+    #: way to `error` (see `StatsService._apply_cache_policy`).
+    #:
+    #: Never persisted: only a failed result carries it, and failures are never cached.
+    error_kind: str = "transient"  # transient | auth
+    #: When these rows were fetched, epoch seconds — 0.0 meaning "unknown", which is
+    #: what a cache file written before this field existed reads back as. Stamped by
+    #: `StatsService` so no provider has to remember to, and deliberately carried
+    #: through a cache substitution unchanged: the age that matters is the age of the
+    #: numbers, not of the poll that failed to replace them.
+    fetched_at: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -45,6 +73,7 @@ class UsageResult:
             "header": self.header,
             "source": self.source,
             "error": self.error,
+            "fetched_at": self.fetched_at,
         }
 
     @classmethod
@@ -55,6 +84,9 @@ class UsageResult:
             header=data.get("header", ""),
             source=data.get("source", "cache"),
             error=data.get("error"),
+            # A non-numeric value raises here, which `UsageCache._load` catches and
+            # treats as one malformed entry to skip — the same as any other bad field.
+            fetched_at=float(data.get("fetched_at") or 0.0),
         )
 
 

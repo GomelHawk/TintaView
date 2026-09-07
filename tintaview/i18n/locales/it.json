@@ -132,7 +132,7 @@
   "usage.claude.window_week": "Questa settimana",
   "usage.claude.estimate_right": "{tokens} M token · ~{cost}",
   "usage.claude.error.unavailable": "Utilizzo di Claude non disponibile: {detail}",
-  "usage.claude.error.login_expired": "L'accesso a Claude Code è scaduto. Esegui `claude` (o riavvia Claude Code) per accedere di nuovo, poi riprova.",
+  "usage.claude.error.login_expired": "Accesso a Claude Code scaduto: impossibile mostrare l'utilizzo attuale. Esegui `claude` per accedere di nuovo.",
   "usage.claude.error.rate_limited": "L'endpoint di utilizzo di Claude ha raggiunto il limite di richieste (HTTP 429); riprova tra poco.",
   "usage.claude.error.no_transcripts": "Nessuna trascrizione locale di Claude da cui stimare l'utilizzo.",
 
@@ -159,7 +159,7 @@
   "usage.cursor.models": "Modelli di Cursor",
   "usage.cursor.other_models": "Altri modelli",
   "usage.cursor.included": "{amount} inclusi",
-  "usage.cursor.error.not_signed_in": "Accesso a Cursor non effettuato.",
+  "usage.cursor.error.not_signed_in": "Accesso a Cursor non effettuato: impossibile mostrare l'utilizzo attuale. Accedi di nuovo per vederlo.",
   "usage.cursor.error.db_unreadable": "Utilizzo di Cursor non disponibile (il suo database di stato è bloccato o illeggibile).",
   "usage.cursor.error.http": "L'endpoint di utilizzo di Cursor ha risposto HTTP {code}.",
   "usage.cursor.error.unavailable": "Utilizzo di Cursor non disponibile: {detail}",

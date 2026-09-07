@@ -235,18 +235,37 @@ rather not deal with this at all, run headless (`tintaview run --headless`, or i
 with `install.sh --headless`) — status and lighting still work, you just lose the tray
 icon and usage panel.
 
-## Usage shows "not signed in" (per agent)
+## Usage shows "login expired" / "not signed in" (per agent)
 
-- **Claude Code**: means the OAuth token in `~/.claude/.credentials.json` is invalid —
-  run `claude` (or restart Claude Code) to sign in again.
+The section shows no figures, just a line like *"Claude Code login expired — current
+usage can't be shown. Run `claude` to sign in again."* Nothing to reconfigure: the
+agent's own access token has expired, so the endpoint TintaView reads usage from
+rejects it. Lighting is unaffected either way.
+
+- **Claude Code**: the OAuth token in `~/.claude/.credentials.json` is invalid — run
+  `claude` (or restart Claude Code) to sign in again; it refreshes the token on the way
+  up.
 - **Codex CLI**: Codex has no "signed in" concept for usage — this message instead means
   no recent session files were found under `~/.codex/sessions/`. Run a Codex session
   first.
-- **Cursor**: means TintaView couldn't find (or read) an access token in Cursor's local
-  `state.vscdb` — sign in to Cursor normally and it should resolve on the next poll.
-  This path is **unofficial** (see the README) — if signing in doesn't fix it, the
-  underlying Cursor endpoint or token storage may have changed since this was written;
-  lighting is unaffected either way.
+- **Cursor**: TintaView couldn't find (or read) an access token in Cursor's local
+  `state.vscdb`, or the one it found was rejected — sign in to Cursor normally and it
+  should resolve on the next poll. This path is **unofficial** (see the README) — if
+  signing in doesn't fix it, the underlying Cursor endpoint or token storage may have
+  changed since this was written.
+
+Then wait for the next 5-minute poll, or use **Refresh usage** in the tray menu.
+
+TintaView deliberately does not renew these tokens for you: both agents rotate their
+refresh token when they use it, so a second refresher racing the agent's own is a good
+way to invalidate the login TintaView is meant to be watching.
+
+Note the deliberate difference from an *unreachable* endpoint. A network error or a
+rate-limit response leaves the last good figures on screen — they are still the best
+answer available, and the next poll will probably fix it. An expired login is not that:
+no poll will refresh those figures until you sign in, so once they are more than a couple
+of poll intervals old the section drops them rather than letting Friday's numbers read as
+today's. Figures fetched moments before the token died are still shown.
 
 ## Part of the interface is still in English
 
@@ -261,10 +280,12 @@ whatever you pick, and none of them is a bug:
   language](../README.md#interface-language) section).
 - **Anything an agent's own API reported** — a plan name ("Max", "Copilot Free"), a model
   name, release notes, an HTTP error string. Those are quoted exactly as they arrived.
-- **A usage section still showing cached numbers.** Rows are worded when they are
-  fetched, and the last good result is cached on disk, so right after switching language
-  a cached section keeps its old wording. "Refresh usage" in the tray menu, or the next
-  5-minute poll, replaces it.
+- **A usage section still showing cached numbers.** Row *labels* are worded when they
+  are fetched, and the last good result is cached on disk, so right after switching
+  language a cached section keeps its old labels. "Refresh usage" in the tray menu, or
+  the next 5-minute poll, replaces them. (Reset times are the exception — those are
+  worded each time the panel is drawn, so they switch language immediately, and are
+  also why a countdown is correct when you look at it rather than as of the last poll.)
 
 If a *whole* language looks like it did nothing — every string still English on an
 installed copy while a source checkout is fine — the wheel is missing its catalogues.

@@ -227,7 +227,17 @@ agent:
 
 Usage is polled every 5 minutes (rate limits, not urgency) and the last good result is
 cached, so the panel is never blank and a rate-limit response never overwrites good data
-with a worse estimate.
+with a worse estimate. Reset times ("Resets in 3 hr 12 min") are worked out each time the
+panel is drawn rather than when the figures were fetched, so a countdown is right when
+you look at it, not as of the last poll.
+
+That cache covers a bad connection, not a bad login. When an agent's access token has
+expired — Claude Code's OAuth token, Cursor's session — nothing will refresh its numbers
+until you sign in again, so past a couple of poll intervals the section stops showing the
+last figures it managed to fetch and says so instead: *"Claude Code login expired —
+current usage can't be shown. Run `claude` to sign in again."* Signing that agent back in
+is the fix, and the next poll picks it up; TintaView never renews a token itself, because
+racing the agent's own refresh is a good way to break the session it is watching.
 
 ## Tray menu
 

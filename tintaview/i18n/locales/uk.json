@@ -133,7 +133,7 @@
   "usage.claude.window_week": "Цей тиждень",
   "usage.claude.estimate_right": "{tokens} млн токенів · ~{cost}",
   "usage.claude.error.unavailable": "Дані про витрати Claude недоступні: {detail}",
-  "usage.claude.error.login_expired": "Термін входу в Claude Code вичерпано. Виконайте `claude` (або перезапустіть Claude Code), увійдіть знову та повторіть спробу.",
+  "usage.claude.error.login_expired": "Термін входу в Claude Code вичерпано — актуальне споживання недоступне. Виконайте `claude`, щоб увійти знову.",
   "usage.claude.error.rate_limited": "Точка доступу Claude обмежила частоту запитів (HTTP 429) — повторіть спробу трохи пізніше.",
   "usage.claude.error.no_transcripts": "Локальних стенограм Claude не знайдено, оцінити витрати нема з чого.",
 
@@ -160,7 +160,7 @@
   "usage.cursor.models": "Моделі Cursor",
   "usage.cursor.other_models": "Інші моделі",
   "usage.cursor.included": "{amount} включено в тариф",
-  "usage.cursor.error.not_signed_in": "Вхід у Cursor не виконано.",
+  "usage.cursor.error.not_signed_in": "Вхід у Cursor не виконано — актуальне споживання недоступне. Увійдіть знову, щоб побачити його.",
   "usage.cursor.error.db_unreadable": "Дані про витрати Cursor недоступні (база стану заблокована або не читається).",
   "usage.cursor.error.http": "Точка доступу Cursor повернула HTTP {code}.",
   "usage.cursor.error.unavailable": "Дані про витрати Cursor недоступні: {detail}",

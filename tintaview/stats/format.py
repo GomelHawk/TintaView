@@ -9,16 +9,32 @@ word that appears once on screen.
 So: parsing stays with the provider that knows its own payload, and the *text* lives
 here. `stats/providers/*` must not build a user-visible date string by hand.
 
+And it is worded **when the row is drawn**, not when it was fetched: a provider hands a
+row the reset *instant* (`UsageRow.reset_at`) plus one of the `RESET_*` styles below,
+and `reset_row_text` does the rest. A provider that worded its own reset time froze
+"Resets in 2 hr 59 min" into `usage_cache.json` and counted it down to nothing.
+
 Nothing here raises: a bad value produces an empty string, because this text lands in a
 flyout row's right-hand slot where a wrong-looking value reads as a usage figure (see
-`providers/codex._fmt_reset` for the incident that rule comes from).
+`providers/codex._reset_epoch` for the incident that rule comes from).
 """
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 
 from tintaview.i18n import t
+
+#: How a row's `UsageRow.reset_at` is worded. A provider names the style its own API's
+#: window deserves and `reset_row_text` does the rest, so the wording still lives here
+#: while the *instant* lives on the row — which is the point of the split: a provider
+#: that worded its reset time at fetch time froze "Resets in 2 hr 59 min" into
+#: `usage_cache.json`, where it went on counting down to a moment three days past.
+RESET_RELATIVE = "relative"  # "Resets in 3 hr 23 min", then "Resets Fri 3:59 PM"
+RESET_RELATIVE_WEEK = "relative_week"  # as above, but a bare date once a week out
+RESET_DATE = "date"  # always "Resets 14 Sep" — for a monthly billing cycle
+RESET_DAYS = "days"  # "Resets in 24d" / "Resets today" — whole days only
 
 #: Catalogue key suffixes, in `datetime`'s own order: `weekday()` is Monday-based and
 #: `month` is 1-based.
@@ -87,3 +103,45 @@ def reset_text(dt: datetime, *, date_after_days: int | None = None) -> str:
     if date_after_days is not None and secs >= date_after_days * 86400:
         return reset_at_date(local)
     return reset_at_time(local)
+
+
+def reset_in_days_text(dt: datetime) -> str:
+    """"Resets in 24d", or "Resets today" for anything already due.
+
+    Whole days, because the API this wording exists for (GitHub Copilot's) reports only
+    a reset *date*: an hours-and-minutes countdown off a date implies a precision the
+    payload doesn't have.
+    """
+    seconds = (dt - datetime.now(UTC)).total_seconds()
+    if seconds <= 0:
+        return t("usage.reset.today")
+    return t("usage.reset.in_days", days=math.ceil(seconds / 86400))
+
+
+def reset_row_text(reset_at: float, style: str = RESET_RELATIVE) -> str:
+    """A row's right-hand reset text, worded from `reset_at` (epoch seconds) **now**.
+
+    Called at render time, not fetch time — the whole reason `UsageRow.reset_at` holds
+    an instant instead of a sentence. A row that worded its own reset time when it was
+    fetched was already up to one poll interval stale the moment it was drawn, and a
+    cached one stayed frozen for as long as the cache stood in: the flyout showed
+    "Resets in 2 hr 59 min" for three days, off a window that had closed on the Friday.
+
+    An unknown instant (0.0) or an unrepresentable one is "", per this module's rule
+    that a bad value never reaches a row's right-hand slot looking like a usage figure.
+    """
+    if not reset_at:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(reset_at, UTC)
+    except (OverflowError, OSError, ValueError):
+        return ""
+    if style == RESET_DATE:
+        return reset_at_date(dt.astimezone())
+    if style == RESET_DAYS:
+        return reset_in_days_text(dt)
+    if style == RESET_RELATIVE_WEEK:
+        # Beyond a week a weekday name is ambiguous at best — "Resets Fri" for a
+        # monthly budget four weeks out reads as *this* Friday.
+        return reset_text(dt, date_after_days=6)
+    return reset_text(dt)

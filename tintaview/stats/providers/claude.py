@@ -13,7 +13,9 @@ Where the numbers come from:
     only files modified in the last week, from a per-file memo (``stats/_scan.py``),
     and counting each streamed message once (see ``_parse_transcript``).
   - 401 means the login itself is dead — no fallback estimate is useful there, so we
-    surface the exact message Claude Code's own CLI shows.
+    surface the exact message Claude Code's own CLI shows, tagged ``error_kind="auth"``
+    so ``StatsService`` reports it rather than hiding it behind stale cached rows
+    (``stats/service.py``).
   - 429 means the endpoint is rate-limited, not that there's no data — falling back to
     the noisy local estimate would *replace* good cached numbers with a worse guess, so
     this also skips the fallback and just reports the rate limit. ``StatsService``
@@ -178,18 +180,22 @@ def _money(m: dict[str, Any] | None) -> tuple[float, str] | None:
     return amt / (10**exp), m.get("currency", "USD")
 
 
-def _fmt_reset(iso: str | None) -> str:
-    """Mirror the in-app wording: relative within a day ('Resets in 3 hr 23 min'),
-    absolute weekday+time otherwise ('Resets Fri 3:59 PM') — worded by `stats.format`,
-    which builds both forms without `strftime` (`%-I` is Linux-only and `%a`/`%p` follow
-    the C locale, not the language the user picked)."""
+def _reset_of(iso: str | None) -> tuple[float, str]:
+    """``(reset_at, right)`` for a row that resets at `iso`.
+
+    The *instant*, not the wording: `stats.format.reset_row_text` turns it into "Resets
+    in 3 hr 23 min" / "Resets Fri 3:59 PM" at render time, which is what keeps the
+    countdown honest between polls and stops a cached row freezing one (see
+    `UsageRow.reset_at`). An unparseable value keeps the old behaviour of being quoted
+    in `right` exactly as it arrived.
+    """
     if not iso:
-        return ""
+        return 0.0, ""
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
-        return iso  # an unparseable value from the API, quoted as it arrived
-    return fmt.reset_text(dt)
+        return 0.0, iso  # an unparseable value from the API, quoted as it arrived
+    return dt.timestamp(), ""
 
 
 def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
@@ -205,8 +211,10 @@ def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
         sev = (lim.get("severity") if lim else "normal") or "normal"
         if pct is None:
             return
+        reset_at, right = _reset_of(resets)
         rows.append(
-            UsageRow(label=label, pct=float(pct), right=_fmt_reset(resets),
+            UsageRow(label=label, pct=float(pct), right=right, reset_at=reset_at,
+                      reset_style=fmt.RESET_RELATIVE,
                       show_pct=True, severity=sev, kind="limit")
         )
 
@@ -228,12 +236,16 @@ def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
             continue
         resets = lim.get("resets_at")
         # A model with no usage yet has no reset time (mirrors the in-app
-        # "You haven't used Fable yet" wording) — fall back to a plain label.
-        right = _fmt_reset(resets) if resets else t("usage.claude.not_used_yet")
+        # "You haven't used Fable yet" wording) — fall back to a plain label. That
+        # label is static text, so it belongs in `right`, not in a reset instant.
+        reset_at, right = _reset_of(resets)
+        if not reset_at and not right:
+            right = t("usage.claude.not_used_yet")
         rows.append(
             # `model_name` is the API's own display name ("Opus", "Fable") — never
             # translated, same as every other value an agent hands back.
             UsageRow(label=t("usage.claude.weekly_model", model=model_name), pct=float(pct), right=right,
+                      reset_at=reset_at, reset_style=fmt.RESET_RELATIVE,
                       show_pct=True, severity=lim.get("severity") or "normal", kind="limit")
         )
 
@@ -463,11 +475,15 @@ class ClaudeUsageProvider(UsageProvider):
             data = _fetch_usage(home, timeout)
         except urllib.error.HTTPError as e:
             if e.code == 401:
+                # `error_kind="auth"`, so `StatsService` stops masking this with rows
+                # from the last time the login worked: nothing will refresh them until
+                # the user signs in again, and the message below is what they need.
                 return UsageResult(
                     agent=self.key,
                     header=header,
                     source="official",
                     error=t("usage.claude.error.login_expired"),
+                    error_kind="auth",
                 )
             if e.code == 429:
                 # Rate-limited is not "no data" — don't let a noisier local estimate

@@ -133,7 +133,7 @@
   "usage.claude.window_week": "Гэты тыдзень",
   "usage.claude.estimate_right": "{tokens} млн токенаў · ~{cost}",
   "usage.claude.error.unavailable": "Даныя пра выдатак Claude недаступныя: {detail}",
-  "usage.claude.error.login_expired": "Тэрмін уваходу ў Claude Code скончыўся. Выканайце `claude` (або перазапусціце Claude Code), увайдзіце нанова і паўтарыце спробу.",
+  "usage.claude.error.login_expired": "Тэрмін уваходу ў Claude Code скончыўся — актуальнае спажыванне недаступнае. Выканайце `claude`, каб увайсці нанова.",
   "usage.claude.error.rate_limited": "Пункт доступу Claude абмежаваў частату запытаў (HTTP 429) — паўтарыце спробу трохі пазней.",
   "usage.claude.error.no_transcripts": "Лакальныя расшыфроўкі Claude не знойдзены, ацаніць выдатак няма па чым.",
 
@@ -160,7 +160,7 @@
   "usage.cursor.models": "Мадэлі Cursor",
   "usage.cursor.other_models": "Іншыя мадэлі",
   "usage.cursor.included": "{amount} уключана ў тарыф",
-  "usage.cursor.error.not_signed_in": "Уход у Cursor не выкананы.",
+  "usage.cursor.error.not_signed_in": "Уход у Cursor не выкананы — актуальнае спажыванне недаступнае. Увайдзіце зноў, каб яго ўбачыць.",
   "usage.cursor.error.db_unreadable": "Даныя пра выдатак Cursor недаступныя (база стану заблакаваная ці не чытаецца).",
   "usage.cursor.error.http": "Пункт доступу Cursor вярнуў HTTP {code}.",
   "usage.cursor.error.unavailable": "Даныя пра выдатак Cursor недаступныя: {detail}",

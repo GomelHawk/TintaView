@@ -133,7 +133,7 @@
   "usage.claude.window_week": "Ten tydzień",
   "usage.claude.estimate_right": "{tokens} mln tokenów · ~{cost}",
   "usage.claude.error.unavailable": "Zużycie Claude jest niedostępne: {detail}",
-  "usage.claude.error.login_expired": "Twoje zalogowanie do Claude Code wygasło. Uruchom `claude` (albo zrestartuj Claude Code), zaloguj się ponownie i spróbuj jeszcze raz.",
+  "usage.claude.error.login_expired": "Zalogowanie do Claude Code wygasło — nie można pokazać aktualnego zużycia. Uruchom `claude`, aby zalogować się ponownie.",
   "usage.claude.error.rate_limited": "Punkt końcowy zużycia Claude ograniczył liczbę zapytań (HTTP 429) — spróbuj za chwilę.",
   "usage.claude.error.no_transcripts": "Nie znaleziono lokalnych transkrypcji Claude, na podstawie których można oszacować zużycie.",
 
@@ -160,7 +160,7 @@
   "usage.cursor.models": "Modele Cursor",
   "usage.cursor.other_models": "Inne modele",
   "usage.cursor.included": "{amount} w ramach planu",
-  "usage.cursor.error.not_signed_in": "Nie zalogowano się w Cursor.",
+  "usage.cursor.error.not_signed_in": "Brak zalogowania w Cursor — nie można pokazać aktualnego zużycia. Zaloguj się ponownie, aby je zobaczyć.",
   "usage.cursor.error.db_unreadable": "Zużycie Cursor jest niedostępne (baza stanu zablokowana lub nieczytelna).",
   "usage.cursor.error.http": "Punkt końcowy zużycia Cursor zwrócił HTTP {code}.",
   "usage.cursor.error.unavailable": "Zużycie Cursor jest niedostępne: {detail}",

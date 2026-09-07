@@ -132,7 +132,7 @@
   "usage.claude.window_week": "This week",
   "usage.claude.estimate_right": "{tokens}M tokens · ~{cost}",
   "usage.claude.error.unavailable": "Claude usage unavailable: {detail}",
-  "usage.claude.error.login_expired": "Your Claude Code login has expired. Run `claude` (or restart Claude Code) to sign in again, then try this again.",
+  "usage.claude.error.login_expired": "Claude Code login expired — current usage can't be shown. Run `claude` to sign in again.",
   "usage.claude.error.rate_limited": "Claude usage endpoint is rate-limited (HTTP 429) — try again shortly.",
   "usage.claude.error.no_transcripts": "No local Claude transcripts found to estimate usage.",
 
@@ -159,7 +159,7 @@
   "usage.cursor.models": "Cursor Models",
   "usage.cursor.other_models": "Other Models",
   "usage.cursor.included": "{amount} included",
-  "usage.cursor.error.not_signed_in": "Cursor not signed in.",
+  "usage.cursor.error.not_signed_in": "Not signed in to Cursor — current usage can't be shown. Sign in again to see it.",
   "usage.cursor.error.db_unreadable": "Cursor usage unavailable (state DB locked or unreadable).",
   "usage.cursor.error.http": "Cursor usage endpoint HTTP {code}.",
   "usage.cursor.error.unavailable": "Cursor usage unavailable: {detail}",

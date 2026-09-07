@@ -76,7 +76,6 @@ from __future__ import annotations
 import ctypes
 import json
 import logging
-import math
 import sqlite3
 import sys
 import urllib.error
@@ -89,6 +88,7 @@ from urllib.parse import quote
 from tintaview.core.config import AgentConfig, expand
 from tintaview.i18n import t
 
+from .. import format as fmt
 from ..model import UsageProvider, UsageResult, UsageRow
 
 log = logging.getLogger(__name__)
@@ -254,17 +254,19 @@ def _plan_label(payload: dict[str, Any]) -> str:
     return t("usage.copilot.plan.generic")
 
 
-def _fmt_days_until(iso_ts: Any) -> str:
+def _reset_epoch(iso_ts: Any) -> float:
+    """The account-wide quota reset date as epoch seconds; 0.0 if it can't be read.
+
+    The instant, not "Resets in 24d": `fmt.RESET_DAYS` words it at render time (see
+    `UsageRow.reset_at`), so the day count is counted down from *now* rather than from
+    whenever the last successful poll happened to be.
+    """
     if not isinstance(iso_ts, str) or not iso_ts:
-        return ""
+        return 0.0
     try:
-        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
-    except ValueError:
-        return ""
-    seconds = (dt - datetime.now(UTC)).total_seconds()
-    if seconds <= 0:
-        return t("usage.reset.today")
-    return t("usage.reset.in_days", days=math.ceil(seconds / 86400))
+        return datetime.fromisoformat(iso_ts.replace("Z", "+00:00")).timestamp()
+    except (ValueError, OverflowError, OSError):
+        return 0.0
 
 
 def _quota_label(quota_id: str) -> str:
@@ -273,11 +275,13 @@ def _quota_label(quota_id: str) -> str:
     return quota_id.replace("_", " ").title() if label == key else label
 
 
-def _quota_snapshot_row(quota_id: str, snapshot: Any, reset_text: str) -> UsageRow | None:
+def _quota_snapshot_row(quota_id: str, snapshot: Any, reset_at: float) -> UsageRow | None:
     if not isinstance(snapshot, dict) or not snapshot.get("has_quota"):
         return None  # `has_quota: false` means "not part of this plan", not "0 left"
     label = _quota_label(quota_id)
     if snapshot.get("unlimited"):
+        # No reset instant on purpose: an unlimited quota never resets, and "Unlimited"
+        # is the whole of what this row has to say.
         return UsageRow(label=label, pct=0.0, right=t("usage.copilot.unlimited"), show_pct=False,
                          severity="normal", kind="info")
     remaining = snapshot.get("percent_remaining")
@@ -285,7 +289,8 @@ def _quota_snapshot_row(quota_id: str, snapshot: Any, reset_text: str) -> UsageR
         return None
     pct = max(0.0, min(100.0, 100.0 - float(remaining)))
     severity = "critical" if pct >= 90 else "warning" if pct >= 75 else "normal"
-    return UsageRow(label=label, pct=pct, right=reset_text, show_pct=True, severity=severity, kind="limit")
+    return UsageRow(label=label, pct=pct, reset_at=reset_at, reset_style=fmt.RESET_DAYS,
+                     show_pct=True, severity=severity, kind="limit")
 
 
 def _parse_user_payload(payload: dict[str, Any]) -> list[UsageRow]:
@@ -294,19 +299,19 @@ def _parse_user_payload(payload: dict[str, Any]) -> list[UsageRow]:
     snapshots = payload.get("quota_snapshots")
     if not isinstance(snapshots, dict):
         return []
-    reset_text = _fmt_days_until(payload.get("quota_reset_date_utc"))
+    reset_at = _reset_epoch(payload.get("quota_reset_date_utc"))
 
     rows: list[UsageRow] = []
     seen: set[str] = set()
     for quota_id in _QUOTA_ORDER:
         seen.add(quota_id)
-        row = _quota_snapshot_row(quota_id, snapshots.get(quota_id), reset_text)
+        row = _quota_snapshot_row(quota_id, snapshots.get(quota_id), reset_at)
         if row is not None:
             rows.append(row)
     for quota_id, snapshot in snapshots.items():
         if quota_id in seen:
             continue
-        row = _quota_snapshot_row(quota_id, snapshot, reset_text)
+        row = _quota_snapshot_row(quota_id, snapshot, reset_at)
         if row is not None:
             rows.append(row)
     return rows

@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -26,6 +26,7 @@ from PySide6.QtCore import QRectF, Qt
 
 from tintaview.core.config import Config
 from tintaview.i18n import t
+from tintaview.stats import format as fmt
 from tintaview.ui import icons
 
 if TYPE_CHECKING:  # pragma: no cover - types only, no runtime import of the stats layer
@@ -52,6 +53,14 @@ CARD_W = 380
 SECTION_GAP = 14  # extra vertical space between one agent's block and the next
 HEADER_H = 24  # height of the badge+title header line, per section
 CHEVRON_W = 16  # right-edge width reserved for the collapse affordance
+REASON_LINE_H = 20.0  # one line of an errored section's failure sentence
+#: How many of those lines a failure sentence gets. One is what it used to get, and one
+#: is not enough for the reasons worth reading: "Claude Code login expired — current
+#: usage can't be shown. Run `claude` to sign in again." elides at 380px somewhere
+#: inside "current usage", losing both the consequence and the remedy. Three rather
+#: than two because English is the short case — the same sentence needs three lines in
+#: German, Polish and every Cyrillic locale. `tests/test_ui.py` holds the two together.
+REASON_MAX_LINES = 3
 
 # --------------------------------------------------------------------------- title bar
 
@@ -119,6 +128,47 @@ def _draw_close_icon(p: QtGui.QPainter, rect: QRectF) -> None:
     p.drawLine(inset.topRight(), inset.bottomLeft())
 
 
+def _reason_font(base: QtGui.QFont) -> QtGui.QFont:
+    """The font an errored section's reason is drawn in — the section header's size,
+    since a failure sentence is secondary text rather than a usage figure. Shared by
+    `Flyout._layout` (which measures it) and `Flyout.paintEvent` (which draws it), so
+    the wrap the first one computes is the wrap the second one gets."""
+    font = QtGui.QFont(base)
+    font.setPointSize(10)
+    return font
+
+
+def _wrap_reason(text: str, metrics: QtGui.QFontMetrics, width: float) -> list[str]:
+    """`text` broken into at most `REASON_MAX_LINES` lines that fit `width`.
+
+    Qt would wrap this itself given `Qt.TextWordWrap`, but then `_layout` would have to
+    predict how many lines that produced in order to size the section, and a wrong
+    guess clips the last line through the middle of its glyphs. Wrapping here keeps
+    sizing and drawing working from one identical list of lines — the same reason
+    `_row_layout` exists for the rows above.
+
+    Every line is elided as a last pass, which is what handles a single word wider than
+    the card (a URL, or the long Windows path inside an `unavailable: {detail}`): word
+    wrapping alone cannot break one.
+    """
+    words = text.split()
+    if not words:
+        return [""]
+    lines = [words[0]]
+    for word in words[1:]:
+        candidate = f"{lines[-1]} {word}"
+        if metrics.horizontalAdvance(candidate) <= width:
+            lines[-1] = candidate
+        else:
+            lines.append(word)
+    if len(lines) > REASON_MAX_LINES:
+        # Whatever didn't fit is folded back onto the last line there is room for, so
+        # its "…" reads as "there is more of this sentence" rather than as a sentence
+        # that happens to stop early.
+        lines = [*lines[: REASON_MAX_LINES - 1], " ".join(lines[REASON_MAX_LINES - 1:])]
+    return [metrics.elidedText(line, Qt.ElideRight, int(width)) for line in lines]
+
+
 def _row_layout(rows: list[UsageRow]) -> list[tuple[UsageRow, float, float]]:
     """(row, y-offset from the section's rows-start, block height) per row.
 
@@ -157,6 +207,10 @@ class _SectionLayout:
     collapsible: bool  # False for errored/empty sections — nothing to hide
     collapsed: bool
     height: float  # total section height, header included
+    #: The failure sentence, pre-wrapped by `_wrap_reason`; empty for a section that
+    #: has rows. Carried here rather than re-wrapped in `paintEvent` because `height`
+    #: above was computed from exactly these lines.
+    reason_lines: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- provider badges
@@ -406,9 +460,11 @@ class Flyout(QtWidgets.QWidget):
     def _layout(self) -> tuple[list[_SectionLayout], float]:
         """Single layout pass for the current results, shared by sizing, painting
         and mouse hit-testing (see `_SectionLayout`). Cheap enough to redo on every
-        paint/mouse-move: a handful of agents, no QPainter calls involved."""
+        paint/mouse-move: a handful of agents, no QPainter involved — only the
+        `QFontMetrics` an errored section's wrapped reason has to be measured with."""
         x, w = float(PAD), float(CARD_W - 2 * PAD)
         y = float(CONTENT_TOP)
+        reason_metrics = QtGui.QFontMetrics(_reason_font(self.font()))
         sections: list[_SectionLayout] = []
         for i, result in enumerate(self._results.values()):
             if i:
@@ -417,15 +473,22 @@ class Flyout(QtWidgets.QWidget):
             collapsible = result.ok and bool(result.rows)
             collapsed = collapsible and result.agent in self._collapsed
             rows_top = y + HEADER_H
+            reason_lines: list[str] = []
             if not result.ok:
-                body_h = 20.0  # one-line reason
+                # `result.error` is already localised by the provider that built it (or
+                # quotes an API's own text verbatim); `flyout.no_usage_data` is only the
+                # no-reason-given case.
+                reason_lines = _wrap_reason(
+                    result.error or t("flyout.no_usage_data"), reason_metrics, w
+                )
+                body_h = len(reason_lines) * REASON_LINE_H
             elif collapsed:
                 body_h = 0.0
             else:
                 body_h = _rows_height(result.rows)
             height = HEADER_H + body_h
             sections.append(_SectionLayout(result.agent, result, header_rect, rows_top,
-                                            collapsible, collapsed, height))
+                                            collapsible, collapsed, height, reason_lines))
             y += height
         return sections, y
 
@@ -610,15 +673,14 @@ class Flyout(QtWidgets.QWidget):
 
             if not result.ok:
                 p.setPen(SUBTLE)
-                # `result.error` is already localised by the provider that built it (or
-                # quotes an API's own text verbatim); this is only the no-reason case.
-                reason = result.error or t("flyout.no_usage_data")
-                # Elided, not cut: these reasons are a sentence long and the card is
-                # 380px, so most of them don't fit on the one line this section gets.
-                # A trailing "…" at least reads as "there is more" rather than as text
-                # that happens to stop mid-word.
-                reason = QtGui.QFontMetrics(f).elidedText(reason, Qt.ElideRight, int(w))
-                p.drawText(QRectF(x, section.rows_top, w, 20), Qt.AlignLeft | Qt.AlignVCenter, reason)
+                # Wrapped and elided by `_layout`, which sized this section for exactly
+                # these lines. `f` is already at the reason's point size here (the
+                # header above set it), i.e. what `_reason_font` measured with.
+                for line_no, line in enumerate(section.reason_lines):
+                    p.drawText(
+                        QRectF(x, section.rows_top + line_no * REASON_LINE_H, w, REASON_LINE_H),
+                        Qt.AlignLeft | Qt.AlignVCenter, line,
+                    )
                 continue
 
             if section.collapsed:
@@ -630,7 +692,12 @@ class Flyout(QtWidgets.QWidget):
                 f.setPointSize(11)
                 p.setFont(f)
 
-                right = row.right
+                # Worded here, on every repaint, rather than baked into the row when it
+                # was fetched — see `UsageRow.reset_at`. A pre-worded countdown was
+                # already up to one poll interval (5 min) behind by the time it was
+                # drawn, and a cached row's stayed frozen for as long as the cache
+                # stood in for a failing poll.
+                right = fmt.reset_row_text(row.reset_at, row.reset_style) if row.reset_at else row.right
                 if row.show_pct:
                     right = f"{right}   {row.pct:.0f}%" if right else f"{row.pct:.0f}%"
 

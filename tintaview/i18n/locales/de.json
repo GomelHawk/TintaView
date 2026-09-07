@@ -132,7 +132,7 @@
   "usage.claude.window_week": "Diese Woche",
   "usage.claude.estimate_right": "{tokens} Mio. Tokens · ~{cost}",
   "usage.claude.error.unavailable": "Claude-Verbrauch nicht verfügbar: {detail}",
-  "usage.claude.error.login_expired": "Deine Anmeldung bei Claude Code ist abgelaufen. Führe `claude` aus (oder starte Claude Code neu), melde dich erneut an und versuche es dann noch einmal.",
+  "usage.claude.error.login_expired": "Anmeldung bei Claude Code abgelaufen — aktueller Verbrauch nicht verfügbar. Führe `claude` aus, um dich neu anzumelden.",
   "usage.claude.error.rate_limited": "Der Verbrauchs-Endpunkt von Claude ist durch ein Anfragelimit gesperrt (HTTP 429) – versuche es in Kürze erneut.",
   "usage.claude.error.no_transcripts": "Keine lokalen Claude-Transkripte gefunden, aus denen sich der Verbrauch schätzen ließe.",
 
@@ -159,7 +159,7 @@
   "usage.cursor.models": "Cursor-Modelle",
   "usage.cursor.other_models": "Andere Modelle",
   "usage.cursor.included": "{amount} enthalten",
-  "usage.cursor.error.not_signed_in": "Bei Cursor nicht angemeldet.",
+  "usage.cursor.error.not_signed_in": "Bei Cursor nicht angemeldet — aktueller Verbrauch nicht verfügbar. Melde dich neu an, um ihn zu sehen.",
   "usage.cursor.error.db_unreadable": "Cursor-Verbrauch nicht verfügbar (Statusdatenbank gesperrt oder nicht lesbar).",
   "usage.cursor.error.http": "Verbrauchs-Endpunkt von Cursor: HTTP {code}.",
   "usage.cursor.error.unavailable": "Cursor-Verbrauch nicht verfügbar: {detail}",

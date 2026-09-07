@@ -365,6 +365,65 @@ Poll on the shared 5-minute cadence (these are rate limits, not urgency), cache 
 result to `~/.tintaview/usage_cache.json` so the flyout is never blank, and never let a
 rate-limited response replace good data with an estimate.
 
+### A row carries the reset *instant*, never the wording
+
+`UsageRow.reset_at` (epoch seconds) plus a `stats.format.RESET_*` style, and
+`format.reset_row_text` words it in `Flyout.paintEvent` — **every repaint**. A provider
+must never put a finished reset sentence in `right`. That is the other half of the
+Monday-morning incident: `right` held the string `"Resets in 2 hr 59 min"`, so the cache
+file counted a 5-hour window down to a moment three days past, and even a healthy row
+was up to a full poll interval behind between polls. It also cost the one signal that
+would have caught it — a reset instant already gone by is a comparison anyone can make,
+a `"Resets 6 Sep"` string is not.
+
+`right` is for text that genuinely isn't a reset time: `"$20.00 included"`,
+`"Not used yet"`, `"0.23 / 10.00 used"`, token totals. A row read back from a
+`usage_cache.json` written before `reset_at` existed has `reset_at == 0.0` and renders
+`right` as before, which is what keeps an old cache file readable.
+
+Four styles, because four APIs word their windows differently and each provider names
+its own once: `RESET_RELATIVE` (Claude), `RESET_RELATIVE_WEEK` (Codex — a weekday name
+for a monthly budget four weeks out reads as *this* week), `RESET_DATE` (Cursor's
+billing cycle), `RESET_DAYS` (Copilot, whose payload carries only a date). JetBrains is
+the deliberate exception: its refill date is composed into the translated
+`usage.jetbrains.credits_and_date` template alongside a credit figure, so it stays
+pre-rendered — it is a bare date on a monthly quota re-read from a local file each poll,
+not a countdown that can drift.
+
+### Classify every failure: transient or auth
+
+`UsageResult.error_kind` decides how far `StatsService` may go to hide a failed fetch, and it
+is not optional detail — getting it wrong is what put Friday evening's Claude figures on the
+maintainer's screen on Monday morning, counting down a 5-hour window that had expired three
+days earlier. Both halves have to hold:
+
+- **`transient`** (the default: a network error, an HTTP 429, a state DB Cursor is holding a
+  write lock on) — cached rows may stand in for as long as it lasts. Nobody is signed out, the
+  next poll will probably work, and this is the case the cache exists for.
+- **`auth`** (a 401, an agent with no session token) — no poll will refresh those numbers until
+  the user signs in again, so cached rows are only served while they are younger than
+  `AUTH_CACHE_GRACE_POLLS` (2) × `stats.poll_seconds`, and otherwise give way to `error`. Two
+  intervals rather than one because the poll that failed is itself an interval on from the last
+  good one; a one-interval window would only ever be met by an out-of-cadence fetch. A result
+  with no `fetched_at` — a cache file written before that field existed — counts as unknown age
+  and is never trusted here.
+
+So a **new provider, or a new failure path in an existing one, has to pick a side**: an
+unclassified failure silently gets `transient`, which for a dead login is the wrong answer.
+Only `claude` (401) and `cursor` (no token, or a second 401 after `_post_with_retry` re-read it)
+have an auth path today; `codex`, `jetbrains` and `copilot` read local files and have none.
+
+`fetched_at` is stamped once by `StatsService._fetch_one` (not by each provider — five chances
+to forget) and is deliberately **carried through a cache substitution unchanged**: what matters
+is the age of the numbers, not of the poll that failed to replace them.
+
+Because an auth failure now reaches the screen, its wording is load-bearing: it must say the
+login expired, that current usage cannot be shown, and how to renew it. The flyout gives an
+errored section `REASON_MAX_LINES` (3) wrapped lines for exactly that reason — one elided line
+cut the remedy off mid-sentence, and two still did in every language but English.
+`tests/test_ui.py` asserts every locale's auth message fits, so lengthening one of those
+catalogue entries fails the suite rather than quietly clipping the fix off the screen.
+
 - **Claude** — `GET https://api.anthropic.com/api/oauth/usage` with the OAuth token from
   `~/.claude/.credentials.json`; falls back to an estimate reconstructed from
   `~/.claude/projects/**/*.jsonl`, labelled as an estimate. Two rules for that estimate:

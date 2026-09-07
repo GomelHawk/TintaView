@@ -345,31 +345,32 @@ def _parse_reset_moment(value: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def _fmt_reset(resets_at: Any = None, resets_in_seconds: Any = None) -> str:
-    """Same wording as the Claude provider's reset formatting, but Codex's rate-limit
-    windows have been observed to carry either an absolute `resets_at` or a relative
-    `resets_in_seconds` — accept either."""
-    now = datetime.now(UTC)
+def _reset_epoch(resets_at: Any = None, resets_in_seconds: Any = None) -> float:
+    """When this window resets, epoch seconds — 0.0 for "couldn't tell".
+
+    Codex's rate-limit windows have been observed to carry either an absolute
+    `resets_at` or a relative `resets_in_seconds`, so accept either. Returns the
+    instant, never the wording: `fmt.RESET_RELATIVE_WEEK` words it at render time
+    (see `UsageRow.reset_at`), which for `resets_in_seconds` matters twice over —
+    "3 hr left" measured from the poll is simply wrong by the time it is read.
+    """
     if resets_at:
         dt = _parse_reset_moment(resets_at)
         if dt is None:
-            # Deliberately blank rather than echoing the raw value. This lands in the
+            # Deliberately nothing rather than echoing the raw value. This lands in the
             # flyout row's right-hand slot, where a value we could not interpret reads as
             # a usage figure — an unparsed epoch once showed up next to the 5-hour limit
             # as a bare "1789125077", which looks like a token count, not a clock.
             log.debug("codex: unparseable resets_at %r", resets_at)
-            return ""
+            return 0.0
     elif resets_in_seconds is not None:
         try:
-            dt = now + timedelta(seconds=float(resets_in_seconds))
+            dt = datetime.now(UTC) + timedelta(seconds=float(resets_in_seconds))
         except (TypeError, ValueError):
-            return ""
+            return 0.0
     else:
-        return ""
-    # Beyond a week a weekday name is ambiguous at best — "Resets Fri" for a monthly
-    # budget four weeks out reads as *this* Friday. Codex's own UI shows a date there,
-    # so `date_after_days` makes `stats.format` match it.
-    return fmt.reset_text(dt, date_after_days=6)
+        return 0.0
+    return dt.timestamp()
 
 
 def _window_label(window: dict[str, Any], fallback: str) -> str:
@@ -405,11 +406,18 @@ def _pct_row(label: str, window: dict[str, Any]) -> UsageRow:
     # `resets_in_seconds`. `window_minutes` is also seen but unused here. Severity
     # thresholds (75% / 90%) are our own choice — Codex's payload doesn't provide one.
     pct = window.get("used_percent")
-    right = _fmt_reset(window.get("resets_at"), window.get("resets_in_seconds"))
+    # `RESET_RELATIVE_WEEK`: beyond a week a weekday name is ambiguous at best — "Resets
+    # Fri" for a monthly budget four weeks out reads as *this* Friday. Codex's own UI
+    # shows a date there, so this is the style that matches it.
+    reset = _reset_epoch(window.get("resets_at"), window.get("resets_in_seconds"))
     if pct is None:
-        return UsageRow(label=label, pct=0.0, right=right, show_pct=False, severity="normal", kind="info")
+        return UsageRow(label=label, pct=0.0, reset_at=reset,
+                         reset_style=fmt.RESET_RELATIVE_WEEK,
+                         show_pct=False, severity="normal", kind="info")
     severity = "critical" if pct >= 90 else "warning" if pct >= 75 else "normal"
-    return UsageRow(label=label, pct=float(pct), right=right, show_pct=True, severity=severity, kind="limit")
+    return UsageRow(label=label, pct=float(pct), reset_at=reset,
+                     reset_style=fmt.RESET_RELATIVE_WEEK,
+                     show_pct=True, severity=severity, kind="limit")
 
 
 def _empty_totals() -> dict[str, int]:

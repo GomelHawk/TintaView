@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
@@ -28,6 +29,14 @@ from .providers.cursor import CursorUsageProvider
 from .providers.jetbrains import JetBrainsUsageProvider
 
 log = logging.getLogger(__name__)
+
+#: How stale cached rows may be, in poll intervals, before an **auth** failure means
+#: they can no longer be trusted (see `UsageResult.error_kind`). Two rather than a fixed
+#: number of minutes so the window scales with `stats.poll_seconds`: rows from the last
+#: cycle or two are rows a poll fetched successfully and a token expiry has not yet had
+#: time to make wrong, while anything older is data that polls have repeatedly failed to
+#: refresh — and it is showing *that* which put Friday's numbers on screen on Monday.
+AUTH_CACHE_GRACE_POLLS = 2
 
 #: Built-in providers, keyed the same way as `Config.enabled_agents` / `Config.agents`.
 #: "jetbrains" and "copilot" have no entry in `tintaview.agents` — neither has a hook
@@ -113,6 +122,11 @@ class StatsService:
         except Exception as e:  # noqa: BLE001 - belt-and-braces; providers must not raise, but don't trust it
             log.exception("stats provider %s raised despite its contract", key)
             result = UsageResult(agent=key, error=f"internal error: {e!r}")
+        if result.ok and not result.fetched_at:
+            # Stamped here rather than in each provider: five providers would be five
+            # chances to forget, and an unstamped result reads as "age unknown", which
+            # `_cache_is_still_fresh` refuses to trust.
+            result = replace(result, fetched_at=time.time())
         return self._apply_cache_policy(result)
 
     def _apply_cache_policy(self, result: UsageResult) -> UsageResult:
@@ -120,12 +134,45 @@ class StatsService:
         failure) falls back to the last cached good result instead of blanking the flyout
         or replacing good numbers with a worse guess.
 
+        With one exception, and it is the whole reason `error_kind` exists: an **auth**
+        failure is not a blip the next poll fixes. Nothing will refresh those numbers
+        until the user signs in again, so masking it with the cache leaves the flyout
+        quietly showing figures from the last time the login worked — on the maintainer's
+        machine, Friday's 5-hour window still counting down on Monday morning, complete
+        with a "Resets in 2 hr 59 min" that had been frozen in the cache file for three
+        days. Past the grace window the rows give way to `error`, which says the login
+        expired and how to renew it; inside it they still stand, because a token that
+        died seconds after a good poll hasn't made those rows wrong.
+
         Deliberately does not write: `fetch_all` persists the whole pass in one go once
         every provider has answered.
         """
         if result.ok:
             return result
         cached = self._cache.get(result.agent)
-        if cached is not None and cached.ok:
-            return replace(cached, source="cache")
-        return result
+        if cached is None or not cached.ok:
+            return result
+        if result.error_kind == "auth" and not self._cache_is_still_fresh(cached):
+            log.info(
+                "stats provider %s failed to authenticate and its cached rows are stale "
+                "— reporting the auth failure instead of usage nobody can refresh",
+                result.agent,
+            )
+            return result
+        return replace(cached, source="cache")
+
+    def _cache_is_still_fresh(self, cached: UsageResult) -> bool:
+        """Are `cached`'s rows recent enough to survive an auth failure?
+
+        `AUTH_CACHE_GRACE_POLLS` poll intervals wide. Two is what makes the window
+        reachable at all: the poll that just failed is itself one interval on from the
+        last good one, so a one-interval window would only ever be met by an
+        out-of-cadence fetch (the flyout refreshes when it opens) landing in the same
+        cycle. A result with no `fetched_at` — a cache file written before that field
+        existed — has an unknown age and is never fresh: on an auth failure the safe
+        direction is to admit we don't know.
+        """
+        if cached.fetched_at <= 0:
+            return False
+        grace = AUTH_CACHE_GRACE_POLLS * float(self._cfg.stats.poll_seconds)
+        return (time.time() - cached.fetched_at) <= grace
