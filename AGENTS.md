@@ -418,11 +418,19 @@ to forget) and is deliberately **carried through a cache substitution unchanged*
 is the age of the numbers, not of the poll that failed to replace them.
 
 Because an auth failure now reaches the screen, its wording is load-bearing: it must say the
-login expired, that current usage cannot be shown, and how to renew it. The flyout gives an
-errored section `REASON_MAX_LINES` (3) wrapped lines for exactly that reason — one elided line
-cut the remedy off mid-sentence, and two still did in every language but English.
-`tests/test_ui.py` asserts every locale's auth message fits, so lengthening one of those
-catalogue entries fails the suite rather than quietly clipping the fix off the screen.
+login expired, that current usage cannot be shown, and how to renew it. So the flyout wraps an
+errored section's reason over **as many lines as it needs** and sizes the section from that
+same list (`_wrap_reason`), rather than eliding it into one.
+
+**Do not cap that by line count.** It was tried, and a line cap is not font-independent: three
+lines fitted the English sentence at the maintainer's font metrics and clipped it to "Run
+`claude` to si…" on a Windows CI runner whose font fits ~25 characters per 344px where the
+development machine fits ~50. What a too-low cap drops is always the tail, and the tail is the
+remedy. `REASON_MAX_CHARS` (200) bounds growth at the only input that can run away instead —
+the exception repr inside an `…error.unavailable` message — and every catalogue reason is well
+under it. `tests/test_ui.py` pins this from both ends: every locale's auth message must render
+complete at 7, 14 and 21 px-per-character (`_WideMetrics`, which is why `_wrap_reason` takes
+its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catalogue.
 
 - **Claude** — `GET https://api.anthropic.com/api/oauth/usage` with the OAuth token from
   `~/.claude/.credentials.json`; falls back to an estimate reconstructed from

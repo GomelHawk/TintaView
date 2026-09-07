@@ -174,24 +174,30 @@ def test_flyout_wraps_a_long_failure_reason_onto_extra_lines(qapp):
     # section (`_layout` sizes from the same list `paintEvent` draws).
     assert flyout.height() == one_line + int((len(lines) - 1) * REASON_LINE_H)
     # Wrapped on word boundaries, with the whole sentence — remedy included — intact.
+    # Deliberately no assertion on *how many* lines that took: it depends on the system
+    # font, and pinning it is what made an earlier version of this test pass here and
+    # fail on a CI runner whose font fits half as many characters per line.
     assert not any(line.endswith("…") for line in lines)
     assert " ".join(lines) == long_reason
+    assert not any(line.startswith("—") for line in lines)  # no dangling em dash
 
     pixmap = QtGui.QPixmap(flyout.size())
     flyout.render(pixmap)  # must not raise
     assert not pixmap.isNull()
 
 
-def test_every_locale_auth_message_fits_the_space_it_is_given(qapp):
+def test_every_locale_auth_message_renders_complete(qapp):
     """The auth reasons are the only ones a user has to *act* on, so an elided one is
     a bug: what gets cut is always the tail, and the tail is the remedy.
 
-    This is the guard on a change nobody would otherwise notice — lengthening one of
-    these catalogue entries, or dropping `REASON_MAX_LINES`, clips "Run `claude` to
-    sign in again" off the screen in whichever language the reviewer doesn't read.
+    Asserts completeness, never a line count — the line count is a property of the
+    system font, and the previous version of this test pinned it and so passed on the
+    machine it was written on while clipping "Run `claude` to sign in again" on a CI
+    runner. What has to hold everywhere is that the whole sentence is on screen and the
+    section was sized for exactly the lines it took.
     """
     from tintaview import i18n
-    from tintaview.ui.flyout import REASON_MAX_LINES
+    from tintaview.ui.flyout import HEADER_H, REASON_LINE_H, REASON_MAX_CHARS
 
     keys = ("usage.claude.error.login_expired", "usage.cursor.error.not_signed_in")
     flyout = Flyout()
@@ -200,30 +206,88 @@ def test_every_locale_auth_message_fits_the_space_it_is_given(qapp):
             i18n.set_language(code)
             for key in keys:
                 reason = i18n.t(key)
+                # Short enough that `_truncate_reason` can never touch it — the one
+                # thing about these strings that is under the catalogue's control.
+                assert len(reason) <= REASON_MAX_CHARS, (code, key, len(reason))
+
                 flyout.set_results({"claude": UsageResult(agent="claude", error=reason)})
                 sections, _ = flyout._layout()
                 lines = sections[0].reason_lines
-                assert len(lines) <= REASON_MAX_LINES, (code, key)
                 assert not any(line.endswith("…") for line in lines), (code, key, lines)
-                assert " ".join(lines) == reason, (code, key, lines)
+                assert " ".join(lines) == " ".join(reason.split()), (code, key, lines)
+                # Sized for those exact lines, so the last one can't be half-drawn.
+                assert sections[0].height == HEADER_H + len(lines) * REASON_LINE_H
+                flyout.render(QtGui.QPixmap(flyout.size()))
     finally:
         i18n.set_language("en")
 
 
-def test_flyout_elides_a_reason_too_long_even_for_the_maximum_lines(qapp):
-    """Text past `REASON_MAX_LINES` still occupies exactly that many, with the
-    overflow elided — a `{detail}` reason quoting a repr can be arbitrarily long."""
-    from tintaview.ui.flyout import REASON_MAX_LINES
+class _WideMetrics:
+    """`QFontMetrics` for a font far wider than the one this was developed against.
+
+    Reproduces the condition that broke this in CI: a Windows runner whose default font
+    fit ~25 characters into the card's 344px where the development machine's fit ~50.
+    `_wrap_reason` takes its metrics as an argument precisely so this is testable
+    without a second font installed.
+    """
+
+    def __init__(self, px_per_char: float = 14.0) -> None:
+        self._px = px_per_char
+
+    def horizontalAdvance(self, text: str) -> int:
+        return int(len(text) * self._px)
+
+    def elidedText(self, text: str, _mode, width: int) -> str:
+        if self.horizontalAdvance(text) <= width:
+            return text
+        return text[: max(0, int(width / self._px) - 1)] + "…"
+
+
+def test_auth_messages_survive_a_font_twice_as_wide(qapp):
+    """Every locale's auth reason must arrive complete however wide the system font.
+
+    The regression this pins: with a cap on lines, three lines fitted the English
+    sentence at the development machine's metrics and cut it to "Run `claude` to si…"
+    at these — losing the remedy in every language on any machine with a wider font.
+    Bounding characters instead of lines is what makes the outcome font-independent.
+    """
+    from tintaview import i18n
+    from tintaview.ui.flyout import CARD_W, PAD, _wrap_reason
+
+    width = float(CARD_W - 2 * PAD)
+    keys = ("usage.claude.error.login_expired", "usage.cursor.error.not_signed_in")
+    try:
+        for code in i18n.LANGUAGE_CODES:
+            i18n.set_language(code)
+            for key in keys:
+                reason = i18n.t(key)
+                for px_per_char in (7.0, 14.0, 21.0):  # normal, the runner, worse still
+                    lines = _wrap_reason(reason, _WideMetrics(px_per_char), width)
+                    assert not any(line.endswith("…") for line in lines), (code, key, px_per_char)
+                    assert " ".join(lines) == " ".join(reason.split()), (code, key, px_per_char)
+                    assert not any(line.startswith("—") for line in lines), (code, key, lines)
+    finally:
+        i18n.set_language("en")
+
+
+def test_flyout_truncates_a_runaway_detail_reason(qapp):
+    """`…error.unavailable` quotes an exception repr, which has no length bound — so
+    the card cannot be allowed to grow with it. That is what `REASON_MAX_CHARS` caps,
+    and it is the only thing that gets elided."""
+    from tintaview.ui.flyout import REASON_MAX_CHARS
+
+    runaway = "Claude usage unavailable: " + "URLError(TimeoutError('timed out')) " * 60
+    assert len(runaway) > 10 * REASON_MAX_CHARS  # the case this guards against
 
     flyout = Flyout()
-    flyout.set_results({"claude": UsageResult(
-        agent="claude",
-        error="Claude usage unavailable: " + "URLError(TimeoutError('timed out')) " * 12,
-    )})
+    flyout.set_results({"claude": UsageResult(agent="claude", error=runaway)})
     sections, _ = flyout._layout()
     lines = sections[0].reason_lines
-    assert len(lines) == REASON_MAX_LINES
+
     assert lines[-1].endswith("…")
+    shown = " ".join(lines)
+    assert len(shown) <= REASON_MAX_CHARS + 1  # + the ellipsis
+    assert shown.startswith("Claude usage unavailable:")
     flyout.render(QtGui.QPixmap(flyout.size()))
 
 

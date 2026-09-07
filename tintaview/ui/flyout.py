@@ -54,13 +54,22 @@ SECTION_GAP = 14  # extra vertical space between one agent's block and the next
 HEADER_H = 24  # height of the badge+title header line, per section
 CHEVRON_W = 16  # right-edge width reserved for the collapse affordance
 REASON_LINE_H = 20.0  # one line of an errored section's failure sentence
-#: How many of those lines a failure sentence gets. One is what it used to get, and one
-#: is not enough for the reasons worth reading: "Claude Code login expired — current
-#: usage can't be shown. Run `claude` to sign in again." elides at 380px somewhere
-#: inside "current usage", losing both the consequence and the remedy. Three rather
-#: than two because English is the short case — the same sentence needs three lines in
-#: German, Polish and every Cyrillic locale. `tests/test_ui.py` holds the two together.
-REASON_MAX_LINES = 3
+#: A failure sentence wraps onto as many lines as it needs (`_wrap_reason`); this bounds
+#: the one input that can run away — the exception repr in an `…error.unavailable`
+#: message. Every catalogue reason is well under it, so every reason a user is expected
+#: to act on renders complete whatever the system font.
+#:
+#: A cap on *lines* was tried first and is the wrong knob: three fitted the English
+#: "Claude Code login expired — current usage can't be shown. Run `claude` to sign in
+#: again." in the font this was measured with, and clipped it to "Run `claude` to si…"
+#: on a CI runner whose font fits half as many characters per line. What a too-low cap
+#: drops is always the tail, and the tail is the half telling the user how to fix it.
+REASON_MAX_CHARS = 200
+
+#: Tokens that must never begin a line, so they are glued to the word before them. On a
+#: narrow card with a wide system font the alternative is a line opening on a dangling
+#: "—" (observed on a Windows CI runner).
+_REASON_NO_LEAD = ("—", "–", "-", "·")
 
 # --------------------------------------------------------------------------- title bar
 
@@ -138,35 +147,62 @@ def _reason_font(base: QtGui.QFont) -> QtGui.QFont:
     return font
 
 
+def _truncate_reason(text: str) -> str:
+    """`text` cut to `REASON_MAX_CHARS` on a word boundary, with an ellipsis.
+
+    The only reason text with no natural bound is `…error.unavailable`, whose `{detail}`
+    is an exception repr; every catalogue sentence is far shorter than this and passes
+    through untouched.
+    """
+    if len(text) <= REASON_MAX_CHARS:
+        return text
+    cut = text[:REASON_MAX_CHARS].rsplit(" ", 1)[0] or text[:REASON_MAX_CHARS]
+    return f"{cut}…"
+
+
+def _reason_tokens(text: str) -> list[str]:
+    """`text` split into the units `_wrap_reason` may break between — whitespace, except
+    that a `_REASON_NO_LEAD` token is glued to the word before it."""
+    tokens: list[str] = []
+    for word in text.split():
+        if tokens and word in _REASON_NO_LEAD:
+            tokens[-1] = f"{tokens[-1]} {word}"
+        else:
+            tokens.append(word)
+    return tokens
+
+
 def _wrap_reason(text: str, metrics: QtGui.QFontMetrics, width: float) -> list[str]:
-    """`text` broken into at most `REASON_MAX_LINES` lines that fit `width`.
+    """`text` wrapped to `width`, over as many lines as it takes.
+
+    Deliberately not capped at a line count — see `REASON_MAX_CHARS` for why that was
+    the wrong knob. An errored section has no bars competing for the space, so letting
+    it be as tall as its sentence costs nothing and cannot clip the remedy.
 
     Qt would wrap this itself given `Qt.TextWordWrap`, but then `_layout` would have to
     predict how many lines that produced in order to size the section, and a wrong
     guess clips the last line through the middle of its glyphs. Wrapping here keeps
     sizing and drawing working from one identical list of lines — the same reason
     `_row_layout` exists for the rows above.
-
-    Every line is elided as a last pass, which is what handles a single word wider than
-    the card (a URL, or the long Windows path inside an `unavailable: {detail}`): word
-    wrapping alone cannot break one.
     """
-    words = text.split()
-    if not words:
+    tokens = _reason_tokens(_truncate_reason(text))
+    if not tokens:
         return [""]
-    lines = [words[0]]
-    for word in words[1:]:
-        candidate = f"{lines[-1]} {word}"
+    lines = [tokens[0]]
+    for token in tokens[1:]:
+        candidate = f"{lines[-1]} {token}"
         if metrics.horizontalAdvance(candidate) <= width:
             lines[-1] = candidate
         else:
-            lines.append(word)
-    if len(lines) > REASON_MAX_LINES:
-        # Whatever didn't fit is folded back onto the last line there is room for, so
-        # its "…" reads as "there is more of this sentence" rather than as a sentence
-        # that happens to stop early.
-        lines = [*lines[: REASON_MAX_LINES - 1], " ".join(lines[REASON_MAX_LINES - 1:])]
-    return [metrics.elidedText(line, Qt.ElideRight, int(width)) for line in lines]
+            lines.append(token)
+    # A single token wider than the card (a URL, a long Windows path inside a
+    # `{detail}`) cannot be broken by word wrapping — elide those, and only those, so
+    # an ordinary sentence is never touched.
+    return [
+        line if metrics.horizontalAdvance(line) <= width
+        else metrics.elidedText(line, Qt.ElideRight, int(width))
+        for line in lines
+    ]
 
 
 def _row_layout(rows: list[UsageRow]) -> list[tuple[UsageRow, float, float]]:
