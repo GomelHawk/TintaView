@@ -842,20 +842,23 @@ notes against the same list you read.
 changed, and one 1464-line commit (`c26b34b`) once hid three unrequested features behind a subject
 that mentioned none of them. A subject is a lead, not a source.
 
-What the description has to contain:
+**Write it for the person installing it, and keep it short.** A user reads a list of changes to
+decide whether to update and what they can now do — not a changelog of the work. Aim for a
+handful of lines per release; if it runs past a screen, it is the wrong document. What earns a
+line:
 
-- **Grouped by what it means to a user** — added / changed / fixed / internal — with each item
-  naming the effect, not the file. "The estimate tick box now takes effect without a restart"
-  beats "mirror `stats.show_estimate` in `_apply_settings`".
-- **Every new, renamed or removed `config.toml` key and settings control**, spelled out. Those are
-  the things a user has to go and look at, and a renamed key is the one change that can silently
-  drop someone's setting.
-- **Anything needing an action on upgrade** — re-running `tintaview setup`, reinstalling hooks, a
-  changed engine default — called out on its own, not buried in a list.
-- **The internal-only commits too**, in their own group. Omitting them makes the notes look
-  thinner than the diff, and a reviewer comparing the two has to work out which of you is wrong.
-- **A suggested version number**, with the reasoning in one clause (new user-visible feature →
-  minor; fixes only → patch). A suggestion: the tag is the maintainer's.
+- **What they can now do, or what now behaves differently**, in their words. "Up to four world
+  clocks in the usage panel, off by default" — not "adds `ClocksConfig` and a Clocks tab".
+- **Anything they have to touch**: a setting to switch on, a config key renamed or removed, a
+  re-run of `tintaview setup`, a hook reinstall. A renamed key is the one change that silently
+  drops someone's setting, so it is always worth its line.
+- **A suggested version number**, one clause of reasoning. The tag is the maintainer's.
+
+What does *not* go in: refactors, test work, CI failures, internal reasoning, per-commit
+attribution, anything a user cannot see or act on. Read those commits — that is how you know a
+subject understates a user-visible change — then leave them out. Findings the maintainer needs
+before tagging (a red suite, an unverified platform, an upgrade risk) belong in a **separate note
+to them, outside the notes themselves**, alongside the usual verified/not-verified line.
 
 Then stop. **Do not tag, do not push, do not create or edit the GitHub Release** — the tag *is*
 the version (setuptools-scm reads it, `build.yml` fires on it), so tagging ships a release, and
