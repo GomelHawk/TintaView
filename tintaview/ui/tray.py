@@ -755,6 +755,10 @@ class TrayApp(QtCore.QObject):
         self._cfg.ui.chime_on_confirm = new_cfg.ui.chime_on_confirm
         self._cfg.ui.language = new_cfg.ui.language
         self._cfg.stats.poll_seconds = new_cfg.stats.poll_seconds
+        # `StatsService` holds this very object, so this line is what makes the setting
+        # take effect without a restart — see `tests/test_ui.py`'s mirror guard, which
+        # exists because omitting exactly this line shipped a tick box that did nothing.
+        self._cfg.stats.show_estimate = new_cfg.stats.show_estimate
         self._cfg.update.check = new_cfg.update.check
         self._cfg.engine.mode = new_cfg.engine.mode
         for status in ("idle", "working", "confirm"):

@@ -931,7 +931,14 @@ def _accepted_copy(app_instance, **changes) -> Config:
 
 def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     """A field that only lands in the dialog's copy is a setting that appears to do
-    nothing until the next restart — the exact failure this dialog exists to avoid."""
+    nothing until the next restart — the exact failure this dialog exists to avoid.
+
+    The list below is hand-written, and that is exactly how `stats.show_estimate`
+    slipped through: this test was named "every field" while only ever checking the
+    fields someone had remembered to add, so a new dialog control could ship inert and
+    still be green. `test_every_stats_field_is_accounted_for` below closes that gap for
+    `StatsConfig`, which is where it happened.
+    """
     app_instance, _server = tray_with_controller
     new_cfg = _accepted_copy(
         app_instance,
@@ -939,6 +946,7 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
             "enabled_agents": ["codex"],
             "ui.chime_on_confirm": True,
             "stats.poll_seconds": 90,
+            "stats.show_estimate": False,
             "update.check": False,
             "engine.mode": "openrgb",
             "colors.idle": "#010203",
@@ -952,12 +960,39 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     assert cfg.enabled_agents == ["codex"]
     assert cfg.ui.chime_on_confirm is True
     assert cfg.stats.poll_seconds == 90
+    assert cfg.stats.show_estimate is False
     assert cfg.update.check is False
     assert cfg.engine.mode == "openrgb"
     assert cfg.colors.idle == "#010203"
     # The device palette is what the controller actually sends to the hardware.
     assert cfg.colors.device.idle == "#040506"
     assert app_instance.usage_timer.interval() == 90_000
+
+
+def test_every_stats_field_is_accounted_for():
+    """Adding a `StatsConfig` field must break a test until someone decides whether the
+    settings dialog writes it — and if it does, mirrors it in `_apply_settings`.
+
+    The mirror is field-by-field because `StatsService`, `StatusServer` and
+    `LightController` all hold the live `Config` object, so it cannot simply be
+    replaced. That is a reasonable design with one sharp edge: forgetting a line ships
+    a control that does nothing. This is the tripwire for that edge.
+    """
+    from dataclasses import fields
+
+    from tintaview.core.config import StatsConfig
+
+    # Written by SettingsDialog and mirrored in Tray._apply_settings — each is asserted
+    # in test_apply_settings_mirrors_every_field_it_can_write above.
+    dialog_writes = {"poll_seconds", "show_estimate"}
+    # Not reachable from the dialog at all (config-file only).
+    config_file_only = {"enabled"}
+
+    assert {f.name for f in fields(StatsConfig)} == dialog_writes | config_file_only, (
+        "StatsConfig changed. If the settings dialog writes the new field, mirror it in "
+        "Tray._apply_settings, assert it in the test above and add it to `dialog_writes`; "
+        "otherwise add it to `config_file_only`."
+    )
 
 
 def test_apply_settings_switches_the_interface_language(tray_with_controller):

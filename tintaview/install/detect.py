@@ -17,6 +17,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core.proc import no_window
+
 PLATFORM_WINDOWS = "windows"
 PLATFORM_WSL = "wsl"  # running *inside* a WSL distro
 PLATFORM_LINUX = "linux"
@@ -78,7 +80,8 @@ def wsl_distros() -> list[str]:
     if not exe:
         return []
     try:
-        out = subprocess.run([exe, "-l", "-q"], capture_output=True, timeout=10, check=False)
+        out = subprocess.run([exe, "-l", "-q"],
+                             **no_window(capture_output=True, timeout=10, check=False))
     except (OSError, subprocess.SubprocessError):
         return []
     # wsl.exe -l -q emits UTF-16LE on most builds.
@@ -140,7 +143,7 @@ def windows_home_from_wsl() -> Path | None:
     try:
         out = subprocess.run(
             ["cmd.exe", "/c", "echo %USERPROFILE%"],
-            capture_output=True, timeout=10, check=False, cwd="/",
+            **no_window(capture_output=True, timeout=10, check=False, cwd="/"),
         )
         text = out.stdout.decode("utf-8", "ignore").strip()
     except (OSError, subprocess.SubprocessError):

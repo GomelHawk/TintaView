@@ -25,6 +25,7 @@ import pytest
 
 from tintaview.agents.base import HOOK_SENTINEL
 from tintaview.core import config as config_mod
+from tintaview.core import proc as proc_mod
 from tintaview.core.config import Config
 from tintaview.install import detect
 from tintaview.install.detect import Environment
@@ -378,8 +379,9 @@ def wsl_mod(monkeypatch):
 def test_run_in_builds_expected_wsl_command(monkeypatch, wsl_mod):
     calls = []
 
-    def fake_run(cmd, input=None, capture_output=True, timeout=None, check=False):
-        calls.append((cmd, input))
+    def fake_run(cmd, input=None, capture_output=True, timeout=None, check=False,
+                 creationflags=0):
+        calls.append((cmd, input, creationflags))
         return _FakeCompleted(stdout=b"hello\n")
 
     monkeypatch.setattr(wsl_mod.subprocess, "run", fake_run)
@@ -388,9 +390,13 @@ def test_run_in_builds_expected_wsl_command(monkeypatch, wsl_mod):
 
     assert out == "hello\n"
     assert len(calls) == 1
-    cmd, sent_input = calls[0]
+    cmd, sent_input, creationflags = calls[0]
     assert cmd == ["/usr/bin/wsl.exe", "-d", "Ubuntu", "--", "echo", "hi"]
     assert sent_input == b"payload"
+    # On Windows this is the flag that stops a console window flashing up for every
+    # call — and `missing_hooks` makes one of these per enabled agent, so pressing OK
+    # in the settings dialog used to flash a row of them. 0 everywhere else.
+    assert creationflags == proc_mod.CREATE_NO_WINDOW
 
 
 def test_run_in_missing_wsl_exe_degrades_cleanly(monkeypatch, wsl_mod):

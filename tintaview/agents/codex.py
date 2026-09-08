@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from tintaview.core import events
+from tintaview.core.proc import no_window
 
 from .base import HookBinding, NestedHooksAdapter, register
 
@@ -32,10 +33,7 @@ class CodexAdapter(NestedHooksAdapter):
         try:
             result = subprocess.run(
                 ["codex", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-                check=False,
+                **no_window(capture_output=True, text=True, timeout=3, check=False),
             )
         except (OSError, subprocess.SubprocessError):
             return None

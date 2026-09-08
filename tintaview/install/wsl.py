@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
 from ..core import config as config_mod
+from ..core.proc import no_window
 from . import codex_flag, detect
 from . import hooks as hooks_mod
 
@@ -78,10 +79,12 @@ def run_in(
     try:
         result = subprocess.run(
             cmd,
-            input=input.encode("utf-8") if input is not None else None,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            **no_window(
+                input=input.encode("utf-8") if input is not None else None,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            ),
         )
     except subprocess.TimeoutExpired as exc:
         raise WslError(
