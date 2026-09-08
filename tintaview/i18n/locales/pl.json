@@ -58,7 +58,6 @@
   "settings.poll": "Częstotliwość odświeżania zużycia:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Sprawdzaj aktualizacje przy uruchomieniu",
-  "settings.update_beta": "Uwzględniaj wersje wstępne (beta)",
   "settings.language": "Język interfejsu:",
   "settings.language.hint": "Kreator konfiguracji pozostaje w języku angielskim, a dane zwracane przez API danego agenta zachowują oryginalne brzmienie.",
   "settings.engine": "Silnik podświetlenia:",

@@ -1307,14 +1307,14 @@ class _RecordingUpdateModule:
         self.check_threads: list[threading.Thread] = []
         self.update_threads: list[threading.Thread] = []
 
-    def latest_release(self, channel: str = "stable"):
+    def latest_release(self):
         self.check_threads.append(threading.current_thread())
         return self._release
 
     def compare_versions(self, a: str, b: str) -> int:
         return -1  # "b is newer", always: the release below is what's under test
 
-    def run_update(self, check_only: bool = False, channel: str | None = None) -> int:
+    def run_update(self, check_only: bool = False) -> int:
         self.update_threads.append(threading.current_thread())
         return 0
 
@@ -1340,7 +1340,7 @@ def test_manual_update_check_never_runs_on_the_calling_thread(qapp, monkeypatch)
     worker.check_ready.connect(lambda *a: seen.append(a))
 
     caller = threading.current_thread()
-    assert worker.check("stable") is True
+    assert worker.check() is True
     _drain(worker)
 
     assert fake.check_threads, "latest_release() was never called"
@@ -1361,7 +1361,7 @@ def test_manual_update_install_never_runs_on_the_calling_thread(qapp, monkeypatc
     worker.install_done.connect(codes.append)
 
     caller = threading.current_thread()
-    assert worker.install("stable") is True
+    assert worker.install() is True
     _drain(worker)
 
     assert fake.update_threads, "run_update() was never called"

@@ -57,7 +57,6 @@
   "settings.poll": "Usage refresh interval:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Check for updates on startup",
-  "settings.update_beta": "Include pre-release (beta) versions",
   "settings.language": "Interface language:",
   "settings.language.hint": "The setup wizard stays in English, and figures an agent's own API reports keep their original wording.",
   "settings.engine": "Lighting engine:",

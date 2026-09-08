@@ -247,15 +247,6 @@ class UpdateCheckWorker(_GuardedWorker):
     update_available = QtCore.Signal(str, str)  # (latest_tag, current_version)
     _thread_name = "tv-tray-update-check"
 
-    def __init__(self, channel: str = "stable") -> None:
-        super().__init__()
-        # Held rather than read from config on each run: this fires on a worker thread,
-        # and the config the tray started with is the one its menus already reflect.
-        self._channel = channel
-
-    def set_channel(self, channel: str) -> None:
-        self._channel = channel
-
     def _run(self) -> None:
         from tintaview import __version__
 
@@ -265,7 +256,7 @@ class UpdateCheckWorker(_GuardedWorker):
             return
 
         try:
-            release = update_mod.latest_release(channel=self._channel)
+            release = update_mod.latest_release()
             if release is None:
                 return
             tag = str(release.get("tag_name") or "").lstrip("vV").strip()
@@ -350,15 +341,15 @@ class ManualUpdateWorker(_GuardedWorker):
     #: every usage provider follows) — just not all of it in a message box.
     NOTES_LIMIT = 500
 
-    def check(self, channel: str) -> bool:
+    def check(self) -> bool:
         """Start a check. False if a check or an install is already running."""
-        return self._start(lambda: self._check(channel), "tv-tray-update-manual")
+        return self._start(self._check, "tv-tray-update-manual")
 
-    def install(self, channel: str) -> bool:
+    def install(self) -> bool:
         """Start the install. False if a check or an install is already running."""
-        return self._start(lambda: self._install(channel), "tv-tray-update-install")
+        return self._start(self._install, "tv-tray-update-install")
 
-    def _check(self, channel: str) -> None:
+    def _check(self) -> None:
         from tintaview import __version__
 
         try:
@@ -368,7 +359,7 @@ class ManualUpdateWorker(_GuardedWorker):
             return
 
         try:
-            release = update_mod.latest_release(channel=channel)
+            release = update_mod.latest_release()
             if release is None:
                 self.check_ready.emit(self.OUTCOME_FAILED, "", "")
                 return
@@ -386,11 +377,11 @@ class ManualUpdateWorker(_GuardedWorker):
             notes = notes[: self.NOTES_LIMIT].rstrip() + "…"
         self.check_ready.emit(self.OUTCOME_AVAILABLE, tag, notes)
 
-    def _install(self, channel: str) -> None:
+    def _install(self) -> None:
         try:
             from tintaview.install import update as update_mod
 
-            code = update_mod.run_update(check_only=False, channel=channel)
+            code = update_mod.run_update(check_only=False)
         except Exception:
             log.exception("update install failed")
             code = 1
@@ -487,7 +478,7 @@ class TrayApp(QtCore.QObject):
         self._stats_worker = StatsWorker(cfg)
         self._stats_worker.results_ready.connect(self._apply_results)
 
-        self._update_worker = UpdateCheckWorker(cfg.update.channel)
+        self._update_worker = UpdateCheckWorker()
         self._update_worker.update_available.connect(self._on_update_available)
 
         self._manual_update_worker = ManualUpdateWorker()
@@ -765,10 +756,6 @@ class TrayApp(QtCore.QObject):
         self._cfg.ui.language = new_cfg.ui.language
         self._cfg.stats.poll_seconds = new_cfg.stats.poll_seconds
         self._cfg.update.check = new_cfg.update.check
-        self._cfg.update.channel = new_cfg.update.channel
-        # The worker captured the channel when it was built, so switching channels in
-        # the dialog would otherwise keep checking the old one until the next restart.
-        self._update_worker.set_channel(new_cfg.update.channel)
         self._cfg.engine.mode = new_cfg.engine.mode
         for status in ("idle", "working", "confirm"):
             setattr(self._cfg.colors, status, getattr(new_cfg.colors, status))
@@ -935,7 +922,7 @@ class TrayApp(QtCore.QObject):
         `ManualUpdateWorker`; everything below reports through dialogs and balloons, since
         a windowed build has no console for `run_update`'s own progress output.
         """
-        if not self._manual_update_worker.check(self._cfg.update.channel):
+        if not self._manual_update_worker.check():
             return  # a check or an install is already running
         self.tray.showMessage(
             t("tray.update.balloon_title"),
@@ -974,7 +961,7 @@ class TrayApp(QtCore.QObject):
         # run_update's own platform logic (verify SHA-256, run silently, detach on
         # Windows) take over — on a worker thread, with a balloon rather than a modal
         # dialog, because on Linux/macOS it does not return for minutes.
-        if not self._manual_update_worker.install(self._cfg.update.channel):
+        if not self._manual_update_worker.install():
             return
         self.tray.showMessage(
             t("tray.update.balloon_title"),

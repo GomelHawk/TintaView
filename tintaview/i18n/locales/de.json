@@ -57,7 +57,6 @@
   "settings.poll": "Aktualisierungsintervall für den Verbrauch:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Beim Start nach Updates suchen",
-  "settings.update_beta": "Vorabversionen (Beta) einbeziehen",
   "settings.language": "Sprache der Oberfläche:",
   "settings.language.hint": "Der Einrichtungsassistent bleibt auf Englisch, und Werte aus der API eines Agenten behalten ihren ursprünglichen Wortlaut.",
   "settings.engine": "Beleuchtungs-Engine:",

@@ -32,6 +32,22 @@ agent-made commit has to be unpicked before the work can be reviewed. This holds
 change is finished, tested and obviously correct, and even when a task description sounds like it
 implies a commit; if you think one is warranted, say so and leave it to the maintainer.
 
+**Never add a feature that wasn't asked for.** Not a menu item, not a checkbox, not a config
+key, not a CLI flag — nothing that changes what the user sees or can switch on. If a change
+seems worth making, say so and stop; adding it is the maintainer's call, exactly like
+committing is.
+
+This rule is written down because it was broken. `c26b34b` ("Add diagnostics support, improve
+fallback pricing for unrecognized Claude models, and update translations") also shipped a
+"Pause lighting" menu item, an "Open logs folder" menu item and an "Include pre-release (beta)
+versions" settings checkbox — none of them requested, none of them named in the commit message,
+all of them inside a 1464-line commit across 24 files where they were invisible on review. The
+beta checkbox survived a week before the maintainer noticed it and asked what it was.
+
+Two habits follow from that. Keep unrelated work out of one commit, so a reviewer can actually
+see what a change contains. And when the description doesn't mention something the change adds,
+that is the bug — not a detail to leave out for brevity.
+
 At the end of implementing any update or feature, give a short commit-style description of the
 change (what changed, in one or two sentences) — that description is what the maintainer commits
 with, and is the reason it reads like a commit message despite the rule above.
@@ -730,14 +746,16 @@ out of the venv it is about to replace), `sh install.sh --prefix …` on Linux/m
 `--prefix` is derived from `sys.prefix` so a non-default install upgrades itself instead of
 spawning a second copy.
 
-`update.channel` picks what counts as an update. `stable` (the default) asks GitHub for
-`/releases/latest`, which already excludes drafts and pre-releases. `beta` reads the release
-*list* and takes the highest version on it, pre-releases included but drafts never — by parsed
-version, not by position, since GitHub returns publication order and that stops being version
-order the moment a patch to an older line ships after a newer pre-release. This is why
-`compare_versions` **orders** pre-release suffixes (`1.2.0-rc1 < 1.2.0-rc2 < 1.2.0`) instead of
-stripping them as it once did: treating the suffix as noise pins a beta user to whichever rc they
-installed, because every later rc *and* the final release then compare equal to it.
+`/releases/latest` is the only endpoint read, and it already excludes drafts and pre-releases.
+There was briefly an `update.channel = "beta"` that read the release *list* to pick up
+pre-releases, with a settings checkbox for it; **it was removed** — nothing in this repo has ever
+been tagged `-rc`/`-beta`, so it offered a channel with no releases on it, and it was never asked
+for (see "Never add a feature that wasn't asked for"). Don't reintroduce it without being asked.
+
+`compare_versions` still **orders** pre-release suffixes (`1.2.0-rc1 < 1.2.0-rc2 < 1.2.0`) rather
+than stripping them as it once did. That is about the *installed* side, not the offered one:
+treating the suffix as noise pins anyone running an rc build to it forever, because the final
+release then compares equal to their rc and never counts as newer.
 
 ### CI and release
 

@@ -321,7 +321,6 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
-| `update.channel` | `stable` | `stable` \| `beta`. `stable` offers published releases only; `beta` also offers pre-releases (never drafts). Also a tick box in **Settings…**. Anything else here is read as `stable`. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
 | `agents.<key>.confirm_detection` | `event` | `event` (a real hook fires) or `stall` (heuristic — Cursor's default). |
@@ -382,13 +381,6 @@ match.
 Updating never touches `config.toml` or any agent's hook configuration — hooks always
 point at the same stable `tv-hook` path, so an update can never leave an agent's hooks
 broken.
-
-**Beta releases.** Tick **Include pre-release (beta) versions** in Settings (or set
-`update.channel = "beta"`) and both the startup check and **Check for updates** will also
-offer pre-releases. Drafts are never offered, and once a final release ships you move onto
-it rather than being stranded on the last release candidate. Set it back to `stable` at
-any time — the next check then only offers published releases, and you keep whatever
-you're on until one is newer than it.
 
 ## Uninstall
 

@@ -57,7 +57,6 @@
   "settings.poll": "Intervalo de actualización del uso:",
   "settings.poll.suffix": "s",
   "settings.update_check": "Buscar actualizaciones al iniciar",
-  "settings.update_beta": "Incluir versiones preliminares (beta)",
   "settings.language": "Idioma de la interfaz:",
   "settings.language.hint": "El asistente de configuración se mantiene en inglés, y las cifras que informa la API de cada agente conservan su redacción original.",
   "settings.engine": "Motor de iluminación:",

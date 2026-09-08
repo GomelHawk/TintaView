@@ -233,7 +233,6 @@ class UIConfig:
 @dataclass
 class UpdateConfig:
     check: bool = True
-    channel: str = "stable"
 
 
 @dataclass

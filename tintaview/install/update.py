@@ -36,18 +36,12 @@ from .. import __version__
 log = logging.getLogger(__name__)
 
 GITHUB_REPO = "GomelHawk/TintaView"
+#: `/releases/latest`, which already excludes drafts and pre-releases — the only
+#: endpoint this updater reads. There was briefly a second channel that read the
+#: release *list* to pick up pre-releases; it was removed because nothing in this repo
+#: has ever been tagged as one, so it offered a channel with no releases on it.
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-#: The *list* endpoint, which — unlike `/releases/latest` — includes pre-releases.
-#: Only the beta channel reads it. One page is plenty: a pre-release newer than
-#: everything on the first page of 30 would have to be older than 30 later releases.
-GITHUB_RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30"
 USER_AGENT = "TintaView-self-updater"
-
-#: `update.channel` values. Anything else in a hand-edited config is treated as
-#: "stable" — same forgiving-parse policy as `engine.mode` and `ui.language`.
-CHANNEL_STABLE = "stable"
-CHANNEL_BETA = "beta"
-CHANNELS: tuple[str, ...] = (CHANNEL_STABLE, CHANNEL_BETA)
 
 #: Every filename this module will accept as "the" checksums file for a release, tried
 #: in order. build.yml (AGENTS.md, "CI and release") is expected to publish exactly one of these
@@ -112,11 +106,12 @@ def _prerelease_key(pre: str) -> tuple:
 def compare_versions(a: str, b: str) -> int:
     """-1 if a<b, 0 if a==b, 1 if a>b — numeric, not lexicographic.
 
-    Pre-releases are ordered, not discarded: `1.2.0-rc1 < 1.2.0-rc2 < 1.2.0`. That
-    matters for the beta channel, which installs pre-release tags — treating the suffix
-    as noise (as this did before there was a beta channel) would pin anyone running an
-    rc to that rc forever, since every later rc *and* the final release would compare
-    equal to it and so never count as "newer".
+    Pre-releases are ordered, not discarded: `1.2.0-rc1 < 1.2.0-rc2 < 1.2.0`. This
+    updater only ever offers `/releases/latest`, which excludes pre-releases, so the
+    ordering matters for the *installed* side rather than the offered one: treating the
+    suffix as noise (as this did once) pins anyone running an rc build to it forever,
+    since the final release would compare equal to their rc and so never count as
+    "newer".
     """
     pa, pb = _parse_version(a), _parse_version(b)
     n = max(len(pa), len(pb))
@@ -137,12 +132,6 @@ def compare_versions(a: str, b: str) -> int:
     if ka == kb:
         return 0
     return -1 if ka < kb else 1
-
-
-def normalize_channel(channel: str | None) -> str:
-    """`update.channel` as one of `CHANNELS`; anything unrecognised means stable."""
-    value = (channel or "").strip().lower()
-    return value if value in CHANNELS else CHANNEL_STABLE
 
 
 # --------------------------------------------------------------------------- GitHub API
@@ -172,49 +161,18 @@ def _get_json(url: str, timeout: float) -> Any | None:
         return None
 
 
-def latest_release(timeout: float = 10.0, channel: str = CHANNEL_STABLE) -> dict[str, Any] | None:
+def latest_release(timeout: float = 10.0) -> dict[str, Any] | None:
     """The release this install should update to, or None on any problem (network
     error, rate limit, no releases yet, unexpected shape). Never raises.
 
-    `channel="stable"` asks GitHub for `/releases/latest`, which already excludes drafts
-    and pre-releases. `channel="beta"` reads the release *list* instead and picks the
-    highest version on it, pre-releases included — GitHub returns that list in
-    publication order, which is not version order once a patch to an older line ships
-    after a newer pre-release, so the pick is by parsed version rather than by position.
+    `/releases/latest` already excludes drafts and pre-releases, which is the whole
+    reason it is the endpoint used.
     """
-    if normalize_channel(channel) == CHANNEL_BETA:
-        return _latest_beta_release(timeout)
-
     data = _get_json(GITHUB_API_URL, timeout)
     if not isinstance(data, dict) or "tag_name" not in data:
         log.warning("update check failed: unexpected response shape")
         return None
     return data
-
-
-def _latest_beta_release(timeout: float) -> dict[str, Any] | None:
-    """Highest-versioned non-draft release, pre-releases included."""
-    data = _get_json(GITHUB_RELEASES_URL, timeout)
-    if not isinstance(data, list):
-        log.warning("update check failed: unexpected response shape")
-        return None
-
-    # Drafts are excluded but pre-releases are not: shipping the unpublished one is the
-    # single thing this channel must never do, and offering the pre-release is the
-    # single thing it exists to do.
-    candidates = [
-        r for r in data
-        if isinstance(r, dict) and r.get("tag_name") and not r.get("draft")
-    ]
-    if not candidates:
-        log.warning("update check failed: no published releases")
-        return None
-
-    best = candidates[0]
-    for release in candidates[1:]:
-        if compare_versions(str(release["tag_name"]), str(best["tag_name"])) > 0:
-            best = release
-    return best
 
 
 # --------------------------------------------------------------------------- download + verify
@@ -458,25 +416,8 @@ def _check_failure_reason() -> str:
     )
 
 
-def configured_channel() -> str:
-    """`update.channel` from the config, or "stable" if it can't be read.
-
-    Read here rather than passed in from every call site so `tintaview update` honours
-    the setting with no extra flag. Failure is never fatal — an unreadable config means
-    the safe channel, not a failed update.
-    """
-    try:
-        from tintaview.core import config as config_mod
-
-        return normalize_channel(config_mod.load().update.channel)
-    except Exception:  # noqa: BLE001 - a bad config must not break updating
-        log.warning("could not read update.channel; using %s", CHANNEL_STABLE)
-        return CHANNEL_STABLE
-
-
-def run_update(check_only: bool = False, channel: str | None = None) -> int:
-    channel = normalize_channel(channel) if channel is not None else configured_channel()
-    release = latest_release(channel=channel)
+def run_update(check_only: bool = False) -> int:
+    release = latest_release()
     if release is None:
         print(_check_failure_reason())
         return 1
@@ -488,15 +429,10 @@ def run_update(check_only: bool = False, channel: str | None = None) -> int:
     latest_version = _strip_v(latest_version)
 
     if compare_versions(__version__, latest_version) >= 0:
-        print(f"TintaView {__version__} is up to date (latest {channel} release: {latest_version}).")
+        print(f"TintaView {__version__} is up to date (latest release: {latest_version}).")
         return 0
 
     print(f"An update is available: {__version__} -> {latest_version}")
-    if channel == CHANNEL_BETA and _parse_prerelease(latest_version):
-        print(
-            "This is a pre-release, offered because `update.channel = \"beta\"` is set "
-            "in your config. Set it back to \"stable\" for released versions only."
-        )
     print(
         "Config and every agent's hook configuration are never touched by an update — "
         "hooks point at the stable tv-hook path, not at anything version-specific."
