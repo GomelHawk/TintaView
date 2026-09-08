@@ -124,14 +124,38 @@ _NON_COUNTRIES = (QtCore.QLocale.Country.AnyCountry, QtCore.QLocale.Country.Worl
 
 
 @lru_cache(maxsize=1)
+def _zoneinfo_ids() -> tuple[str, ...]:
+    """The tz database's own id list, where the platform has one.
+
+    A third source, because Qt's two are demonstrably incomplete: on macOS CI
+    `Asia/Kolkata` is constructible and Qt places it in India, yet it appears in neither
+    `availableTimeZoneIds()` nor `availableTimeZoneIds(India)` — so India was missing
+    from the country picker altogether and an Indian clock could not be chosen at all.
+
+    `zoneinfo` reads the OS tz database (present on Linux and macOS) and needs the
+    `tzdata` wheel on Windows, where it raises instead — hence the guard, and hence Qt
+    staying the authority for validity, territory and conversion. This only ever
+    *proposes* ids; every one is checked with `QTimeZone` before it reaches the picker.
+    """
+    try:
+        import zoneinfo
+
+        return tuple(sorted(zoneinfo.available_timezones()))
+    except Exception:  # no tz database (Windows without `tzdata`), or an unreadable one
+        log.debug("zoneinfo has no id list here; using Qt's own enumeration only",
+                  exc_info=True)
+        return ()
+
+
+@lru_cache(maxsize=1)
 def _zones_by_country() -> dict[QtCore.QLocale.Country, tuple[str, ...]]:
     """Country -> its IANA ids, from *both* things Qt can be asked, unioned.
 
     Enumerated from Qt rather than from a table shipped here: a hand-written country
     list is a second source of truth that goes stale.
 
-    Two questions, because neither backend answers both reliably and a country missing
-    from this map is a country the user cannot pick at all:
+    Three sources, because no single one is complete on every platform, and a country
+    missing from this map is a country the user cannot pick at all:
 
       - `availableTimeZoneIds(territory)` — "which zones are in this country?" Its
         implementation is per platform (ICU on macOS, a CLDR mapping on Windows, the tz
@@ -139,9 +163,12 @@ def _zones_by_country() -> dict[QtCore.QLocale.Country, tuple[str, ...]]:
       - `QTimeZone(id).territory()` — "which country is this zone in?", asked of every
         id Qt reports, which is the same list `_zone_valid` trusts in the flyout.
 
+      - `_zoneinfo_ids()` — the tz database's own list, consulted only for a country the
+        two Qt calls left empty. That is the macOS case above.
+
     A union can only ever add a country, never drop one, so this is strictly more
-    complete than either source and needs no platform branch. Cheap enough to do once:
-    ~550 ids, cached for the process.
+    complete than any single source and needs no platform branch. Cheap enough to do
+    once: ~1100 ids across the three passes, cached for the process.
 
     Names come back from Qt in English and stay English, like the rest of the data
     TintaView quotes rather than translates (an agent's plan name, a provider's error).
@@ -159,6 +186,20 @@ def _zones_by_country() -> dict[QtCore.QLocale.Country, tuple[str, ...]]:
         if territory in _NON_COUNTRIES:
             continue
         found.setdefault(territory, set()).add(zone_id)
+    # Third pass (`_zoneinfo_ids`), and only for a country Qt answered *nothing* for:
+    # filling a hole, never second-guessing a list Qt has already given. The tz
+    # database's own list includes deprecated aliases (`US/Pacific`, `Asia/Calcutta`),
+    # which would otherwise pad every country with duplicates of zones already there.
+    holes: dict[QtCore.QLocale.Country, set[str]] = {}
+    for zone_id in _zoneinfo_ids():
+        timezone = QtCore.QTimeZone(zone_id.encode())
+        if not timezone.isValid():
+            continue
+        territory = timezone.territory()
+        if territory in _NON_COUNTRIES or territory in found:
+            continue
+        holes.setdefault(territory, set()).add(zone_id)
+    found.update(holes)
     return {territory: tuple(sorted(ids)) for territory, ids in found.items()}
 
 

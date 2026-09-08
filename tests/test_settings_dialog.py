@@ -39,7 +39,7 @@ from tintaview.install import detect  # noqa: E402
 from tintaview.install import hooks as hooks_mod  # noqa: E402
 from tintaview.install.detect import Environment  # noqa: E402
 from tintaview.ui import settings_dialog  # noqa: E402
-from tintaview.ui.settings_dialog import SettingsDialog  # noqa: E402
+from tintaview.ui.settings_dialog import SettingsDialog, _zones_for  # noqa: E402
 
 # --------------------------------------------------------------------------- isolation
 
@@ -793,21 +793,36 @@ def test_every_zone_qt_knows_is_reachable_through_the_picker(qapp, tmp_path):
     that a macOS user cannot select at all. Asserted against Qt's own id list rather
     than a hand-written sample of countries, so it holds wherever the suite runs.
     """
-    from tintaview.ui.settings_dialog import _NON_COUNTRIES, _countries, _zones_for
+    from tintaview.ui.settings_dialog import (
+        _NON_COUNTRIES,
+        _countries,
+        _zoneinfo_ids,
+        _zones_for,
+    )
 
     dialog = SettingsDialog(make_cfg(tmp_path))
     row = dialog._clock_rows[0]
     offered = {row._country.itemData(i) for i in range(row._country.count())}
     known_countries = {territory for _name, territory in _countries()}
 
-    for raw in QtCore.QTimeZone.availableTimeZoneIds():
-        zone_id = bytes(raw).decode()
-        territory = QtCore.QTimeZone(raw).territory()
+    # Every id either source can name, not just Qt's own list — that is what exposed
+    # the macOS hole: `Asia/Kolkata` is valid there and Qt places it in India, but Qt
+    # enumerates it in neither of its two lists, so India reached the picker from no
+    # source at all.
+    for zone_id in sorted({bytes(z).decode() for z in QtCore.QTimeZone.availableTimeZoneIds()}
+                          | set(_zoneinfo_ids())):
+        timezone = QtCore.QTimeZone(zone_id.encode())
+        if not timezone.isValid():
+            continue
+        territory = timezone.territory()
         if territory in _NON_COUNTRIES:
-            continue  # `UTC` and the aliases — deliberately not in a country picker
+            continue  # `UTC` and the deprecated aliases — not places, so not countries
         assert territory in known_countries, f"{zone_id}: {territory} is not offered"
         assert territory in offered, f"{zone_id}: {territory} missing from the combo"
-        assert zone_id in _zones_for(territory), f"{zone_id} unreachable under {territory}"
+
+    # And an offered country always has something to offer.
+    for _name, territory in _countries():
+        assert _zones_for(territory), f"{territory} is in the picker with no zones"
 
     # The loop above skips a zone Qt files under no country, so it cannot see the other
     # way this breaks: a backend that reports *no* territory for a zone people obviously
@@ -821,3 +836,31 @@ def test_every_zone_qt_knows_is_reachable_through_the_picker(qapp, tmp_path):
         territory = timezone.territory()
         assert territory not in _NON_COUNTRIES, f"Qt reports no country for {zone_id} here"
         assert territory in offered, f"{zone_id}'s country is missing from the picker"
+
+
+def test_the_tz_database_source_degrades_to_qts_own_lists(qapp, tmp_path):
+    """`zoneinfo` raises on Windows without the `tzdata` wheel, which must cost nothing
+    — Qt's two lists carry that platform, and they are what the picker had all along."""
+    import zoneinfo
+
+    from tintaview.ui.settings_dialog import _countries, _zoneinfo_ids, _zones_by_country
+
+    def unavailable():
+        raise zoneinfo.ZoneInfoNotFoundError("no tz database here")
+
+    caches = (_zoneinfo_ids, _zones_by_country, _countries)
+    original = zoneinfo.available_timezones
+    zoneinfo.available_timezones = unavailable
+    try:
+        for cached in caches:
+            cached.cache_clear()
+        assert _zoneinfo_ids() == ()
+        # The picker still stands up, on Qt's enumeration alone.
+        dialog = SettingsDialog(make_cfg(tmp_path))
+        row = dialog._clock_rows[0]
+        assert row._country.count() > 100
+    finally:
+        zoneinfo.available_timezones = original
+        for cached in caches:
+            cached.cache_clear()
+        _zones_for.cache_clear()
