@@ -601,18 +601,26 @@ class Flyout(QtWidgets.QWidget):
                 # nothing-at-all case — a provider that returned neither rows, nor an
                 # estimate, nor a reason.
                 reason_lines = _wrap_reason(result.error, reason_metrics, w)
-            elif result.notice:
+            elif result.notice and not collapsed:
                 # Not a failure — cached rows old enough that their age is part of what
                 # they say. Same muted slot as a reason, because it answers the same
                 # question ("why don't these look right?") before the rows are read.
+                #
+                # Unlike a reason it does NOT survive collapsing. A notice qualifies the
+                # rows underneath it; with those hidden it qualifies nothing, and a
+                # collapsed section that still trails a line of text just looks broken
+                # next to its collapsed neighbours. An `error` is the opposite case —
+                # there are no trustworthy rows at all and it tells the user what to do
+                # about that — so it stays visible either way.
                 reason_lines = _wrap_reason(result.notice, reason_metrics, w)
             elif not has_body:
                 reason_lines = _wrap_reason(t("flyout.no_usage_data"), reason_metrics, w)
 
-            # The reason line survives collapsing; rows and the estimate don't. Hiding
-            # an agent's numbers is what the chevron is for, but hiding "sign in again"
-            # behind it would let the one message the user has to act on disappear
-            # into a section that then looks merely empty.
+            # A failure reason survives collapsing; rows, the estimate and a staleness
+            # notice don't. Hiding an agent's numbers is what the chevron is for, but
+            # hiding "sign in again" behind it would let the one message the user has to
+            # act on disappear into a section that then looks merely empty. A notice is
+            # not that: it only exists to qualify the rows below it.
             body_h = len(reason_lines) * REASON_LINE_H
             rows_at = estimate_at = rows_top + body_h
             if not collapsed:

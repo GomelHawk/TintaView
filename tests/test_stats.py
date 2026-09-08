@@ -28,6 +28,7 @@ from tintaview.stats import _scan as scan_mod
 from tintaview.stats import format as fmt
 from tintaview.stats.cache import UsageCache
 from tintaview.stats.model import UsageProvider, UsageResult, UsageRow
+from tintaview.stats.providers import claude as claude_mod
 from tintaview.stats.providers import codex as codex_mod
 from tintaview.stats.providers import copilot as copilot_mod
 from tintaview.stats.providers import jetbrains as jetbrains_mod
@@ -559,6 +560,61 @@ class TestClaudeAuthAndEstimateTogether:
         assert service.fetch_all()["claude"].estimate
         stored = json.loads(cache_path.read_text(encoding="utf-8"))["claude"]
         assert "estimate" not in stored
+
+
+class TestEstimateCanBeSwitchedOff:
+    """`stats.show_estimate`. Off must skip the *work*, not just the rows — over a
+    WSL-split UNC path the transcript sweep is a `stat` per session file every poll."""
+
+    @staticmethod
+    def _home(tmp_path):
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        project_dir = home / "projects" / "proj1"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / "session.jsonl").write_text(json.dumps({
+            "timestamp": _iso(datetime.now(UTC) - timedelta(hours=1)),
+            "message": {"model": "claude-opus-5",
+                        "usage": {"input_tokens": 1_000_000, "output_tokens": 0}},
+        }) + "\n", encoding="utf-8")
+        return home
+
+    def test_off_returns_no_estimate_and_never_reads_a_transcript(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path)
+        payload = json.loads((FIXTURES / "claude_usage_official.json").read_text())
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _FakeResponse(json.dumps(payload).encode()))
+        opened: list = []
+        monkeypatch.setattr(claude_mod, "recent_files",
+                            lambda *a, **kw: opened.append(a) or [])
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)), with_estimate=False)
+
+        assert result.ok            # the official rows are unaffected
+        assert result.estimate == []
+        assert opened == [], "the transcript sweep ran despite show_estimate = False"
+
+    def test_on_is_the_default(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path)
+        payload = json.loads((FIXTURES / "claude_usage_official.json").read_text())
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _FakeResponse(json.dumps(payload).encode()))
+
+        assert ClaudeUsageProvider().fetch(AgentConfig(home=str(home))).estimate
+
+    def test_the_service_passes_the_setting_through(self, tmp_path):
+        """The flag reaches the provider from `stats.show_estimate` — a filter applied
+        to the result afterwards would still have paid for the sweep."""
+        for show in (True, False):
+            cfg = Config()
+            cfg.enabled_agents = ["claude"]
+            cfg.agents["claude"] = AgentConfig()
+            cfg.stats.show_estimate = show
+            provider = _FakeProvider("claude", lambda c, t: UsageResult(
+                agent="claude", rows=[UsageRow(label="x", pct=1.0)]))
+            StatsService(cfg, cache=UsageCache(path=tmp_path / f"c{show}.json"),
+                          providers={"claude": provider}).fetch_all()
+            assert provider.with_estimate is show
 
 
 # --------------------------------------------------------------------------- Codex
@@ -1494,7 +1550,9 @@ class _FakeProvider(UsageProvider):
         self.key = key
         self._fn = fn
 
-    def fetch(self, agent_config, timeout: float = 15.0) -> UsageResult:
+    def fetch(self, agent_config, timeout: float = 15.0, *,
+              with_estimate: bool = True) -> UsageResult:
+        self.with_estimate = with_estimate  # recorded so tests can assert it was passed
         return self._fn(agent_config, timeout)
 
 

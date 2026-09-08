@@ -157,7 +157,8 @@ class StatsService:
         # *creates* the agent's table as a side effect of being asked about it.
         agent_cfg = self._cfg.agent_config(key)
         try:
-            result = provider.fetch(agent_cfg, timeout=timeout)
+            result = provider.fetch(agent_cfg, timeout=timeout,
+                                    with_estimate=self._cfg.stats.show_estimate)
         except Exception as e:  # noqa: BLE001 - belt-and-braces; providers must not raise, but don't trust it
             log.exception("stats provider %s raised despite its contract", key)
             result = UsageResult(agent=key, error=f"internal error: {e!r}")

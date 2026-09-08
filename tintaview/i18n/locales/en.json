@@ -56,6 +56,8 @@
   "settings.chime": "Sound when an agent needs confirmation",
   "settings.poll": "Usage refresh interval:",
   "settings.poll.suffix": "s",
+  "settings.stats_estimate": "Show local token/cost estimate",
+  "settings.stats_estimate.tooltip": "Reconstructs tokens and an approximate cost from the agent's own transcripts, shown under its official rows. The usage APIs report percentages only, never counts. Off also skips the transcript scan.",
   "settings.update_check": "Check for updates on startup",
   "settings.language": "Interface language:",
   "settings.language.hint": "The setup wizard stays in English, and figures an agent's own API reports keep their original wording.",

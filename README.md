@@ -318,6 +318,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `colors.blink_ms` | `400` | Blink interval for the `confirm` state, in milliseconds. |
 | `stats.poll_seconds` | `300` | How often usage providers are polled. |
 | `stats.enabled` | `true` | Turn the usage panel off entirely. |
+| `stats.show_estimate` | `true` | Show the local token/cost estimate under each agent's official rows. Also a tick box in **Settings…**. Off skips the transcript scan entirely, not just the rows. |
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |

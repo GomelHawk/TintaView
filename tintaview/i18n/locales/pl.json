@@ -57,6 +57,8 @@
   "settings.chime": "Dźwięk, gdy agent czeka na potwierdzenie",
   "settings.poll": "Częstotliwość odświeżania zużycia:",
   "settings.poll.suffix": "s",
+  "settings.stats_estimate": "Pokaż lokalne oszacowanie tokenów i kosztu",
+  "settings.stats_estimate.tooltip": "Odtwarza liczbę tokenów i przybliżony koszt z transkrypcji agenta, pod jego oficjalnymi wierszami. API zużycia podają tylko procenty, nigdy liczby. Wyłączenie pomija też skanowanie transkrypcji.",
   "settings.update_check": "Sprawdzaj aktualizacje przy uruchomieniu",
   "settings.language": "Język interfejsu:",
   "settings.language.hint": "Kreator konfiguracji pozostaje w języku angielskim, a dane zwracane przez API danego agenta zachowują oryginalne brzmienie.",

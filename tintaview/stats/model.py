@@ -129,5 +129,14 @@ class UsageProvider(abc.ABC):
     key: str = "agent"
 
     @abc.abstractmethod
-    def fetch(self, agent_config, timeout: float = 15.0) -> UsageResult:
+    def fetch(self, agent_config, timeout: float = 15.0, *,
+              with_estimate: bool = True) -> UsageResult:
+        """Fetch this agent's usage.
+
+        `with_estimate=False` (from `stats.show_estimate`) means: do not build
+        `UsageResult.estimate`, and do not do the work that would have produced it.
+        A provider with no estimate to build ignores it. It is a keyword rather than
+        a filter applied to the result afterwards precisely so the work is skipped —
+        for Claude that work is a sweep of every transcript touched this week.
+        """
         ...

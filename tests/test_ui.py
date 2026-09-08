@@ -267,6 +267,28 @@ def test_flyout_draws_a_staleness_notice_above_cached_rows(qapp):
     assert not pixmap.isNull()
 
 
+def test_collapsing_hides_a_staleness_notice_with_its_rows(qapp):
+    """A notice qualifies the rows underneath it. Collapsed, those rows are gone and it
+    qualifies nothing — and a collapsed section still trailing a line of text looks
+    broken beside its collapsed neighbours. A failure reason is the opposite case and
+    does survive (see the test above)."""
+    flyout = Flyout()
+    flyout.set_results({"cursor": UsageResult(
+        agent="cursor",
+        rows=[UsageRow(label="Cursor Models", pct=62.0, kind="limit")],
+        source="cache", notice="Couldn't refresh — usage from 23 hr ago.")})
+
+    from tintaview.ui.flyout import HEADER_H
+
+    flyout._toggle("cursor")
+    sections, _ = flyout._layout()
+
+    assert sections[0].collapsed
+    assert sections[0].reason_lines == []
+    # Nothing below the header at all: a collapsed section is exactly one line.
+    assert sections[0].height == HEADER_H
+
+
 def test_an_error_outranks_a_notice(qapp):
     """Both occupy the one muted line. A result carrying an error has no trustworthy
     rows at all, so its reason is the more urgent of the two."""

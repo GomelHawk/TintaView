@@ -411,6 +411,15 @@ Row labels are shared (`usage.estimate.5h` / `usage.estimate.week`), not per-pro
 flyout must not call the same seven days "This week" under one agent and "Last 7 days" under
 the next.
 
+`stats.show_estimate` (default on, tick box in the settings dialog) switches the whole block
+off. It reaches the providers as `UsageProvider.fetch(..., with_estimate=...)` rather than being
+filtered out of the result afterwards, because the point is to skip the **work**: for Claude
+that is a sweep of every transcript touched this week, which over a WSL-split UNC path is a
+`stat` per session file on every poll. Providers with no estimate to build accept the keyword
+and ignore it. This is a `stats.*` field, so it lives in the Qt settings dialog only — the
+console wizard covers language, agents, engine, install path, autostart and hooks, and has never
+touched `stats.*` (not even `poll_seconds`).
+
 ### A row carries the reset *instant*, never the wording
 
 `UsageRow.reset_at` (epoch seconds) plus a `stats.format.RESET_*` style, and

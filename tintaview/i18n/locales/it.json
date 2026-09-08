@@ -56,6 +56,8 @@
   "settings.chime": "Suona quando un agente richiede conferma",
   "settings.poll": "Intervallo di aggiornamento dell'utilizzo:",
   "settings.poll.suffix": "s",
+  "settings.stats_estimate": "Mostra la stima locale di token e costo",
+  "settings.stats_estimate.tooltip": "Ricostruisce i token e un costo approssimativo dalle trascrizioni dell'agente, sotto le sue righe ufficiali. Le API di utilizzo riportano solo percentuali, mai conteggi. Se disattivata, salta anche la scansione delle trascrizioni.",
   "settings.update_check": "Cerca aggiornamenti all'avvio",
   "settings.language": "Lingua dell'interfaccia:",
   "settings.language.hint": "La procedura di configurazione resta in inglese e i dati riportati dall'API di ogni agente conservano la formulazione originale.",

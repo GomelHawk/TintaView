@@ -251,7 +251,10 @@ def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
 class CursorUsageProvider(UsageProvider):
     key = "cursor"
 
-    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0) -> UsageResult:
+    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0, *,
+              with_estimate: bool = True) -> UsageResult:
+        # No local estimate to build — `with_estimate` is accepted to satisfy the
+        # `UsageProvider` contract and deliberately ignored.
         try:
             return self._fetch(agent_config, timeout)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise

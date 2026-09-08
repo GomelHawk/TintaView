@@ -276,7 +276,10 @@ def _parse_usage(quota: dict[str, Any], next_refill: dict[str, Any] | None) -> l
 class JetBrainsUsageProvider(UsageProvider):
     key = "jetbrains"
 
-    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0) -> UsageResult:
+    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0, *,
+              with_estimate: bool = True) -> UsageResult:
+        # No local estimate to build — `with_estimate` is accepted to satisfy the
+        # `UsageProvider` contract and deliberately ignored.
         try:
             return self._fetch(agent_config)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise

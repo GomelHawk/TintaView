@@ -266,6 +266,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self._poll_spin.setValue(stored_poll)
         form.addRow(t("settings.poll"), self._poll_spin)
 
+        # Spanning, same reason as the chime row above.
+        self._estimate_check = QtWidgets.QCheckBox(t("settings.stats_estimate"))
+        self._estimate_check.setChecked(self._cfg.stats.show_estimate)
+        self._estimate_check.setToolTip(t("settings.stats_estimate.tooltip"))
+        form.addRow(self._estimate_check)
+
         self._update_check = QtWidgets.QCheckBox(t("settings.update_check"))
         self._update_check.setChecked(self._cfg.update.check)
         form.addRow(self._update_check)  # spanning, same reason as the chime row
@@ -451,6 +457,7 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.ui.chime_on_confirm = self._chime_check.isChecked()
         cfg.ui.language = self._language_combo.currentData()
         cfg.stats.poll_seconds = self._poll_spin.value()
+        cfg.stats.show_estimate = self._estimate_check.isChecked()
         cfg.update.check = self._update_check.isChecked()
         cfg.engine.mode = self._engine_combo.currentData()
         for status, button in self._color_buttons.items():

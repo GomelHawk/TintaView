@@ -217,6 +217,15 @@ class AgentConfig:
 class StatsConfig:
     poll_seconds: int = 300  # usage APIs rate-limit and the windows are hours long
     enabled: bool = True
+    #: Draw the local token/cost estimate under each agent's official rows. On by
+    #: default — it is the only place tokens and cost appear at all, since the usage
+    #: APIs report percentages and never counts.
+    #:
+    #: Off does not merely hide the rows: `StatsService` stops asking the providers to
+    #: build them, so the transcript sweep never runs. That is the point of the switch
+    #: — over a WSL-split UNC path the sweep is a `stat` per session file every poll,
+    #: and someone who does not want the numbers should not pay for them.
+    show_estimate: bool = True
 
 
 @dataclass

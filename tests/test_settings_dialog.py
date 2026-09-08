@@ -613,3 +613,23 @@ def test_advanced_setup_rejects_and_asks_the_caller_for_the_wizard(qapp, tmp_pat
     assert dialog.launch_wizard is True
     assert dialog.result() == QtWidgets.QDialog.Rejected
     assert not cfg.path.exists()  # edits discarded, not merged behind the wizard's back
+
+
+def test_show_estimate_round_trips_on_accept(qapp, tmp_path):
+    """`stats.show_estimate` is dialog-only, like `stats.poll_seconds` — the console
+    wizard covers language/agents/engine/path/autostart/hooks and no `stats.*` field."""
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+    assert dialog._estimate_check.isChecked() is True  # on by default
+
+    dialog._estimate_check.setChecked(False)
+    dialog._on_accept()
+    assert config_mod.load(cfg.path).stats.show_estimate is False
+
+
+def test_show_estimate_reads_back_from_the_config(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.stats.show_estimate = False
+    dialog = SettingsDialog(cfg)
+    assert dialog._estimate_check.isChecked() is False
+

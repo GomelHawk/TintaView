@@ -503,15 +503,17 @@ def _estimate_rows(acc: dict[str, dict[str, float]]) -> list[UsageRow]:
 class ClaudeUsageProvider(UsageProvider):
     key = "claude"
 
-    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0) -> UsageResult:
+    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0, *,
+              with_estimate: bool = True) -> UsageResult:
         try:
-            return self._fetch(agent_config, timeout)
+            return self._fetch(agent_config, timeout, with_estimate)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
             log.exception("claude usage provider failed unexpectedly")
             return UsageResult(agent=self.key,
                                 error=t("usage.claude.error.unavailable", detail=repr(e)))
 
-    def _fetch(self, agent_config: AgentConfig, timeout: float) -> UsageResult:
+    def _fetch(self, agent_config: AgentConfig, timeout: float,
+               with_estimate: bool = True) -> UsageResult:
         home = _resolve_home(agent_config)
         # `tier` is the plan name straight out of the credentials file ("Max", "Team") —
         # a product name, so the surrounding words are translated and it is not.
@@ -522,7 +524,10 @@ class ClaudeUsageProvider(UsageProvider):
         # never the consolation prize for a failed fetch, so there is no path through
         # this method that has official rows but no estimate, or an error but no
         # estimate.
-        estimate = self._estimate(home)
+        # Skipped entirely when the setting is off, not built and discarded: this is
+        # the transcript sweep, and over a WSL-split UNC path it is a `stat` per session
+        # file on every poll.
+        estimate = self._estimate(home) if with_estimate else []
 
         def failed(error: str, kind: str = "transient") -> UsageResult:
             return UsageResult(agent=self.key, header=header, source="official",

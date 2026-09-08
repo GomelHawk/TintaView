@@ -56,6 +56,8 @@
   "settings.chime": "Ton, wenn ein Agent eine Bestätigung braucht",
   "settings.poll": "Aktualisierungsintervall für den Verbrauch:",
   "settings.poll.suffix": "s",
+  "settings.stats_estimate": "Lokale Token-/Kostenschätzung anzeigen",
+  "settings.stats_estimate.tooltip": "Rekonstruiert Tokens und ungefähre Kosten aus den Transkripten des Agenten, unter dessen offiziellen Zeilen. Die Verbrauchs-APIs liefern nur Prozentwerte, nie Zählwerte. Ausgeschaltet entfällt auch der Transkript-Scan.",
   "settings.update_check": "Beim Start nach Updates suchen",
   "settings.language": "Sprache der Oberfläche:",
   "settings.language.hint": "Der Einrichtungsassistent bleibt auf Englisch, und Werte aus der API eines Agenten behalten ihren ursprünglichen Wortlaut.",

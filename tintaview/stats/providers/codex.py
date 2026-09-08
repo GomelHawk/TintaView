@@ -444,15 +444,16 @@ def _total_row(label: str, acc: dict[str, int]) -> UsageRow:
 class CodexUsageProvider(UsageProvider):
     key = "codex"
 
-    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0) -> UsageResult:
+    def fetch(self, agent_config: AgentConfig, timeout: float = 15.0, *,
+              with_estimate: bool = True) -> UsageResult:
         try:
-            return self._fetch(agent_config)
+            return self._fetch(agent_config, with_estimate)
         except Exception as e:  # noqa: BLE001 - contract: a provider must never raise
             log.exception("codex usage provider failed unexpectedly")
             return UsageResult(agent=self.key,
                                 error=t("usage.codex.error.unavailable", detail=repr(e)))
 
-    def _fetch(self, agent_config: AgentConfig) -> UsageResult:
+    def _fetch(self, agent_config: AgentConfig, with_estimate: bool = True) -> UsageResult:
         home = _resolve_home(agent_config)
         files = _recent_session_files(home)
         if not files:
@@ -504,8 +505,12 @@ class CodexUsageProvider(UsageProvider):
         # reasoning, as `providers/claude`. They live in `estimate`, never in `rows`,
         # so they can't make a failed poll look like a successful one (see
         # `UsageResult.estimate`).
+        # Unlike Claude's, this costs nothing to have already computed — the same scan
+        # that reads `rate_limits` accumulates it — so `with_estimate` only decides
+        # whether the rows are built. An API-key account, which has no official
+        # percentages at all, is therefore an empty section with the setting off.
         estimate = [_total_row(t("usage.estimate.5h"), window_totals["5h"]),
-                    _total_row(t("usage.estimate.week"), window_totals["7d"])]
+                    _total_row(t("usage.estimate.week"), window_totals["7d"])] if with_estimate else []
 
         if primary or secondary:
             rows = []
