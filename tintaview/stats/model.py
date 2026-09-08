@@ -55,6 +55,32 @@ class UsageResult:
     #:
     #: Never persisted: only a failed result carries it, and failures are never cached.
     error_kind: str = "transient"  # transient | auth
+    #: Locally reconstructed token/cost rows, drawn **underneath** `rows` (or underneath
+    #: the error line) rather than instead of them — see `stats/providers/claude`.
+    #:
+    #: Deliberately not part of `rows`, and deliberately excluded from `ok`. Both would
+    #: be one-line changes and both are wrong: `ok` is what `StatsService` reads to
+    #: decide whether a poll succeeded, so an estimate in `rows` would make a dead login
+    #: look like a good fetch — the auth message would never fire and the estimate would
+    #: be written to `usage_cache.json` as last-good data. Keeping it beside `rows`
+    #: means a section can show "sign in again" *and* the local numbers at once.
+    #:
+    #: Never persisted either (see `to_dict`): it is rebuilt from local transcripts on
+    #: every poll in single-digit milliseconds, so a cached copy could only ever be a
+    #: staler version of something already free. `StatsService._apply_cache_policy`
+    #: carries the *live* estimate onto a cached result for exactly that reason.
+    estimate: list[UsageRow] = field(default_factory=list)
+    #: An advisory sentence drawn above `rows`, in the same muted slot as `error` — for
+    #: a result that is not a failure but should not be read as live either. Today that
+    #: means exactly one thing: rows served from the cache, old enough that their age is
+    #: part of what they mean (`StatsService._staleness_notice`).
+    #:
+    #: Separate from `error` because it is not one. A section with a notice still has
+    #: real rows and `ok` is True; overloading `error` would make "did this poll fail?"
+    #: unanswerable from the result alone, and `error` is what `to_dict` persists.
+    #: Never persisted either: it is recomputed from `fetched_at` on every substitution,
+    #: and a stored one would go on claiming an age that stopped being true.
+    notice: str | None = None
     #: When these rows were fetched, epoch seconds — 0.0 meaning "unknown", which is
     #: what a cache file written before this field existed reads back as. Stamped by
     #: `StatsService` so no provider has to remember to, and deliberately carried
@@ -64,6 +90,12 @@ class UsageResult:
 
     @property
     def ok(self) -> bool:
+        """Did the *authoritative* fetch produce rows?
+
+        `estimate` is not consulted on purpose — see its docstring. A result carrying
+        only local estimate rows is not a successful poll, and must not be cached as
+        one or allowed to mask an auth failure.
+        """
         return bool(self.rows)
 
     def to_dict(self) -> dict[str, Any]:

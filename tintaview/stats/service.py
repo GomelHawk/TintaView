@@ -20,6 +20,7 @@ from dataclasses import replace
 
 from tintaview.core.config import Config
 
+from . import format as fmt
 from .cache import UsageCache
 from .model import UsageProvider, UsageResult
 from .providers.claude import ClaudeUsageProvider
@@ -38,6 +39,14 @@ log = logging.getLogger(__name__)
 #: refresh — and it is showing *that* which put Friday's numbers on screen on Monday.
 AUTH_CACHE_GRACE_POLLS = 2
 
+#: Hard ceiling on how old cached rows may be, whatever their windows say. 48 h covers a
+#: weekend — the realistic gap between a token dying on Friday evening and anyone
+#: noticing — and stops a figure that only ever moves upward (a monthly spend total)
+#: being presented as current indefinitely. Before this, only the **auth** path had any
+#: age limit at all: a transient failure served cached rows forever, so a provider
+#: erroring for a week showed week-old numbers with nothing on screen saying so.
+MAX_CACHE_GRACE_S = 48 * 3600
+
 #: Built-in providers, keyed the same way as `Config.enabled_agents` / `Config.agents`.
 #: "jetbrains" and "copilot" have no entry in `tintaview.agents` — neither has a hook
 #: API TintaView can drive lighting from (see each provider's module docstring), so
@@ -49,6 +58,36 @@ DEFAULT_PROVIDERS: dict[str, type[UsageProvider]] = {
     "jetbrains": JetBrainsUsageProvider,
     "copilot": CopilotUsageProvider,
 }
+
+
+def _has_closed_window(cached: UsageResult, now: float) -> bool:
+    """Has any dated row's window already ended?
+
+    A row carrying a `reset_at` states when its own numbers stop being true, so the rows
+    calibrate how long the cache may stand in and no per-provider constant has to be
+    kept in step with each API's windows. Claude's 5-hour row expires in hours; Cursor's
+    are a monthly billing cycle (`RESET_DATE` off `billingCycleEnd`) and stay true for
+    weeks — which is why one 2-poll grace was wrong for both.
+
+    **Any** closed row disqualifies the whole set, not just itself. A Claude result holds
+    a 5-hour row and a weekly row together; six hours on, the weekly row is still fine
+    while the 5-hour row is precisely the "Friday's window counting down on Monday"
+    figure this policy exists to keep off the screen — and they are drawn as one section.
+    """
+    return any(0 < row.reset_at <= now for row in cached.rows)
+
+
+def _has_open_window(cached: UsageResult, now: float) -> bool:
+    """Does any row date itself and say its window is still running?
+
+    This is what a row needs to earn the long grace, and it is deliberately not the
+    negation of `_has_closed_window`: rows with no `reset_at` at all (0.0) say nothing
+    about their own shelf life, so they can never vouch for themselves against a dead
+    login. Reading "no closed window" as "still valid" would have handed exactly the
+    rows from the original incident — pre-`reset_at` rows carrying a frozen
+    "Resets in 2 hr 59 min" string — a 48-hour licence to keep being drawn.
+    """
+    return any(row.reset_at > now for row in cached.rows)
 
 
 class StatsService:
@@ -144,6 +183,14 @@ class StatsService:
         expired and how to renew it; inside it they still stand, because a token that
         died seconds after a good poll hasn't made those rows wrong.
 
+        A substituted result keeps the **live** `estimate` rather than the cached one.
+        The estimate is rebuilt from local files on every poll and is not persisted at
+        all, so the copy on `cached` is whatever happened to be in memory when it was
+        stored — possibly nothing, if it came off disk. Carrying `result`'s across is
+        what lets a section show a stale-but-labelled official block above a set of
+        local numbers that are correct as of this second, which is the same reason
+        `UsageRow.reset_at` is worded at render time instead of fetch time.
+
         Deliberately does not write: `fetch_all` persists the whole pass in one go once
         every provider has answered.
         """
@@ -152,14 +199,67 @@ class StatsService:
         cached = self._cache.get(result.agent)
         if cached is None or not cached.ok:
             return result
-        if result.error_kind == "auth" and not self._cache_is_still_fresh(cached):
+        if not self._cached_rows_may_stand_in(cached, result.error_kind):
             log.info(
-                "stats provider %s failed to authenticate and its cached rows are stale "
-                "— reporting the auth failure instead of usage nobody can refresh",
-                result.agent,
+                "stats provider %s failed (%s) and its cached rows can no longer stand "
+                "in — reporting the failure instead of usage nobody can refresh",
+                result.agent, result.error_kind,
             )
             return result
-        return replace(cached, source="cache")
+        return replace(cached, source="cache", estimate=result.estimate,
+                        notice=self._staleness_notice(cached))
+
+    def _cached_rows_may_stand_in(self, cached: UsageResult, error_kind: str) -> bool:
+        """May `cached` be shown in place of a failed poll?
+
+        Three allowances, narrowest first:
+
+        - An **auth** failure inside `AUTH_CACHE_GRACE_POLLS` — a token that died
+          seconds after a good poll has not made those rows wrong yet.
+        - Any failure, while no row's window has closed and the whole result is under
+          `MAX_CACHE_GRACE_S` old. A transient failure needs nothing more than that.
+        - An **auth** failure additionally needs the rows to vouch for themselves — at
+          least one carries a `reset_at` that is still in the future. This is what lets
+          Cursor's monthly figures survive a dead session for a day or two while
+          Claude's 5-hour row gives way within hours, with no per-provider constant to
+          keep in step; and it is what stops rows that carry no reset instant at all
+          from inheriting that licence.
+        - An unknown age keeps the split it has always had — never trusted against a
+          dead login, still better than a blank flyout for a transient blip.
+        """
+        if cached.fetched_at <= 0:
+            return error_kind != "auth"
+        now = time.time()
+        if (now - cached.fetched_at) > MAX_CACHE_GRACE_S:
+            return False
+        if _has_closed_window(cached, now):
+            # Wrong at any age and for either kind of failure: the window these numbers
+            # describe has ended, so they are last window's numbers whatever stopped the
+            # refresh.
+            return False
+        if error_kind != "auth":
+            # Nobody is signed out; the next poll will probably work. The ceiling above
+            # is the only limit — before it existed this path had none at all.
+            return True
+        # An auth failure has to be earned past the short grace: either the rows are so
+        # recent that a token dying seconds after a good poll cannot have made them
+        # wrong, or they date themselves and their window is still running.
+        return self._cache_is_still_fresh(cached) or _has_open_window(cached, now)
+
+    def _staleness_notice(self, cached: UsageResult) -> str | None:
+        """The muted line drawn above substituted rows, once they are old enough to
+        mislead without it.
+
+        Silent inside the short grace: a five-minute-old substitution during a network
+        blip is the cache doing exactly its job, and saying so every time would put a
+        line on screen for something nobody has to act on. Past that, the age is part of
+        what the numbers mean — a monthly spend total only ever moves upward, so a stale
+        one always reads low, and `source == "cache"` has never been visible anywhere
+        (the flyout draws the agent's display name, not the provider's `header`).
+        """
+        if cached.fetched_at <= 0 or self._cache_is_still_fresh(cached):
+            return None
+        return fmt.cache_age_text(time.time() - cached.fetched_at)
 
     def _cache_is_still_fresh(self, cached: UsageResult) -> bool:
         """Are `cached`'s rows recent enough to survive an auth failure?

@@ -430,6 +430,8 @@ def _accumulate(acc: dict[str, int], totals: dict[str, Any]) -> None:
 
 
 def _total_row(label: str, acc: dict[str, int]) -> UsageRow:
+    """One estimate row: a token count and no bar. Codex reports no cost anywhere, so
+    unlike Claude's equivalent this row is tokens only."""
     total = acc["total"] or (acc["input"] + acc["output"])
     right = (t("usage.tokens.millions", value=f"{total / 1e6:.2f}") if total >= 1_000_000
              else t("usage.tokens.thousands", value=f"{total / 1e3:.0f}"))
@@ -497,6 +499,14 @@ class CodexUsageProvider(UsageProvider):
         primary = rate_limits.get("primary")
         secondary = rate_limits.get("secondary")
 
+        # The token totals are now a permanent second block under whatever official
+        # rows exist, not the thing shown *instead of* them — same change, and same
+        # reasoning, as `providers/claude`. They live in `estimate`, never in `rows`,
+        # so they can't make a failed poll look like a successful one (see
+        # `UsageResult.estimate`).
+        estimate = [_total_row(t("usage.estimate.5h"), window_totals["5h"]),
+                    _total_row(t("usage.estimate.week"), window_totals["7d"])]
+
         if primary or secondary:
             rows = []
             if primary:
@@ -505,11 +515,14 @@ class CodexUsageProvider(UsageProvider):
                 rows.append(_pct_row(_window_label(secondary, t("usage.codex.limit.secondary")), secondary))
             if rows:
                 return UsageResult(agent=self.key, rows=rows,
-                                    header=t("usage.codex.header.limits"), source="official")
+                                    header=t("usage.codex.header.limits"), source="official",
+                                    estimate=estimate)
 
-        # No official percentages available on this session (typically API-key auth,
-        # verified null on this machine) — informational token totals instead.
-        rows = [_total_row(t("usage.codex.last_5h"), window_totals["5h"]),
-                _total_row(t("usage.codex.last_7d"), window_totals["7d"])]
-        return UsageResult(agent=self.key, rows=rows,
-                            header=t("usage.codex.header.totals"), source="activity")
+        # No official percentages on this session (typically API-key auth, verified
+        # null on this machine). Not an error — there is simply nothing authoritative
+        # to show — so no `error` is set and the section renders as the estimate block
+        # alone. `rows` stays empty, which means `ok` is False and these totals are
+        # never written to the cache as last-good data; they cost milliseconds to
+        # rebuild every poll, so there is nothing to gain by caching them.
+        return UsageResult(agent=self.key, header=t("usage.codex.header.totals"),
+                            source="activity", estimate=estimate)

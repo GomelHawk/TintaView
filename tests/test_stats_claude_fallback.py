@@ -1,8 +1,14 @@
-"""The Claude provider's transcript fallback: dedupe, pricing and the scan rule.
+"""The Claude provider's local transcript estimate: dedupe, pricing and the scan rule.
 
 Measured against a real ``~/.claude/projects`` (one week): 3592 usage lines collapsed to
 1737 distinct messages, and only 27 of 236 files (23 of 158 MB) had been modified inside
 the window. Both facts drive what is pinned here.
+
+These fixtures give the provider a home with transcripts but **no** ``.credentials.json``,
+so every `fetch` here also exercises the not-signed-in path: the numbers land in
+``result.estimate`` and ``result.rows`` stays empty. That used to be the other way round
+— the estimate *was* the result — which is precisely the bug this arrangement fixes, so
+`_row` reads `estimate` on purpose and `TestSignedOut` pins the behaviour directly.
 """
 
 from __future__ import annotations
@@ -60,14 +66,14 @@ def _write(home: Path, lines: list[str], name: str = "session.jsonl") -> Path:
 
 
 def _row(result, label: str):
-    return next(r for r in result.rows if r.label == label)
+    return next(r for r in result.estimate if r.label == label)
 
 
-def _tokens_m(result, label: str = "5-hour") -> float:
+def _tokens_m(result, label: str = "Est. 5-hour") -> float:
     return float(_row(result, label).right.split("M")[0])
 
 
-def _cost(result, label: str = "5-hour") -> float:
+def _cost(result, label: str = "Est. 5-hour") -> float:
     return float(_row(result, label).right.split("$")[1])
 
 
@@ -94,7 +100,7 @@ class TestDedupe:
 
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
 
-        assert result.ok
+        assert result.estimate
         expected_tokens = (2 + 266 + 18_995 + 8_605) / 1e6
         assert _tokens_m(result) == pytest.approx(expected_tokens, abs=0.005)
         expected_cost = (2 * 5.0 + 266 * 25.0 + 18_995 * 0.5 + 8_605 * 6.25) / 1e6
@@ -130,12 +136,11 @@ class TestPricing:
     )
     def test_current_top_tier_models_are_priced(self, home, model, expected_cost):
         """Fable 5.1 was missing from PRICING while being the model in the user's own
-        transcripts — charged at the default $5 instead of $10 and flipping the header
-        to the 'unknown model' wording for every Fable 5.1 user."""
+        transcripts — charged at the default $5 instead of $10 for every Fable 5.1
+        user, which is a 2x understatement on the costliest model in the table."""
         _write(home, [_line(model, input_tokens=1_000_000)])
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
         assert _cost(result) == pytest.approx(expected_cost, rel=0.01)
-        assert "unknown model" not in (result.header or "")
 
     def test_fable_5_1_cache_reads_use_the_flat_rate(self, home):
         """$0.25/MTok, not 0.1x of the $10 input rate."""
@@ -150,14 +155,13 @@ class TestPricing:
 
     def test_synthetic_placeholder_messages_are_ignored(self, home):
         """`<synthetic>` is Claude Code's placeholder for a cancelled/interrupted turn.
-        It must neither count nor flip the header to the unpriced wording."""
+        It must not be counted at all."""
         _write(home, [
             _line("claude-opus-5", input_tokens=1_000_000),
             _line(claude_mod.SYNTHETIC_MODEL, input_tokens=1_000_000),
         ])
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
         assert _tokens_m(result) == pytest.approx(1.0, abs=0.005)
-        assert "unknown model" not in (result.header or "")
 
 
 class TestScanRule:
@@ -206,5 +210,5 @@ class TestScanRule:
             _line("claude-opus-5", input_tokens=1_000_000, age=timedelta(days=10)),
         ])
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
-        assert _tokens_m(result, "5-hour") == pytest.approx(1.0, abs=0.005)
-        assert _tokens_m(result, "This week") == pytest.approx(2.0, abs=0.005)
+        assert _tokens_m(result, "Est. 5-hour") == pytest.approx(1.0, abs=0.005)
+        assert _tokens_m(result, "Est. this week") == pytest.approx(2.0, abs=0.005)

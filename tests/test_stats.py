@@ -205,12 +205,16 @@ class TestClaudeOfficial:
         assert fable.reset_at == 0.0
 
 
-class TestClaudeFallback:
-    def test_reconstructs_from_transcripts_when_endpoint_unreachable(self, tmp_path, monkeypatch):
+class TestClaudeEstimate:
+    """The local transcript estimate, which now rides along with *every* result
+    instead of standing in for one when the endpoint fails."""
+
+    def test_transcripts_become_estimate_rows_not_usage_rows(self, tmp_path):
         home = tmp_path / "claude_home"
         home.mkdir(parents=True)
-        # No .credentials.json at all: _read_access_token raises OSError, which the
-        # provider treats the same as any other "endpoint failed" case.
+        # No .credentials.json at all — the signed-out case. It used to raise OSError
+        # into the generic handler and come back as `rows`, so a logged-out Claude
+        # showed token totals that looked exactly like official numbers.
 
         now = datetime.now(UTC)
         content = _load_template(
@@ -225,48 +229,72 @@ class TestClaudeFallback:
 
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
 
-        assert result.ok
-        assert result.source == "estimate"
-        by_label = {row.label: row for row in result.rows}
-        assert set(by_label) == {"5-hour", "This week"}
-        for row in result.rows:
+        # The estimate never makes a result "ok" — that is what keeps it out of the
+        # cache and stops it masking the auth failure below.
+        assert not result.ok
+        assert result.rows == []
+        assert result.error_kind == "auth"
+        by_label = {row.label: row for row in result.estimate}
+        assert set(by_label) == {"Est. 5-hour", "Est. this week"}
+        for row in result.estimate:
             assert row.show_pct is False
             assert row.pct == 0.0
+            assert row.kind == "info"  # no bar: there is no limit to be a % of
 
-        # 5-hour bucket sees only the one recent line; "This week" sees that one plus
+        # 5-hour bucket sees only the one recent line; "this week" sees that one plus
         # the 6-day-old one, never the 10-day-old one.
-        five_hour_tokens = float(by_label["5-hour"].right.split("M")[0])
-        week_tokens = float(by_label["This week"].right.split("M")[0])
+        five_hour_tokens = float(by_label["Est. 5-hour"].right.split("M")[0])
+        week_tokens = float(by_label["Est. this week"].right.split("M")[0])
         assert five_hour_tokens == pytest.approx(0.72, abs=0.01)  # 720,000 tokens
         assert week_tokens == pytest.approx(1.44, abs=0.01)  # 2x 720,000 tokens
 
-        five_hour_cost = float(by_label["5-hour"].right.split("$")[1])
-        week_cost = float(by_label["This week"].right.split("$")[1])
+        five_hour_cost = float(by_label["Est. 5-hour"].right.split("$")[1])
+        week_cost = float(by_label["Est. this week"].right.split("$")[1])
         assert week_cost == pytest.approx(2 * five_hour_cost, rel=0.01)
 
-    def test_no_transcripts_reports_clear_error(self, tmp_path):
+    def test_an_empty_window_still_gets_a_row(self, tmp_path):
+        """Both windows are always present, even at zero. As fallback rows an empty
+        window was dropped; as a fixed pair under the official rows, dropping one
+        would make the block change height as usage ages out of the 5-hour window."""
+        home = tmp_path / "claude_home"
+        home.mkdir(parents=True)
+        self._write_transcript(home, "claude-opus-5", 1_000_000,
+                                age=timedelta(days=2))  # in the week, not in the 5h
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        labels = [row.label for row in result.estimate]
+        assert labels == ["Est. 5-hour", "Est. this week"]
+        assert self._cost_of(result, "Est. 5-hour") == pytest.approx(0.0, abs=0.001)
+        assert self._cost_of(result, "Est. this week") == pytest.approx(5.0, rel=0.01)
+
+    def test_no_transcripts_still_reports_the_auth_failure(self, tmp_path):
+        """Nothing to estimate from and no credentials: the error is what's left, and
+        it has to be the auth one — `StatsService` needs `error_kind` to decide whether
+        cached rows may stand in for it."""
         home = tmp_path / "claude_home"
         home.mkdir(parents=True)
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
         assert not result.ok
-        assert result.source == "estimate"
-        assert result.error
+        assert result.error_kind == "auth"
+        assert "sign in" in (result.error or "").lower()
 
     @staticmethod
-    def _write_transcript(home: Path, model: str, input_tokens: int) -> None:
-        """One usage line, an hour old, so it lands in both the 5h and 7d windows."""
+    def _write_transcript(home: Path, model: str, input_tokens: int,
+                          age: timedelta = timedelta(hours=1)) -> None:
+        """One usage line, an hour old by default, so it lands in both windows."""
         project_dir = home / "projects" / "proj1"
         project_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps({
-            "timestamp": _iso(datetime.now(UTC) - timedelta(hours=1)),
+            "timestamp": _iso(datetime.now(UTC) - age),
             "message": {"model": model, "usage": {"input_tokens": input_tokens,
                                                    "output_tokens": 0}},
         })
         (project_dir / "session.jsonl").write_text(line + "\n", encoding="utf-8")
 
     @staticmethod
-    def _cost_of(result, label: str = "5-hour") -> float:
-        row = next(r for r in result.rows if r.label == label)
+    def _cost_of(result, label: str = "Est. 5-hour") -> float:
+        row = next(r for r in result.estimate if r.label == label)
         return float(row.right.split("$")[1])
 
     @pytest.mark.parametrize(
@@ -291,32 +319,20 @@ class TestClaudeFallback:
 
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
 
-        assert result.ok
         assert self._cost_of(result) == pytest.approx(expected_cost, rel=0.01)
-        assert "unknown model" not in (result.header or "")
 
-    def test_an_unknown_model_is_estimated_and_says_so(self, tmp_path):
+    def test_an_unknown_model_is_priced_at_the_flagship_rate(self, tmp_path):
         """A model released after this build must not price at zero — it gets the
-        flagship rate, and the header admits the rate was a guess."""
+        flagship rate. There is no longer a header saying the rate was a guess (the
+        flyout never drew that header); `_rates_for` logs the model id instead, and
+        the row's "~" is what remains on screen."""
         home = tmp_path / "claude_home"
         home.mkdir(parents=True)
         self._write_transcript(home, "claude-something-99", 1_000_000)
 
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
 
-        assert result.ok
-        assert self._cost_of(result) > 0.0
         assert self._cost_of(result) == pytest.approx(5.0, rel=0.01)  # DEFAULT_PRICING
-        assert "unknown model" in result.header
-
-    def test_a_known_model_keeps_the_plain_estimate_header(self, tmp_path):
-        home = tmp_path / "claude_home"
-        home.mkdir(parents=True)
-        self._write_transcript(home, "claude-opus-5", 1_000_000)
-
-        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
-
-        assert result.header == "Claude usage — estimate (official % unavailable)"
 
 
 class TestClaudeAuthAndRateLimit:
@@ -396,6 +412,153 @@ class TestClaudeAuthAndRateLimit:
         assert second.ok  # NOT blanked out
         assert second.source == "cache"
         assert second.rows == first.rows
+
+
+class TestClaudeAuthAndEstimateTogether:
+    """The two halves of the change that produced this class: a dead login says so
+    (it used to become a token estimate that looked official), and the estimate is
+    attached to *every* result rather than standing in for a failed one."""
+
+    @staticmethod
+    def _with_transcript(home: Path) -> None:
+        project_dir = home / "projects" / "proj1"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({
+            "timestamp": _iso(datetime.now(UTC) - timedelta(hours=1)),
+            "message": {"model": "claude-opus-5",
+                        "usage": {"input_tokens": 1_000_000, "output_tokens": 0}},
+        })
+        (project_dir / "session.jsonl").write_text(line + "\n", encoding="utf-8")
+
+    def test_a_successful_fetch_carries_the_estimate_too(self, tmp_path, monkeypatch):
+        """The official rows and the local numbers are complementary, not alternatives:
+        the endpoint reports percentages and no tokens, the transcripts report tokens
+        and no percentages. Showing only one of them was the original complaint."""
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        self._with_transcript(home)
+        payload = json.loads((FIXTURES / "claude_usage_official.json").read_text())
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _FakeResponse(json.dumps(payload).encode()))
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert result.ok and result.source == "official"
+        assert "5-hour limit" in {row.label for row in result.rows}
+        assert [row.label for row in result.estimate] == ["Est. 5-hour", "Est. this week"]
+        assert "~$5.00" in result.estimate[0].right
+
+    @pytest.mark.parametrize("write_credentials", [
+        pytest.param(lambda home: None, id="file-missing"),
+        pytest.param(lambda home: (home / ".credentials.json").write_text("{not json",
+                                                                           encoding="utf-8"),
+                      id="file-unparseable"),
+        pytest.param(lambda home: (home / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": 0}}), encoding="utf-8"),
+                      id="no-access-token"),
+    ])
+    def test_every_credentials_failure_is_an_auth_failure(self, tmp_path, write_credentials):
+        """Regression: only HTTP 401 was classified `auth`. These three raised
+        `OSError`/`ValueError` into the generic handler, fell through to the transcript
+        estimate, and put token totals on screen for a Claude that was signed out —
+        while Cursor, in the same flyout, said "Sign in again to see it"."""
+        home = tmp_path / "claude_home"
+        home.mkdir(parents=True)
+        write_credentials(home)
+        self._with_transcript(home)
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert not result.ok
+        assert result.rows == []
+        assert result.error_kind == "auth"
+        assert "sign in" in result.error.lower()
+        assert result.estimate, "the local numbers survive a dead login"
+
+    @pytest.mark.parametrize(("code", "kind"), [(401, "auth"), (403, "auth"),
+                                                 (429, "transient"), (500, "transient")])
+    def test_http_status_decides_the_error_kind(self, tmp_path, monkeypatch, code, kind):
+        """403 joins 401: a token the server refuses is one the user has to replace,
+        and `StatsService` must not paper over either with cached rows."""
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        self._with_transcript(home)
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: (_ for _ in ()).throw(_http_error(code)))
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert not result.ok
+        assert result.error_kind == kind
+        assert result.estimate
+
+    def test_an_unrecognised_payload_is_reported_not_swallowed(self, tmp_path, monkeypatch):
+        """A 200 whose shape we don't know used to become a silent estimate, which is
+        the one case where the endpoint changing shape needs to be visible."""
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        self._with_transcript(home)
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _FakeResponse(b'{"unexpected": true}'))
+
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+
+        assert not result.ok
+        assert result.error and result.error_kind == "transient"
+        assert result.estimate
+
+    def test_a_cached_substitution_keeps_the_live_estimate(self, tmp_path, monkeypatch):
+        """`_apply_cache_policy` swaps stale official rows in for a failed poll, but the
+        estimate is rebuilt locally every poll and is never persisted — so the cached
+        copy is worthless and the live one must be carried across. Same reasoning as
+        `UsageRow.reset_at` being worded at render time."""
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        cfg = Config()
+        cfg.enabled_agents = ["claude"]
+        cfg.agents["claude"] = AgentConfig(home=str(home))
+        service = StatsService(cfg, cache=UsageCache(path=tmp_path / "cache.json"),
+                                providers={"claude": ClaudeUsageProvider()})
+
+        payload = json.loads((FIXTURES / "claude_usage_official.json").read_text())
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _FakeResponse(json.dumps(payload).encode()))
+        first = service.fetch_all()["claude"]
+        assert first.ok
+        assert first.estimate[0].right == "0.00M tokens · ~$0.00"  # nothing transcribed yet
+
+        # Now the endpoint fails and, in the meantime, a session has been transcribed.
+        self._with_transcript(home)
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: (_ for _ in ()).throw(_http_error(429)))
+        second = service.fetch_all()["claude"]
+
+        assert second.source == "cache"
+        assert second.rows == first.rows      # the stale-but-official half
+        # ...and the live half, reflecting a session that did not exist when those
+        # cached rows were fetched. A cached estimate would still read $0.00 here.
+        assert second.estimate[0].right == "1.00M tokens · ~$5.00"
+
+    def test_the_estimate_is_never_written_to_the_cache(self, tmp_path, monkeypatch):
+        """It costs milliseconds to rebuild and would only ever be staler on disk —
+        and a cached estimate is exactly what would let a dead login keep showing
+        numbers, which is what `UsageResult.to_dict` omitting it prevents."""
+        home = tmp_path / "claude_home"
+        _write_credentials(home)
+        self._with_transcript(home)
+        cfg = Config()
+        cfg.enabled_agents = ["claude"]
+        cfg.agents["claude"] = AgentConfig(home=str(home))
+        cache_path = tmp_path / "cache.json"
+        service = StatsService(cfg, cache=UsageCache(path=cache_path),
+                                providers={"claude": ClaudeUsageProvider()})
+        payload = json.loads((FIXTURES / "claude_usage_official.json").read_text())
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _FakeResponse(json.dumps(payload).encode()))
+
+        assert service.fetch_all()["claude"].estimate
+        stored = json.loads(cache_path.read_text(encoding="utf-8"))["claude"]
+        assert "estimate" not in stored
 
 
 # --------------------------------------------------------------------------- Codex
@@ -483,14 +646,18 @@ class TestCodex:
 
         result = CodexUsageProvider().fetch(AgentConfig(home=str(home)))
 
-        assert result.ok
+        # Not `ok`: an account with no official percentages has nothing authoritative
+        # to report, and the token totals are explicitly not a substitute for that —
+        # keeping `rows` empty is what stops them being cached as last-good data.
+        assert not result.ok
+        assert result.error is None  # nothing failed; there is just nothing official
         assert result.source == "activity"
-        by_label = {row.label: row for row in result.rows}
-        assert set(by_label) == {"Last 5 hours", "Last 7 days"}
-        for row in result.rows:
+        by_label = {row.label: row for row in result.estimate}
+        assert set(by_label) == {"Est. 5-hour", "Est. this week"}
+        for row in result.estimate:
             assert row.show_pct is False
             assert row.kind == "info"
-        assert "870" in by_label["Last 5 hours"].right or "0.87M" in by_label["Last 5 hours"].right
+        assert "870" in by_label["Est. 5-hour"].right or "0.87M" in by_label["Est. 5-hour"].right
 
     def test_old_files_are_not_scanned(self, tmp_path):
         home = tmp_path / "codex_home"
@@ -519,7 +686,7 @@ class TestCodex:
         A session opened three days ago and touched ten minutes ago belongs in the
         5-hour window — but only for what it spent there. Adding its running total
         charged the 5h row with every token the session had ever used, which is how
-        "Last 5 hours" ended up larger than "Last 7 days".
+        "Est. 5-hour" ended up larger than "Est. this week".
         """
         home = tmp_path / "codex_home"
         now = datetime.now(UTC)
@@ -532,10 +699,9 @@ class TestCodex:
 
         result = CodexUsageProvider().fetch(AgentConfig(home=str(home)))
 
-        assert result.ok
-        by_label = {row.label: row for row in result.rows}
-        assert by_label["Last 5 hours"].right == "50k tokens"   # 1,850,000 - 1,800,000
-        assert by_label["Last 7 days"].right == "1.85M tokens"  # the session's whole total
+        by_label = {row.label: row for row in result.estimate}
+        assert by_label["Est. 5-hour"].right == "50k tokens"   # 1,850,000 - 1,800,000
+        assert by_label["Est. this week"].right == "1.85M tokens"  # the session's whole total
 
     def test_a_session_that_started_inside_the_window_counts_in_full(self, tmp_path):
         """No snapshot from before the cutoff means the running total IS the window."""
@@ -547,8 +713,8 @@ class TestCodex:
         ]
         _write_codex_session(home, "rollout-fresh.jsonl", "\n".join(lines) + "\n")
 
-        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).rows}
-        assert by_label["Last 5 hours"].right == "90k tokens"
+        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).estimate}
+        assert by_label["Est. 5-hour"].right == "90k tokens"
 
     def test_a_session_last_touched_before_the_window_is_not_in_the_five_hour_row(self, tmp_path):
         home = tmp_path / "codex_home"
@@ -559,9 +725,9 @@ class TestCodex:
         ]
         _write_codex_session(home, "rollout-stale.jsonl", "\n".join(lines) + "\n")
 
-        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).rows}
-        assert by_label["Last 5 hours"].right == "0k tokens"
-        assert by_label["Last 7 days"].right == "400k tokens"
+        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).estimate}
+        assert by_label["Est. 5-hour"].right == "0k tokens"
+        assert by_label["Est. this week"].right == "400k tokens"
 
     def test_a_counter_that_goes_backwards_never_subtracts(self, tmp_path):
         """A resumed session can re-report from scratch; a negative delta would eat
@@ -574,8 +740,8 @@ class TestCodex:
         ]
         _write_codex_session(home, "rollout-reset.jsonl", "\n".join(lines) + "\n")
 
-        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).rows}
-        assert by_label["Last 5 hours"].right == "0k tokens"
+        by_label = {r.label: r for r in CodexUsageProvider().fetch(AgentConfig(home=str(home))).estimate}
+        assert by_label["Est. 5-hour"].right == "0k tokens"
 
     def test_an_unchanged_file_is_not_re_read_on_the_next_poll(self, tmp_path, monkeypatch):
         """The memo is the whole point of `_scan.FileMemo` here: over a WSL-split UNC
@@ -593,9 +759,9 @@ class TestCodex:
         monkeypatch.setattr(codex_mod, "_TAIL_MEMO", scan_mod.FileMemo())
 
         provider = CodexUsageProvider()
-        assert provider.fetch(AgentConfig(home=str(home))).ok
+        assert provider.fetch(AgentConfig(home=str(home))).estimate
         assert len(parsed) == 1
-        assert provider.fetch(AgentConfig(home=str(home))).ok
+        assert provider.fetch(AgentConfig(home=str(home))).estimate
         assert len(parsed) == 1, "an unchanged rollout file was parsed twice"
 
     def test_a_file_that_grew_is_re_read(self, tmp_path, monkeypatch):
@@ -607,14 +773,14 @@ class TestCodex:
         monkeypatch.setattr(codex_mod, "_TAIL_MEMO", scan_mod.FileMemo())
         provider = CodexUsageProvider()
         first = provider.fetch(AgentConfig(home=str(home)))
-        assert first.ok
+        assert first.estimate
 
         with path.open("a", encoding="utf-8") as fh:
             fh.write(_codex_token_record(now - timedelta(minutes=1), 700_000) + "\n")
         os.utime(path, (time.time(), time.time()))
 
-        by_label = {r.label: r for r in provider.fetch(AgentConfig(home=str(home))).rows}
-        assert by_label["Last 7 days"].right == "700k tokens"
+        by_label = {r.label: r for r in provider.fetch(AgentConfig(home=str(home))).estimate}
+        assert by_label["Est. this week"].right == "700k tokens"
 
     def test_the_memo_forgets_files_that_left_the_window(self, tmp_path, monkeypatch):
         home = tmp_path / "codex_home"
@@ -624,17 +790,17 @@ class TestCodex:
         memo = scan_mod.FileMemo()
         monkeypatch.setattr(codex_mod, "_TAIL_MEMO", memo)
 
-        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).ok
+        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).estimate
         assert len(memo) == 1
 
         stale = _write_codex_session(home, "rollout-2.jsonl",
                                      _codex_token_record(now - timedelta(minutes=5), 1_000) + "\n")
-        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).ok
+        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).estimate
         assert len(memo) == 2
 
         old = time.time() - 30 * 86400
         os.utime(stale, (old, old))
-        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).ok
+        assert CodexUsageProvider().fetch(AgentConfig(home=str(home))).estimate
         assert len(memo) == 1, "the memo kept a file that dropped out of the 7-day window"
 
 
@@ -1614,17 +1780,116 @@ class TestAuthErrorCachePolicy:
         assert result.source == "cache"
         assert result.rows[0].pct == 41.0
 
-    def test_stale_cache_still_survives_a_transient_error(self, tmp_path):
-        """The other half of the rule: a network blip or a 429 is exactly what the
-        cache is for, and no amount of age changes that — nobody is signed out."""
+    def test_a_transient_error_keeps_the_cache_up_to_the_ceiling(self, tmp_path):
+        """A network blip or a 429 is exactly what the cache is for — nobody is signed
+        out — so these rows stand in without having to date themselves."""
         failure = UsageResult(agent="claude", error="rate limited")  # error_kind defaults
-        service = self._service_with_cached_rows(tmp_path, age_s=3 * 86400, failure=failure)
+        service = self._service_with_cached_rows(tmp_path, age_s=30 * 3600, failure=failure)
 
         result = service.fetch_all()["claude"]
 
         assert result.ok
         assert result.source == "cache"
         assert result.rows[0].right == "Resets in 2 hr 59 min"
+
+    def test_a_transient_error_is_bounded_by_the_ceiling_too(self, tmp_path):
+        """It used to be unbounded: only the auth path had any age limit, so a provider
+        erroring for a week served week-old numbers indefinitely with nothing on screen
+        saying so. `MAX_CACHE_GRACE_S` is now the backstop for both kinds."""
+        failure = UsageResult(agent="claude", error="rate limited")
+        service = self._service_with_cached_rows(tmp_path, age_s=3 * 86400, failure=failure)
+
+        result = service.fetch_all()["claude"]
+
+        assert not result.ok
+        assert result.error == "rate limited"
+
+    def test_a_monthly_window_survives_a_dead_login_for_a_day(self, tmp_path):
+        """The Cursor case. Its rows are a monthly billing cycle (`RESET_DATE` off
+        `billingCycleEnd`), so a day-old spend figure is still substantially true —
+        where a 5-hour row the same age is not. The row's own `reset_at` is what draws
+        that distinction, so neither provider needs a hand-picked constant."""
+        cache = UsageCache(path=tmp_path / "cache.json")
+        cache.update(UsageResult(
+            agent="claude",
+            rows=[UsageRow(label="Cursor Models", pct=62.0,
+                            reset_at=time.time() + 12 * 86400,  # cycle ends in 12 days
+                            reset_style=fmt.RESET_DATE)],
+            source="official",
+            fetched_at=time.time() - 30 * 3600,  # 30 h old, well past the 2-poll grace
+        ))
+        service = StatsService(self._cfg(), cache=cache, providers={
+            "claude": _FakeProvider("claude", lambda cfg, timeout: UsageResult(
+                agent="claude", error="not signed in", error_kind="auth"))})
+
+        result = service.fetch_all()["claude"]
+
+        assert result.ok
+        assert result.source == "cache"
+        assert result.rows[0].pct == 62.0
+
+    def test_a_closed_window_gives_way_however_recent_the_rest(self, tmp_path):
+        """One expired row disqualifies the set: a Claude result holds a 5-hour row and
+        a weekly row together and is drawn as one section, so a still-valid weekly
+        figure cannot license a 5-hour figure from a window that has ended."""
+        cache = UsageCache(path=tmp_path / "cache.json")
+        cache.update(UsageResult(
+            agent="claude",
+            rows=[UsageRow(label="Weekly", pct=4.0, reset_at=time.time() + 3 * 86400),
+                   UsageRow(label="5-hour limit", pct=41.0, reset_at=time.time() - 60)],
+            source="official",
+            fetched_at=time.time() - 6 * 3600,
+        ))
+        service = StatsService(self._cfg(), cache=cache, providers={
+            "claude": _FakeProvider("claude", lambda cfg, timeout: UsageResult(
+                agent="claude", error="rate limited"))})
+
+        assert not service.fetch_all()["claude"].ok
+
+    def test_rows_that_carry_no_reset_instant_never_earn_the_long_grace(self, tmp_path):
+        """`_has_open_window` is deliberately not the negation of `_has_closed_window`.
+        The rows from the original incident carried no `reset_at` at all — just a frozen
+        "Resets in 2 hr 59 min" string — and reading "nothing has expired" as "still
+        valid" would hand exactly those rows a 48-hour licence against a dead login."""
+        failure = UsageResult(agent="claude", error="login expired", error_kind="auth")
+        service = self._service_with_cached_rows(tmp_path, age_s=6 * 3600, failure=failure)
+
+        result = service.fetch_all()["claude"]
+
+        assert not result.ok
+        assert result.error == "login expired"
+
+    def test_substituted_rows_past_the_short_grace_say_how_old_they_are(self, tmp_path):
+        """`source == "cache"` has never been visible anywhere — the flyout draws the
+        agent's display name, not the provider's `header` — so day-old numbers looked
+        exactly like live ones. A monthly spend total only ever moves upward, which
+        makes a stale one silently low."""
+        cache = UsageCache(path=tmp_path / "cache.json")
+        cache.update(UsageResult(
+            agent="claude",
+            rows=[UsageRow(label="Cursor Models", pct=62.0,
+                            reset_at=time.time() + 12 * 86400, reset_style=fmt.RESET_DATE)],
+            source="official",
+            fetched_at=time.time() - 30 * 3600,
+        ))
+        service = StatsService(self._cfg(), cache=cache, providers={
+            "claude": _FakeProvider("claude", lambda cfg, timeout: UsageResult(
+                agent="claude", error="not signed in", error_kind="auth"))})
+
+        result = service.fetch_all()["claude"]
+
+        assert result.notice == "Couldn't refresh — usage from 30 hr ago."
+
+    def test_a_fresh_substitution_stays_silent(self, tmp_path):
+        """A five-minute-old substitution during a network blip is the cache doing its
+        job; announcing it every time puts a line on screen for nothing to act on."""
+        failure = UsageResult(agent="claude", error="rate limited")
+        service = self._service_with_cached_rows(tmp_path, age_s=60.0, failure=failure)
+
+        result = service.fetch_all()["claude"]
+
+        assert result.source == "cache"
+        assert result.notice is None
 
     def test_grace_window_is_two_poll_intervals_wide(self, tmp_path):
         """`AUTH_CACHE_GRACE_POLLS` intervals, so the window tracks

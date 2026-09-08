@@ -365,6 +365,36 @@ Poll on the shared 5-minute cadence (these are rate limits, not urgency), cache 
 result to `~/.tintaview/usage_cache.json` so the flyout is never blank, and never let a
 rate-limited response replace good data with an estimate.
 
+### The local estimate is a second block, never a substitute
+
+`UsageResult.estimate` holds locally reconstructed token/cost rows and is drawn **under**
+`rows` — or under the error line — by `Flyout`. Claude and Codex both populate it on every
+poll, success or failure.
+
+It was a *fallback*: the transcript numbers replaced the official rows when the endpoint
+failed, under a `header` reading "estimate (official % unavailable)". The flyout draws the
+agent's display name and has never drawn `result.header`, so that sentence reached nobody and a
+local guess was pixel-identical to an official percentage. A user reading their own flyout
+took "This week · 1062.47M tokens · ~$300.18" for a feature rather than a symptom.
+
+Three invariants, and all three are load-bearing:
+
+- **Never put it in `rows`.** `UsageResult.ok` is `bool(rows)` and the whole cache policy
+  pivots on it. An estimate in `rows` makes a dead login look like a successful poll: the auth
+  message never fires and the guess is written to `usage_cache.json` as last-good data.
+- **Never persist it.** `to_dict` omits it. It rebuilds from local files in single-digit
+  milliseconds (measured: 0.14 s cold, 4 ms warm over 257 transcripts / 187 MB, of which 30
+  were inside the week window), so a stored copy could only ever be a staler version of
+  something already free.
+- **Carry the live one onto a cache substitution.** `_apply_cache_policy` does
+  `replace(cached, source="cache", estimate=result.estimate)`. Same reasoning as
+  `UsageRow.reset_at` being worded at render time: the official half may be stale, the local
+  half never has to be.
+
+Row labels are shared (`usage.estimate.5h` / `usage.estimate.week`), not per-provider — one
+flyout must not call the same seven days "This week" under one agent and "Last 7 days" under
+the next.
+
 ### A row carries the reset *instant*, never the wording
 
 `UsageRow.reset_at` (epoch seconds) plus a `stats.format.RESET_*` style, and
@@ -408,10 +438,43 @@ days earlier. Both halves have to hold:
   with no `fetched_at` — a cache file written before that field existed — counts as unknown age
   and is never trusted here.
 
+#### How long cached rows may stand in
+
+`MAX_CACHE_GRACE_S` (48 h) is the ceiling for **both** kinds of failure. Before it, only the
+auth path had any age limit: a transient failure served cached rows forever, so a provider
+erroring for a week showed week-old numbers indefinitely.
+
+Under that ceiling the **rows decide**, not a per-provider constant, because the windows differ
+by three orders of magnitude — Claude's 5-hour row against Cursor's monthly billing cycle
+(`RESET_DATE` off `billingCycleEnd`). `_has_closed_window` disqualifies a result the moment any
+dated row's `reset_at` has passed: a Claude result holds a 5-hour row and a weekly row together
+and is drawn as one section, so a still-valid weekly figure must not license a 5-hour figure
+from a window that ended. An auth failure additionally needs `_has_open_window` — at least one
+row dating itself into the future.
+
+**`_has_open_window` is deliberately not the negation of `_has_closed_window`.** Rows carrying
+no `reset_at` at all say nothing about their own shelf life, and the rows from the original
+incident were exactly those — a frozen `"Resets in 2 hr 59 min"` string and no instant. Reading
+"nothing has expired" as "still valid" would hand them a 48-hour licence against a dead login,
+which is the bug this whole policy exists to prevent.
+
+`UsageResult.notice` carries the muted line drawn above substituted rows once they are past the
+short grace (`_staleness_notice`, worded by `format.cache_age_text`). It is not `error` — the
+result has real rows and `ok` is True — and it is never persisted, since it is recomputed from
+`fetched_at` on every substitution and a stored one would go on claiming an age that had
+stopped being true. Silence inside the short grace is deliberate: a five-minute-old
+substitution during a blip is the cache working, not something to act on.
+
 So a **new provider, or a new failure path in an existing one, has to pick a side**: an
 unclassified failure silently gets `transient`, which for a dead login is the wrong answer.
-Only `claude` (401) and `cursor` (no token, or a second 401 after `_post_with_retry` re-read it)
-have an auth path today; `codex`, `jetbrains` and `copilot` read local files and have none.
+Only `claude` and `cursor` have an auth path today; `codex`, `jetbrains` and `copilot` read
+local files and have none. Claude's covers HTTP 401 **and 403**, plus every way
+`.credentials.json` can fail to yield a token — missing, unparseable, or present with no
+`accessToken` — which is why `_read_access_token` raises its own `_NotSignedIn` rather than the
+`OSError`/`ValueError` those failures produce naturally. Left as-is they were caught by the
+generic transient handler and became a silent estimate, so a signed-out Claude showed token
+totals in the same flyout where Cursor said "Sign in again to see it". Cursor's covers no
+token, or a second 401 after `_post_with_retry` re-read it.
 
 `fetched_at` is stamped once by `StatsService._fetch_one` (not by each provider — five chances
 to forget) and is deliberately **carried through a cache substitution unchanged**: what matters
@@ -433,8 +496,10 @@ complete at 7, 14 and 21 px-per-character (`_WideMetrics`, which is why `_wrap_r
 its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catalogue.
 
 - **Claude** — `GET https://api.anthropic.com/api/oauth/usage` with the OAuth token from
-  `~/.claude/.credentials.json`; falls back to an estimate reconstructed from
-  `~/.claude/projects/**/*.jsonl`, labelled as an estimate. Two rules for that estimate:
+  `~/.claude/.credentials.json`, **plus** an estimate reconstructed from
+  `~/.claude/projects/**/*.jsonl` on every poll (see the section above). The two are
+  complementary, not alternatives: the endpoint reports percentages and no tokens, the
+  transcripts report tokens and no percentages. Two rules for that estimate:
   - **Count each streamed message once.** Claude Code writes one JSONL line *per content
     block* of an assistant message and every line carries the message's `usage`; input and
     cache counts repeat, `output_tokens` grows and the last line is final. Lines are
@@ -442,8 +507,8 @@ its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catal
     week, 3592 usage lines were 1737 messages, so the naive sum was ~2x too high.
     `<synthetic>` placeholder messages are skipped.
   - **Price from `PRICING`, which will go stale as models ship.** An unrecognised model is
-    charged at `DEFAULT_PRICING` (the flagship rate) and flips the section header to
-    `usage.claude.header_estimate_unpriced`, never at zero: a model priced at nothing
+    charged at `DEFAULT_PRICING` (the flagship rate) and logged once by `_rates_for`, never at
+    zero: a model priced at nothing
     produces a plausible-but-quietly-low total that nobody notices, which is exactly how
     `claude-opus-5` contributed $0.00 for a whole release and how `claude-fable-5-1` was
     billed at half its rate for another. Cache reads default to 0.1x input;
@@ -451,8 +516,11 @@ its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catal
     and `tests/test_stats_claude_fallback.py` pin the current models' rates per model.
 - **Codex** — entirely local: `token_count` records in `~/.codex/sessions/**/rollout-*.jsonl`.
   `info.total_token_usage` is always present; `rate_limits.primary/secondary` only on
-  ChatGPT-plan sessions (`null` on API-key sessions). Show official percentages when present,
-  token totals otherwise.
+  ChatGPT-plan sessions (`null` on API-key sessions). Official percentages go in `rows` when
+  present; the token totals always go in `estimate`. An API-key account therefore has no `rows`
+  at all and renders as the estimate block alone — `ok` is False and `error` is None, which is
+  correct: nothing failed, there is simply nothing authoritative to report, and the flyout only
+  draws a "no usage data" line when a section has neither rows, nor an estimate, nor a reason.
 - **Cursor** — **unofficial and credential-sensitive.** No personal usage API exists and Cursor
   transcripts carry no token counts, so the provider reads `cursorAuth/accessToken` from the
   `ItemTable` of Cursor's `state.vscdb` and calls

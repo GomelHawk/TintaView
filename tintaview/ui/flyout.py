@@ -54,6 +54,10 @@ SECTION_GAP = 14  # extra vertical space between one agent's block and the next
 HEADER_H = 24  # height of the badge+title header line, per section
 CHEVRON_W = 16  # right-edge width reserved for the collapse affordance
 REASON_LINE_H = 20.0  # one line of an errored section's failure sentence
+#: Gap above the local-estimate block, separating it from the official rows (or from
+#: the error line) it sits under. The same 8px `_row_layout` puts before a credits row,
+#: for the same reason: it is a different *kind* of claim, not the next item in a list.
+ESTIMATE_GAP = 8.0
 #: A failure sentence wraps onto as many lines as it needs (`_wrap_reason`); this bounds
 #: the one input that can run away — the exception repr in an `…error.unavailable`
 #: message. Every catalogue reason is well under it, so every reason a user is expected
@@ -226,6 +230,72 @@ def _row_layout(rows: list[UsageRow]) -> list[tuple[UsageRow, float, float]]:
     return out
 
 
+def _draw_rows(p: QtGui.QPainter, base: QtGui.QFont, x: float, w: float,
+               top: float, rows: list[UsageRow]) -> None:
+    """Paint one block of rows starting at `top`, positioned by `_row_layout`.
+
+    Shared by the official block and the local-estimate block so the two are drawn by
+    the same code — the estimate is not a lesser kind of row, it is the same row with
+    `kind="info"` (no bar) and a label that says "Est.".
+    """
+    f = QtGui.QFont(base)
+    for row, y_off, _block_h in _row_layout(rows):
+        ry = top + y_off
+
+        f.setPointSize(11)
+        p.setFont(f)
+
+        # Worded here, on every repaint, rather than baked into the row when it
+        # was fetched — see `UsageRow.reset_at`. A pre-worded countdown was
+        # already up to one poll interval (5 min) behind by the time it was
+        # drawn, and a cached row's stayed frozen for as long as the cache
+        # stood in for a failing poll.
+        right = fmt.reset_row_text(row.reset_at, row.reset_style) if row.reset_at else row.right
+        if row.show_pct:
+            right = f"{right}   {row.pct:.0f}%" if right else f"{row.pct:.0f}%"
+
+        # The right-hand text is measured first; the label gets what's left, and
+        # is elided if it doesn't fit. Both used to be drawn into the same
+        # full-width rect — one left-aligned, one right-aligned — which only
+        # looks right while the two happen to be short enough not to meet. They
+        # stopped being short enough as soon as the labels were translated:
+        # "5-часовой лимит" and its reset time overprinted each other mid-row.
+        # The right half is also drawn a point smaller (it is the secondary half,
+        # like the section header): the width that buys back is what keeps a
+        # translated label from being elided in the first place.
+        right_font = QtGui.QFont(f)
+        right_font.setPointSize(10)
+        right_metrics = QtGui.QFontMetrics(right_font)
+        right_w = right_metrics.horizontalAdvance(right) if right else 0.0
+
+        metrics = QtGui.QFontMetrics(f)
+        label_w = max(24.0, w - right_w - (10 if right else 0))
+        p.setPen(TEXT)
+        p.drawText(
+            QRectF(x, ry, label_w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+            metrics.elidedText(row.label, Qt.ElideRight, int(label_w)),
+        )
+        p.setFont(right_font)
+        p.setPen(SUBTLE)
+        p.drawText(QRectF(x, ry, w, 18), Qt.AlignRight | Qt.AlignVCenter, right)
+
+        # Informational rows (Codex token totals, Claude's local estimate) have
+        # no percentage to show. Drawing an empty track for them reads as "0% of
+        # your limit", which is a different and wrong claim — so skip the bar.
+        if row.kind == "info":
+            continue
+
+        bar_y = ry + 22 + 6
+        track = QtGui.QPainterPath()
+        track.addRoundedRect(QRectF(x, bar_y, w, 6), 3, 3)
+        p.fillPath(track, TRACK)
+        fw = max(0.0, min(1.0, row.pct / 100.0)) * w
+        if fw > 0:
+            fill = QtGui.QPainterPath()
+            fill.addRoundedRect(QRectF(x, bar_y, fw, 6), 3, 3)
+            p.fillPath(fill, _severity_color(row.severity))
+
+
 def _rows_height(rows: list[UsageRow]) -> float:
     layout = _row_layout(rows)
     return layout[-1][1] + layout[-1][2] if layout else 0.0
@@ -239,14 +309,23 @@ class _SectionLayout:
     key: str
     result: UsageResult
     header_rect: QRectF  # the clickable/hoverable badge+title band
-    rows_top: float  # y where this section's body (rows or error line) starts
-    collapsible: bool  # False for errored/empty sections — nothing to hide
+    rows_top: float  # y where this section's body starts (the error line, if any)
+    collapsible: bool  # False for a section with no body to hide
     collapsed: bool
     height: float  # total section height, header included
-    #: The failure sentence, pre-wrapped by `_wrap_reason`; empty for a section that
-    #: has rows. Carried here rather than re-wrapped in `paintEvent` because `height`
-    #: above was computed from exactly these lines.
+    #: The failure sentence, pre-wrapped by `_wrap_reason`; empty when the provider
+    #: reported no error. Carried here rather than re-wrapped in `paintEvent` because
+    #: `height` above was computed from exactly these lines. A section can now have
+    #: both this and rows: an expired login still shows its local estimate underneath.
     reason_lines: list[str] = field(default_factory=list)
+    #: y for `result.rows` and for `result.estimate`. Computed here rather than
+    #: re-derived while painting, for the same reason `_row_layout` is the single
+    #: source of row spacing — two hand-rolled copies of "reason lines, then rows, then
+    #: a gap, then the estimate" drift, and the one that drifts is the one that isn't
+    #: also deciding the section's height. Meaningless when the matching list is empty
+    #: or the section is collapsed.
+    rows_at: float = 0.0
+    estimate_at: float = 0.0
 
 
 # --------------------------------------------------------------------------- provider badges
@@ -506,25 +585,49 @@ class Flyout(QtWidgets.QWidget):
             if i:
                 y += SECTION_GAP
             header_rect = QRectF(x, y, w, HEADER_H)
-            collapsible = result.ok and bool(result.rows)
+            # The estimate counts as body: a Codex account on API-key auth has no
+            # official percentages at all and is nothing *but* an estimate block, and
+            # an expired Claude login now has an error line with one underneath. Both
+            # are sections worth collapsing, and neither had rows to make them
+            # collapsible before.
+            has_body = bool(result.rows or result.estimate)
+            collapsible = has_body
             collapsed = collapsible and result.agent in self._collapsed
             rows_top = y + HEADER_H
             reason_lines: list[str] = []
-            if not result.ok:
+            if result.error:
                 # `result.error` is already localised by the provider that built it (or
                 # quotes an API's own text verbatim); `flyout.no_usage_data` is only the
-                # no-reason-given case.
-                reason_lines = _wrap_reason(
-                    result.error or t("flyout.no_usage_data"), reason_metrics, w
-                )
-                body_h = len(reason_lines) * REASON_LINE_H
-            elif collapsed:
-                body_h = 0.0
-            else:
-                body_h = _rows_height(result.rows)
+                # nothing-at-all case — a provider that returned neither rows, nor an
+                # estimate, nor a reason.
+                reason_lines = _wrap_reason(result.error, reason_metrics, w)
+            elif result.notice:
+                # Not a failure — cached rows old enough that their age is part of what
+                # they say. Same muted slot as a reason, because it answers the same
+                # question ("why don't these look right?") before the rows are read.
+                reason_lines = _wrap_reason(result.notice, reason_metrics, w)
+            elif not has_body:
+                reason_lines = _wrap_reason(t("flyout.no_usage_data"), reason_metrics, w)
+
+            # The reason line survives collapsing; rows and the estimate don't. Hiding
+            # an agent's numbers is what the chevron is for, but hiding "sign in again"
+            # behind it would let the one message the user has to act on disappear
+            # into a section that then looks merely empty.
+            body_h = len(reason_lines) * REASON_LINE_H
+            rows_at = estimate_at = rows_top + body_h
+            if not collapsed:
+                if result.rows:
+                    estimate_at += _rows_height(result.rows)
+                if result.estimate:
+                    if estimate_at > rows_top:  # something is above it
+                        estimate_at += ESTIMATE_GAP
+                    body_h = estimate_at - rows_top + _rows_height(result.estimate)
+                else:
+                    body_h = estimate_at - rows_top
             height = HEADER_H + body_h
             sections.append(_SectionLayout(result.agent, result, header_rect, rows_top,
-                                            collapsible, collapsed, height, reason_lines))
+                                            collapsible, collapsed, height, reason_lines,
+                                            rows_at, estimate_at))
             y += height
         return sections, y
 
@@ -707,7 +810,7 @@ class Flyout(QtWidgets.QWidget):
             if section.collapsible:
                 _draw_chevron(p, header, section.collapsed)
 
-            if not result.ok:
+            if section.reason_lines:
                 p.setPen(SUBTLE)
                 # Wrapped and elided by `_layout`, which sized this section for exactly
                 # these lines. `f` is already at the reason's point size here (the
@@ -717,65 +820,17 @@ class Flyout(QtWidgets.QWidget):
                         QRectF(x, section.rows_top + line_no * REASON_LINE_H, w, REASON_LINE_H),
                         Qt.AlignLeft | Qt.AlignVCenter, line,
                     )
-                continue
 
             if section.collapsed:
                 continue
 
-            for row, y_off, _block_h in _row_layout(result.rows):
-                ry = section.rows_top + y_off
-
-                f.setPointSize(11)
-                p.setFont(f)
-
-                # Worded here, on every repaint, rather than baked into the row when it
-                # was fetched — see `UsageRow.reset_at`. A pre-worded countdown was
-                # already up to one poll interval (5 min) behind by the time it was
-                # drawn, and a cached row's stayed frozen for as long as the cache
-                # stood in for a failing poll.
-                right = fmt.reset_row_text(row.reset_at, row.reset_style) if row.reset_at else row.right
-                if row.show_pct:
-                    right = f"{right}   {row.pct:.0f}%" if right else f"{row.pct:.0f}%"
-
-                # The right-hand text is measured first; the label gets what's left, and
-                # is elided if it doesn't fit. Both used to be drawn into the same
-                # full-width rect — one left-aligned, one right-aligned — which only
-                # looks right while the two happen to be short enough not to meet. They
-                # stopped being short enough as soon as the labels were translated:
-                # "5-часовой лимит" and its reset time overprinted each other mid-row.
-                # The right half is also drawn a point smaller (it is the secondary half,
-                # like the section header): the width that buys back is what keeps a
-                # translated label from being elided in the first place.
-                right_font = QtGui.QFont(f)
-                right_font.setPointSize(10)
-                right_metrics = QtGui.QFontMetrics(right_font)
-                right_w = right_metrics.horizontalAdvance(right) if right else 0.0
-
-                metrics = QtGui.QFontMetrics(f)
-                label_w = max(24.0, w - right_w - (10 if right else 0))
-                p.setPen(TEXT)
-                p.drawText(
-                    QRectF(x, ry, label_w, 18), Qt.AlignLeft | Qt.AlignVCenter,
-                    metrics.elidedText(row.label, Qt.ElideRight, int(label_w)),
-                )
-                p.setFont(right_font)
-                p.setPen(SUBTLE)
-                p.drawText(QRectF(x, ry, w, 18), Qt.AlignRight | Qt.AlignVCenter, right)
-
-                # Informational rows (Codex token totals, Claude's local estimate) have
-                # no percentage to show. Drawing an empty track for them reads as "0% of
-                # your limit", which is a different and wrong claim — so skip the bar.
-                if row.kind == "info":
-                    continue
-
-                bar_y = ry + 22 + 6
-                track = QtGui.QPainterPath()
-                track.addRoundedRect(QRectF(x, bar_y, w, 6), 3, 3)
-                p.fillPath(track, TRACK)
-                fw = max(0.0, min(1.0, row.pct / 100.0)) * w
-                if fw > 0:
-                    fill = QtGui.QPainterPath()
-                    fill.addRoundedRect(QRectF(x, bar_y, fw, 6), 3, 3)
-                    p.fillPath(fill, _severity_color(row.severity))
+            if result.rows:
+                _draw_rows(p, f, x, w, section.rows_at, result.rows)
+            # Always under the official rows, never in place of them — and drawn even
+            # when the block above is an error sentence, which is the case this whole
+            # arrangement exists for: the endpoint is unreachable, and the local
+            # token/cost numbers are still perfectly good.
+            if result.estimate:
+                _draw_rows(p, f, x, w, section.estimate_at, result.estimate)
 
         p.end()

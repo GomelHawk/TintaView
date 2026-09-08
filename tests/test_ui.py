@@ -147,6 +147,137 @@ def test_flyout_row_label_yields_to_the_right_hand_text(qapp):
     assert not pixmap.isNull()
 
 
+def _estimate_rows():
+    return [
+        UsageRow(label="Est. 5-hour", pct=0.0, right="152.31M tokens · ~$87.82",
+                 show_pct=False, kind="info"),
+        UsageRow(label="Est. this week", pct=0.0, right="295.40M tokens · ~$211.72",
+                 show_pct=False, kind="info"),
+    ]
+
+
+def test_flyout_draws_the_estimate_under_the_official_rows(qapp):
+    """The local estimate is a second block, not a replacement for the first.
+
+    It used to arrive as `rows` only when the endpoint had failed, and since the flyout
+    draws the agent's display name rather than the provider's `header`, the sentence
+    saying "estimate (official % unavailable)" never reached the screen — a local guess
+    and an official percentage looked identical.
+    """
+    from tintaview.ui.flyout import ESTIMATE_GAP, _rows_height
+
+    flyout = Flyout()
+    official = [UsageRow(label="5-hour limit", pct=14.0, right="Resets in 1 hr 24 min",
+                          kind="limit")]
+
+    flyout.set_results({"claude": UsageResult(agent="claude", rows=official)})
+    without = flyout.height()
+
+    flyout.set_results({"claude": UsageResult(agent="claude", rows=official,
+                                               estimate=_estimate_rows())})
+    sections, _ = flyout._layout()
+    section = sections[0]
+
+    assert flyout.height() == without + int(ESTIMATE_GAP + _rows_height(_estimate_rows()))
+    # Below the official block, not interleaved with it.
+    assert section.estimate_at >= section.rows_at + _rows_height(official)
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    assert not pixmap.isNull()
+
+
+def test_flyout_shows_an_error_and_the_estimate_at_once(qapp):
+    """The case the whole arrangement exists for: the endpoint is unreachable, so the
+    percentages are gone, but the local token numbers are still perfectly good. An
+    errored section could previously hold only a reason line."""
+    flyout = Flyout()
+    flyout.set_results({"claude": UsageResult(
+        agent="claude",
+        error="Not signed in to Claude Code — current usage can't be shown.",
+        error_kind="auth",
+        estimate=_estimate_rows(),
+    )})
+    sections, _ = flyout._layout()
+    section = sections[0]
+
+    assert section.reason_lines           # the remedy sentence
+    assert section.result.estimate        # and the numbers, under it
+    assert section.collapsible            # a body worth hiding, where before there was none
+    assert section.estimate_at > section.rows_top
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    assert not pixmap.isNull()
+
+
+def test_collapsing_hides_the_estimate_but_keeps_the_failure_reason(qapp):
+    """Hiding an agent's numbers is what the chevron is for. Hiding "sign in again"
+    behind it would let the one message the user has to act on vanish into a section
+    that then just looks empty."""
+    flyout = Flyout()
+    flyout.set_results({"claude": UsageResult(
+        agent="claude", error="Not signed in.", error_kind="auth",
+        estimate=_estimate_rows(),
+    )})
+    expanded = flyout.height()
+
+    flyout._toggle("claude")
+    sections, _ = flyout._layout()
+
+    assert sections[0].collapsed
+    assert sections[0].reason_lines, "the reason survives collapsing"
+    assert flyout.height() < expanded, "the estimate rows do not"
+
+
+def test_an_estimate_only_section_needs_no_error_line(qapp):
+    """Codex on API-key auth has no official percentages and nothing has failed — the
+    section is the estimate block alone, with no "no usage data" line invented for it."""
+    flyout = Flyout()
+    flyout.set_results({"codex": UsageResult(agent="codex", source="activity",
+                                              estimate=_estimate_rows())})
+    sections, _ = flyout._layout()
+
+    assert sections[0].reason_lines == []
+    assert sections[0].collapsible
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    assert not pixmap.isNull()
+
+
+def test_flyout_draws_a_staleness_notice_above_cached_rows(qapp):
+    """A cached substitution old enough to mislead says so, in the same muted slot a
+    failure reason uses. `source == "cache"` has never been visible anywhere — the
+    flyout draws the agent's display name, not the provider's `header` — so day-old
+    numbers were pixel-identical to live ones."""
+    flyout = Flyout()
+    rows = [UsageRow(label="Cursor Models", pct=62.0, right="Resets 20 Sep", kind="limit")]
+
+    flyout.set_results({"cursor": UsageResult(agent="cursor", rows=rows, source="cache")})
+    silent = flyout.height()
+
+    flyout.set_results({"cursor": UsageResult(
+        agent="cursor", rows=rows, source="cache",
+        notice="Couldn't refresh — usage from 30 hr ago.")})
+    sections, _ = flyout._layout()
+
+    assert sections[0].reason_lines          # the notice, wrapped like a reason
+    assert sections[0].result.rows           # and the real rows still drawn under it
+    assert flyout.height() > silent
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    assert not pixmap.isNull()
+
+
+def test_an_error_outranks_a_notice(qapp):
+    """Both occupy the one muted line. A result carrying an error has no trustworthy
+    rows at all, so its reason is the more urgent of the two."""
+    flyout = Flyout()
+    flyout.set_results({"cursor": UsageResult(
+        agent="cursor", error="Not signed in to Cursor.", notice="Stale.")})
+    sections, _ = flyout._layout()
+
+    assert sections[0].reason_lines == ["Not signed in to Cursor."]
+
+
 def test_flyout_wraps_a_long_failure_reason_onto_extra_lines(qapp):
     """An errored section is sized for however many lines its reason wrapped onto.
 

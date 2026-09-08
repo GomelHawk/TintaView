@@ -118,6 +118,27 @@ def reset_in_days_text(dt: datetime) -> str:
     return t("usage.reset.in_days", days=math.ceil(seconds / 86400))
 
 
+def cache_age_text(age_s: float) -> str:
+    """"Couldn't refresh — usage from 6 hr ago", for rows served out of the cache.
+
+    Coarse on purpose, and abbreviated in the same style as the reset phrases above:
+    the point is "these numbers are old and roughly how old", not a precise duration.
+    Anything under a minute still says "1 min" rather than "0 min" — a substitution
+    that recent is not shown at all (see `StatsService._staleness_notice`), so a zero
+    here could only ever be a rounding artefact.
+    """
+    # Hours all the way to two days, not one. `StatsService.MAX_CACHE_GRACE_S` is 48 h,
+    # so a 24-hour boundary would make "1d ago" the only thing the days form could ever
+    # say, and it would say it for everything from 24 to 48 hours old — collapsing the
+    # distinction precisely where the reader is deciding whether to trust the number.
+    # The days form is kept for a clock that jumped, or a wider ceiling later.
+    if age_s >= 2 * 86400:
+        return t("usage.cache.stale_days", days=int(age_s // 86400))
+    if age_s >= 3600:
+        return t("usage.cache.stale_hours", hours=int(age_s // 3600))
+    return t("usage.cache.stale_minutes", minutes=max(1, int(age_s // 60)))
+
+
 def reset_row_text(reset_at: float, style: str = RESET_RELATIVE) -> str:
     """A row's right-hand reset text, worded from `reset_at` (epoch seconds) **now**.
 

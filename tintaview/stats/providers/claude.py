@@ -7,19 +7,30 @@ Where the numbers come from:
     the OAuth access token from ``<home>/.credentials.json``. Returns the OFFICIAL
     5-hour / weekly utilization percentages (+ reset times) and the monthly
     extra-usage / overage credit pool.
-  - Fallback: if the endpoint fails (network, non-401/429 HTTP error, unreadable
-    credentials, unrecognised shape), reconstruct approximate 5h/7d token + cost
-    totals from the transcript JSONL under ``<home>/projects/**/*.jsonl`` — reading
-    only files modified in the last week, from a per-file memo (``stats/_scan.py``),
-    and counting each streamed message once (see ``_parse_transcript``).
-  - 401 means the login itself is dead — no fallback estimate is useful there, so we
-    surface the exact message Claude Code's own CLI shows, tagged ``error_kind="auth"``
-    so ``StatsService`` reports it rather than hiding it behind stale cached rows
-    (``stats/service.py``).
-  - 429 means the endpoint is rate-limited, not that there's no data — falling back to
-    the noisy local estimate would *replace* good cached numbers with a worse guess, so
-    this also skips the fallback and just reports the rate limit. ``StatsService``
-    is what actually keeps the old cached rows in that case (see ``stats/service.py``).
+  - Alongside it, **always**: approximate 5h/7d token + cost totals reconstructed from
+    the transcript JSONL under ``<home>/projects/**/*.jsonl`` — reading only files
+    modified in the last week, from a per-file memo (``stats/_scan.py``), and counting
+    each streamed message once (see ``_parse_transcript``). These go in
+    ``UsageResult.estimate``, never in ``rows``, and the flyout draws them under the
+    official rows (or under the error line).
+
+    This used to be a *fallback*: it replaced the official rows when the endpoint
+    failed, under a ``header`` reading "estimate (official % unavailable)". The flyout
+    never drew that header (it draws the agent's display name instead), so a local
+    guess appeared on screen indistinguishable from official data, and the only clue
+    was a "~" in front of the cost. Making it a second, permanently visible block
+    removes the ambiguity and gives the token/cost view — which the percentages don't
+    provide at all — a home of its own.
+  - 401/403, or a credentials file that is missing, unreadable or has no
+    ``accessToken``, all mean the login itself is dead. Each is tagged
+    ``error_kind="auth"`` so ``StatsService`` reports it rather than hiding it behind
+    stale cached rows (``stats/service.py``). Only the 401 was classified this way
+    before; the file-level failures raised ``OSError``/``ValueError`` into the generic
+    handler and quietly became an estimate, so a signed-out Claude showed token totals
+    where Cursor, in the same flyout, says "Sign in again to see it".
+  - 429 means the endpoint is rate-limited, not that there's no data, so it is left
+    ``transient`` and ``StatsService`` keeps the previous cached rows (see
+    ``stats/service.py``). The estimate rides along either way.
 
 Stdlib only (``urllib``), so this runs on a bare WSL distro or any other
 bundle with nothing extra installed.
@@ -48,10 +59,10 @@ log = logging.getLogger(__name__)
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
 
-# Approx public per-MTok pricing, used only for the JSONL fallback cost estimate.
+# Approx public per-MTok pricing, used only for the local JSONL cost estimate.
 # (input, output) USD per million tokens. Cache read ~0.1x input, write ~1.25x.
-# Best-effort and not kept perfectly in sync with pricing changes — the fallback path
-# is explicitly labelled "estimate" in the UI for this reason.
+# Best-effort and not kept perfectly in sync with pricing changes — which is why every
+# figure it produces is drawn under an "Est." label with a "~" on the cost.
 PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-5": (5.0, 25.0),
     "claude-opus-4-8": (5.0, 25.0),
@@ -75,15 +86,15 @@ CACHE_READ_PER_MTOK: dict[str, float] = {
 
 #: Claude Code writes placeholder assistant messages under this model id (a cancelled
 #: turn, an interrupted stream). They carry no billable usage and would otherwise count
-#: as an "unknown model" and flip the header to the unpriced wording.
+#: as an "unknown model" and drag the estimate onto the default rate.
 SYNTHETIC_MODEL = "<synthetic>"
 
 #: What an unrecognised model costs. NOT (0.0, 0.0): a model released after this build
 #: would then contribute exactly nothing to the estimate, which reads as a plausible
 #: (just quietly low) number rather than as a gap — the failure mode nobody notices.
 #: The flagship rate is the safer guess, since a model this table has never heard of is
-#: far more likely to be a new top-tier one than a new cheap one. The estimate says so:
-#: any unpriced token switches the section header to `header_estimate_unpriced`.
+#: far more likely to be a new top-tier one than a new cheap one. `_rates_for` logs the
+#: model once so the gap is findable; the row itself only ever claims to be a "~" figure.
 DEFAULT_PRICING: tuple[float, float] = (5.0, 25.0)
 
 #: Model ids already reported as unpriced, so a 30k-line transcript sweep logs each new
@@ -122,16 +133,38 @@ def _resolve_home(agent_config: AgentConfig) -> Path:
 # --------------------------------------------------------------------------- official endpoint
 
 
+class _NotSignedIn(Exception):
+    """No usable OAuth token in ``.credentials.json``.
+
+    Its own exception type, rather than the ``OSError``/``ValueError`` these failures
+    raise naturally, because those are indistinguishable from the network and parsing
+    errors the generic handler treats as transient — which is exactly how a signed-out
+    Claude used to fall through to a local estimate instead of saying so. Mirrors
+    ``providers/cursor._TokenError``.
+    """
+
+
 def _read_access_token(home: Path) -> tuple[str, bool]:
     """Read the current OAuth access token. Claude Code refreshes this file while it
-    runs, so re-reading each call is the simplest freshness strategy."""
+    runs, so re-reading each call is the simplest freshness strategy.
+
+    Every way this can fail is a way of not being signed in, so they all raise
+    `_NotSignedIn` — a missing file (never logged in, or a different `home`), an
+    unparseable one (a half-written refresh), and a well-formed one with no
+    `accessToken` (logged out).
+    """
     path = home / ".credentials.json"
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    oauth = data.get("claudeAiOauth") or {}
-    token = oauth.get("accessToken")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        oauth = data.get("claudeAiOauth") or {}
+        token = oauth.get("accessToken")
+    except OSError as e:
+        raise _NotSignedIn(f"cannot read {path}: {e}") from e
+    except (ValueError, AttributeError) as e:
+        raise _NotSignedIn(f"{path} is not a readable credentials file: {e}") from e
     if not token:
-        raise ValueError("no accessToken in .credentials.json")
+        raise _NotSignedIn(f"no accessToken in {path}")
     expires_at = oauth.get("expiresAt")  # ms epoch
     expired = bool(expires_at) and expires_at / 1000 < datetime.now(UTC).timestamp()
     return token, expired
@@ -293,10 +326,13 @@ def _norm_model(m: str | None) -> str | None:
     return m
 
 
-#: Fallback window key -> catalogue key for its row label. The dict keys stay internal
+#: Estimate window key -> catalogue key for its row label. The dict keys stay internal
 #: identifiers rather than the label itself, so accumulating a window and naming it are
-#: separate concerns and the label can be translated at render time.
-_WINDOW_LABELS = {"5h": "usage.claude.window_5h", "week": "usage.claude.window_week"}
+#: separate concerns and the label can be translated at render time. The catalogue keys
+#: are shared with `providers/codex`, which shows the same two windows: one flyout
+#: should not call the same seven days "This week" under one agent and "Last 7 days"
+#: under the next.
+_WINDOW_LABELS = {"5h": "usage.estimate.5h", "week": "usage.estimate.week"}
 
 _WINDOWS_S = {"5h": 5 * 3600, "week": WEEK_S}
 
@@ -437,16 +473,27 @@ def _has_unpriced(acc: dict[str, dict[str, float]]) -> bool:
     return any(a.get("unpriced", 0) for a in acc.values())
 
 
-def _fallback_rows(acc: dict[str, dict[str, float]]) -> list[UsageRow]:
+def _estimate_rows(acc: dict[str, dict[str, float]]) -> list[UsageRow]:
+    """One `kind="info"` row per window — no bar, because there is no limit to be a
+    percentage of (see `ui/flyout._draw_rows`).
+
+    A window with nothing in it still gets a row. When these were the *fallback* rows
+    an empty window was skipped, because a section consisting of one "0.00M tokens"
+    line says nothing; now that they are a fixed pair sitting under the official rows,
+    the zero is the answer — "you have used nothing in this window" — and dropping the
+    row instead makes the block change height as usage crosses in and out of the
+    5-hour window.
+    """
     rows: list[UsageRow] = []
-    for window, a in acc.items():
-        total = a["in"] + a["out"] + a["cache_r"] + a["cache_w"]
-        if total == 0 and a["cost"] == 0:
+    for window, key in _WINDOW_LABELS.items():
+        a = acc.get(window)
+        if a is None:
             continue
+        total = a["in"] + a["out"] + a["cache_r"] + a["cache_w"]
         right = t("usage.claude.estimate_right",
                   tokens=f"{total / 1e6:.2f}", cost=f"${a['cost']:.2f}")
-        label = t(_WINDOW_LABELS.get(window, window))
-        rows.append(UsageRow(label=label, pct=0.0, right=right, show_pct=False, severity="normal", kind="info"))
+        rows.append(UsageRow(label=t(key), pct=0.0, right=right, show_pct=False,
+                              severity="normal", kind="info"))
     return rows
 
 
@@ -470,52 +517,61 @@ class ClaudeUsageProvider(UsageProvider):
         # a product name, so the surrounding words are translated and it is not.
         tier = _read_tier(home)
         header = t("usage.claude.header_tier", tier=tier) if tier else t("usage.claude.header")
+        # Built before the request, and attached to every return below — success and
+        # failure alike. That is the whole point of the field: the local numbers are
+        # never the consolation prize for a failed fetch, so there is no path through
+        # this method that has official rows but no estimate, or an error but no
+        # estimate.
+        estimate = self._estimate(home)
+
+        def failed(error: str, kind: str = "transient") -> UsageResult:
+            return UsageResult(agent=self.key, header=header, source="official",
+                                error=error, error_kind=kind, estimate=estimate)
 
         try:
             data = _fetch_usage(home, timeout)
+        except _NotSignedIn as e:
+            # Not a blip: nothing refreshes until the user runs `claude` again, so
+            # `error_kind="auth"` stops `StatsService` covering it with cached rows.
+            log.info("claude usage: %s", e)
+            return failed(t("usage.claude.error.not_signed_in"), "auth")
         except urllib.error.HTTPError as e:
-            if e.code == 401:
-                # `error_kind="auth"`, so `StatsService` stops masking this with rows
-                # from the last time the login worked: nothing will refresh them until
-                # the user signs in again, and the message below is what they need.
-                return UsageResult(
-                    agent=self.key,
-                    header=header,
-                    source="official",
-                    error=t("usage.claude.error.login_expired"),
-                    error_kind="auth",
-                )
+            if e.code in (401, 403):
+                # 403 alongside 401: a token the server refuses is a token the user has
+                # to replace either way, and the remedy sentence is the same.
+                return failed(t("usage.claude.error.login_expired"), "auth")
             if e.code == 429:
-                # Rate-limited is not "no data" — don't let a noisier local estimate
-                # clobber whatever good numbers are already cached (StatsService
-                # enforces this by only overwriting the cache on `.ok` results).
-                return UsageResult(
-                    agent=self.key,
-                    header=header,
-                    source="official",
-                    error=t("usage.claude.error.rate_limited"),
-                )
-            return self._fallback(home, note=f"endpoint HTTP {e.code} ({e.reason})")
+                # Rate-limited is not "no data" — left transient so `StatsService` keeps
+                # whatever good rows are already cached.
+                return failed(t("usage.claude.error.rate_limited"))
+            return failed(t("usage.claude.error.endpoint_http", code=e.code))
         except (urllib.error.URLError, OSError, ValueError, KeyError, TimeoutError) as e:
-            return self._fallback(home, note=f"endpoint failed: {e!r}")
+            return failed(t("usage.claude.error.unavailable", detail=repr(e)))
 
         rows = _parse_usage(data)
         if not rows:
-            return self._fallback(home, note="endpoint returned no recognizable limits")
-        return UsageResult(agent=self.key, rows=rows, header=header, source="official")
+            # A 200 whose shape we no longer recognise. Reported rather than silently
+            # swallowed: this is the signal that the undocumented endpoint has changed.
+            return failed(t("usage.claude.error.payload"))
+        return UsageResult(agent=self.key, rows=rows, header=header, source="official",
+                            estimate=estimate)
 
-    def _fallback(self, home: Path, note: str) -> UsageResult:
-        log.info("claude usage: %s — falling back to local transcript estimate", note)
-        header = t("usage.claude.header_estimate")
+    def _estimate(self, home: Path) -> list[UsageRow]:
+        """The local transcript estimate, or `[]` if it cannot be built.
+
+        Swallows its own failures on purpose. This runs on the success path now, so a
+        sleeping WSL distro or an unreadable projects directory must not be able to
+        turn a perfectly good official result into an error — the estimate is the
+        supplementary block, and the worst it may do when it fails is not be there.
+        """
         try:
             acc = _reconstruct_from_jsonl(home)
         except OSError as e:
-            return UsageResult(agent=self.key, header=header, source="estimate",
-                                error=t("usage.claude.error.unavailable", detail=repr(e)))
+            log.info("claude local estimate unavailable: %r", e)
+            return []
         if _has_unpriced(acc):
-            header = t("usage.claude.header_estimate_unpriced")
-        rows = _fallback_rows(acc)
-        if not rows:
-            return UsageResult(agent=self.key, header=header, source="estimate",
-                                error=t("usage.claude.error.no_transcripts"))
-        return UsageResult(agent=self.key, rows=rows, header=header, source="estimate")
+            # Nowhere to say this on screen without inventing a caption the estimate
+            # block deliberately doesn't have; `_rates_for` has already logged which
+            # model it was, and the row's "~" never claimed to be exact.
+            log.info("claude local estimate includes tokens from a model with no price")
+        return _estimate_rows(acc)
