@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -760,6 +761,15 @@ class TrayApp(QtCore.QObject):
         # exists because omitting exactly this line shipped a tick box that did nothing.
         self._cfg.stats.show_estimate = new_cfg.stats.show_estimate
         self._cfg.update.check = new_cfg.update.check
+        # The flyout holds this very `Config`, so the band picks these up on its next
+        # paint — which the `set_results` call further down schedules, along with the
+        # re-measure the band's height needs and the clock tick's re-arm.
+        self._cfg.ui.clocks.enabled = new_cfg.ui.clocks.enabled
+        self._cfg.ui.clocks.format = new_cfg.ui.clocks.format
+        # Copies, not the dialog's own `ClockConfig` objects: that config is a deep copy
+        # the dialog goes on owning after this returns, and the flyout paints straight
+        # off these.
+        self._cfg.ui.clocks.clocks = [replace(clock) for clock in new_cfg.ui.clocks.clocks]
         self._cfg.engine.mode = new_cfg.engine.mode
         for status in ("idle", "working", "confirm"):
             setattr(self._cfg.colors, status, getattr(new_cfg.colors, status))

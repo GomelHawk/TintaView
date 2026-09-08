@@ -34,12 +34,13 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+from functools import cache, lru_cache
 
 from PySide6 import QtCore, QtWidgets
 
 from ..agents import base as agents_base
 from ..core import config as config_mod
-from ..core.config import ColorsConfig, Config, DeviceColorsConfig
+from ..core.config import MAX_CLOCKS, ClockConfig, ColorsConfig, Config, DeviceColorsConfig
 from ..engines.factory import ENGINE_DISPLAY, ENGINE_MODES, available_engines, engine_supported
 from ..i18n import LANGUAGES, t
 from ..i18n import normalize as normalize_language
@@ -113,6 +114,130 @@ def _safe_hex(value: str, fallback: str) -> str:
     return value
 
 
+#: Territories `QTimeZone` reports zones for but a *country* picker must not offer.
+#: `AnyCountry` is Qt's catch-all, named "Default", holding deprecated aliases
+#: (`America/Atka`, `America/Montreal`) plus `UTC`; `World` is a second copy of zones
+#: already reachable under the country they belong to, labelled "world". Both are
+#: reachable by hand-editing `ui.clocks.zones` — the renderer accepts any id Qt knows —
+#: they just have no place in a list of countries.
+_NON_COUNTRIES = (QtCore.QLocale.Country.AnyCountry, QtCore.QLocale.Country.World)
+
+
+@lru_cache(maxsize=1)
+def _countries() -> tuple[tuple[str, QtCore.QLocale.Country], ...]:
+    """(name, territory) for every country Qt knows a time zone for, sorted by name.
+
+    Enumerated from Qt rather than from a table shipped here: a hand-written country
+    list is a second source of truth that goes stale, and the only names worth showing
+    are the ones `availableTimeZoneIds` will actually return something for.
+
+    Names come back from Qt in English and stay English, like the rest of the data
+    TintaView quotes rather than translates (an agent's plan name, a provider's error).
+    """
+    found = [
+        (QtCore.QLocale.territoryToString(territory), territory)
+        for territory in QtCore.QLocale.Country
+        if territory not in _NON_COUNTRIES and QtCore.QTimeZone.availableTimeZoneIds(territory)
+    ]
+    return tuple(sorted(found, key=lambda pair: pair[0]))
+
+
+@cache
+def _zones_for(territory: QtCore.QLocale.Country) -> tuple[str, ...]:
+    """The IANA ids in one country — one for Poland or India, 29 for the USA."""
+    return tuple(bytes(zone).decode() for zone in QtCore.QTimeZone.availableTimeZoneIds(territory))
+
+
+class _ClockRow(QtWidgets.QWidget):
+    """One clock slot: a country picker, that country's zones, and a city tick box.
+
+    Country first because that is how the choice is actually made ("Poland", "India"),
+    and because it cuts 500-odd IANA ids down to a handful. The zone combo only earns
+    its keep for the countries that span several — the USA has 29 — where a city has to
+    be picked; for a single-zone country it shows the one id and is disabled, rather
+    than disappearing, so every row stays the same shape.
+
+    The tick box is per row rather than one switch for the band because it answers a
+    question about this place: two American clocks need their cities to be told apart, a
+    lone Indian one does not. It only changes the *label* — the zone is picked either
+    way, so unticking it never changes which time is shown.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._country = QtWidgets.QComboBox()
+        self._country.addItem(t("settings.clocks.no_clock"), userData=None)
+        for name, territory in _countries():
+            self._country.addItem(name, userData=territory)
+        self._zone = QtWidgets.QComboBox()
+        self.city = QtWidgets.QCheckBox(t("settings.clocks.city"))
+        self.city.setChecked(True)
+        self.city.setToolTip(t("settings.clocks.city.tooltip"))
+        row.addWidget(self._country, 1)
+        row.addWidget(self._zone, 1)
+        row.addWidget(self.city, 0)
+        self._country.currentIndexChanged.connect(self._reload_zones)
+        self._reload_zones()
+
+    def _reload_zones(self) -> None:
+        territory = self._country.currentData()
+        self._zone.clear()
+        zones = _zones_for(territory) if territory is not None else ()
+        # Nothing to label while the slot is empty.
+        self.city.setEnabled(territory is not None)
+        for zone in zones:
+            # The city, because the country is already the combo to the left — the pair
+            # reads the same way round as the flyout's own "Poland/Warsaw" label. The
+            # stored value is still the full IANA id (`userData`). Only the region
+            # prefix is dropped, not a nested one: without "Indiana/" the USA's nine
+            # entries under it would be nine indistinguishable rows.
+            # `[-1]` on the *first* split, so a nested id keeps its middle segment
+            # ("Indiana/Indianapolis") and an id with no region at all ("UTC", reachable
+            # by hand-editing the config) still labels itself instead of raising.
+            self._zone.addItem(zone.split("/", 1)[-1].replace("_", " "), userData=zone)
+        self._zone.setEnabled(len(zones) > 1)
+
+    def zone(self) -> str:
+        """The chosen IANA id, or "" for an empty slot."""
+        if self._country.currentData() is None:
+            return ""
+        return self._zone.currentData() or ""
+
+    def clock(self) -> ClockConfig | None:
+        """This row as a `ClockConfig`, or None when the slot is empty."""
+        zone = self.zone()
+        return ClockConfig(zone=zone, show_city=self.city.isChecked()) if zone else None
+
+    def set_clock(self, clock: ClockConfig) -> None:
+        self.set_zone(clock.zone)
+        self.city.setChecked(clock.show_city)
+
+    def set_zone(self, zone_id: str) -> None:
+        """Select `zone_id`, deriving its country — an id is all the config stores."""
+        timezone = QtCore.QTimeZone(zone_id.encode())
+        if not zone_id or not timezone.isValid():
+            self._country.setCurrentIndex(0)
+            return
+        country_index = self._country.findData(timezone.territory())
+        if country_index < 0:
+            # A valid id whose territory isn't in the picker (an alias, or `UTC`, whose
+            # territory is Qt's "Default"): keep it selectable rather than silently
+            # dropping a zone the user put in the file by hand.
+            self._country.addItem(QtCore.QLocale.territoryToString(timezone.territory()),
+                                  userData=timezone.territory())
+            country_index = self._country.count() - 1
+        self._country.setCurrentIndex(country_index)
+        self._reload_zones()
+        zone_index = self._zone.findData(zone_id)
+        if zone_index < 0:
+            self._zone.addItem(zone_id, userData=zone_id)
+            self._zone.setEnabled(True)
+            zone_index = self._zone.count() - 1
+        self._zone.setCurrentIndex(zone_index)
+
+
 class _ColorButton(QtWidgets.QPushButton):
     """A button that shows its current colour as a swatch and edits it via QColorDialog.
 
@@ -184,6 +309,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         tabs = QtWidgets.QTabWidget(self)
         tabs.addTab(self._build_general_tab(), t("settings.tab.general"))
+        tabs.addTab(self._build_clocks_tab(), t("settings.tab.clocks"))
         tabs.addTab(self._build_lighting_tab(), t("settings.tab.lighting"))
 
         buttons = QtWidgets.QDialogButtonBox(
@@ -296,6 +422,53 @@ class SettingsDialog(QtWidgets.QDialog):
         index = combo.findData(normalize_language(self._cfg.ui.language))
         combo.setCurrentIndex(index if index >= 0 else 0)
         return combo
+
+    # --- Clocks tab ----------------------------------------------------------
+
+    def _build_clocks_tab(self) -> QtWidgets.QWidget:
+        """Up to `MAX_CLOCKS` world clocks for the flyout's band.
+
+        Its own tab rather than another row on General: four two-combo rows plus a
+        format picker is more than the General form can take, and unlike everything
+        there this is a display preference with no bearing on what TintaView tracks.
+        """
+        widget = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(widget)
+
+        clocks = self.result_cfg.ui.clocks
+        self._clocks_check = QtWidgets.QCheckBox(t("settings.clocks.enabled"))
+        self._clocks_check.setChecked(clocks.enabled)
+        outer.addWidget(self._clocks_check)
+        outer.addWidget(_hint(t("settings.clocks.hint")))
+
+        # Everything below is what the tick box switches on, so it follows the tick box
+        # rather than staying live under an unticked one.
+        body = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(body)
+        self._clock_format_combo = QtWidgets.QComboBox()
+        # Literal keys, not `t(f"…{value}")`: `tests/test_i18n.py` checks that every
+        # catalogue key is referenced somewhere in the package, and a key only ever
+        # built by interpolation reads as unused (or, worse, as a typo nobody notices).
+        for value, label in (("24h", t("settings.clocks.format.24h")),
+                             ("12h", t("settings.clocks.format.12h"))):
+            self._clock_format_combo.addItem(label, userData=value)
+        format_index = self._clock_format_combo.findData(clocks.format)
+        self._clock_format_combo.setCurrentIndex(max(0, format_index))
+        form.addRow(t("settings.clocks.format"), self._clock_format_combo)
+
+        self._clock_rows: list[_ClockRow] = []
+        for slot in range(MAX_CLOCKS):
+            row = _ClockRow()
+            if slot < len(clocks.clocks):
+                row.set_clock(clocks.clocks[slot])
+            self._clock_rows.append(row)
+            form.addRow(t("settings.clocks.slot", index=slot + 1), row)
+        outer.addWidget(body)
+        outer.addStretch(1)
+
+        body.setEnabled(self._clocks_check.isChecked())
+        self._clocks_check.toggled.connect(body.setEnabled)
+        return widget
 
     # --- Lighting tab --------------------------------------------------------
 
@@ -459,6 +632,14 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.stats.poll_seconds = self._poll_spin.value()
         cfg.stats.show_estimate = self._estimate_check.isChecked()
         cfg.update.check = self._update_check.isChecked()
+        cfg.ui.clocks.enabled = self._clocks_check.isChecked()
+        # Empty slots drop out, so the stored order is the on-screen order with no gaps.
+        # Duplicates are left alone: two clocks on one zone is a pointless thing to ask
+        # for, but silently deleting a row the user filled in is worse than showing it.
+        cfg.ui.clocks.clocks = [
+            clock for clock in (row.clock() for row in self._clock_rows) if clock is not None
+        ]
+        cfg.ui.clocks.format = self._clock_format_combo.currentData()
         cfg.engine.mode = self._engine_combo.currentData()
         for status, button in self._color_buttons.items():
             setattr(cfg.colors, status, button.hex_color())

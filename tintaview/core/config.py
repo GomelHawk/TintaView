@@ -228,6 +228,55 @@ class StatsConfig:
     show_estimate: bool = True
 
 
+#: How many world clocks the flyout band holds. Four is what fits across a 380px card
+#: at a readable size (see `ui/flyout.py`'s clocks band), and it is the cap both the
+#: picker and the renderer use — shared from here so they, and the load-time trim
+#: below, can never disagree about it.
+MAX_CLOCKS = 4
+
+
+@dataclass
+class ClockConfig:
+    """One clock in the band — a `[[ui.clocks.clock]]` table.
+
+    `zone` is an IANA id (``"Europe/Warsaw"``). It is converted on every repaint from the
+    live zone rather than from a cached offset, which is what makes a DST transition (and
+    any future tz database update) arrive on its own, with nothing here to keep in sync.
+    The renderer uses Qt's `QTimeZone`, deliberately not `zoneinfo`: Windows ships no tz
+    database, so `zoneinfo` there needs the `tzdata` wheel, and this layer has to keep
+    working on a bare WSL distro.
+
+    `show_city` labels this clock "Poland/Warsaw" rather than "Poland". Per clock, not
+    per band: a country on its own is short enough that four of them keep their full
+    names, so which clocks are worth a city is a judgement only the user can make — the
+    two American zones need one to be told apart, the one in India does not.
+
+    A zone is *not* validated here: this module is Qt-free by design (it runs headless,
+    where PySide6 is not installed), so an id Qt doesn't know is dropped by the renderer
+    instead, and the settings picker only ever offers ids Qt itself listed.
+    """
+
+    zone: str = ""
+    show_city: bool = True
+
+
+@dataclass
+class ClocksConfig:
+    """World clocks drawn as one band in the flyout, under the title bar.
+
+    `clocks` is an array of tables rather than a list of zone ids, because a clock now
+    carries a flag as well as a zone — see `ClockConfig`. `dumps` emits them with
+    `_array_of_tables`, in display order.
+
+    `format` stays global, not per-clock: a card mixing "19:48" with "7:48 PM" reads as
+    a bug rather than as a preference.
+    """
+
+    enabled: bool = False
+    format: str = "24h"  # 24h | 12h
+    clocks: list[ClockConfig] = field(default_factory=list)
+
+
 @dataclass
 class UIConfig:
     chime_on_confirm: bool = False
@@ -237,6 +286,7 @@ class UIConfig:
     #: unrecognised (`i18n.normalize`), so a typo in a hand-edited config still starts.
     #: Only the *interface*: whatever an agent's own API reports is quoted as it arrived.
     language: str = "en"
+    clocks: ClocksConfig = field(default_factory=ClocksConfig)
 
 
 @dataclass
@@ -433,13 +483,17 @@ def load(path: Path | None = None) -> Config:
         if isinstance(v, dict)
     }
 
+    ui_raw = raw.get("ui", {}) or {}
+    ui = _build(UIConfig, ui_raw, "ui")
+    ui.clocks = _clocks(ui_raw.get("clocks", {}))
+
     cfg = Config(
         version=version,
         server=_build(ServerConfig, raw.get("server", {}), "server"),
         engine=engine,
         colors=_colors(raw.get("colors", {})),
         stats=_build(StatsConfig, raw.get("stats", {}), "stats"),
-        ui=_build(UIConfig, raw.get("ui", {}), "ui"),
+        ui=ui,
         update=_build(UpdateConfig, raw.get("update", {}), "update"),
         enabled_agents=[str(a) for a in enabled],
         agents=agents,
@@ -504,14 +558,68 @@ def _colors(raw: Any) -> ColorsConfig:
     return cfg
 
 
-def _table(name: str, obj: Any) -> list[str]:
+def _clocks(raw: Any) -> ClocksConfig:
+    """Assemble `[ui.clocks]`, trimming what the flyout could not draw anyway.
+
+    Same nested-table pattern as `[colors.device]` — `_build` fills flat fields only, so
+    a nested table has to be attached by hand. Two fix-ups on top of it, both because
+    this file gets hand-edited and neither value has a safe failure mode at the point of
+    use: a `format` the renderer doesn't know would silently mean 24h, and more than
+    `MAX_CLOCKS` zones would leave the extras stored but invisible with no hint as to
+    why. Trimming here keeps the config equal to what is on screen.
+    """
+    cfg = _build(ClocksConfig, raw, "ui.clocks")
+    if cfg.format not in ("24h", "12h"):
+        log.warning("config: ui.clocks.format = %r is not '24h' or '12h', using '24h'",
+                    cfg.format)
+        cfg.format = "24h"
+    raw_clocks = raw.get("clock", []) if isinstance(raw, dict) else []
+    if not isinstance(raw_clocks, list):
+        log.warning("config: ui.clocks.clock = %r is not a list of tables, ignoring it",
+                    raw_clocks)
+        raw_clocks = []
+    clocks = [
+        clock
+        for entry in raw_clocks
+        if isinstance(entry, dict)
+        # A table with no zone is not a clock. `_build` would happily hand back the ""
+        # default, and the band would then reserve a column it can draw nothing in.
+        if (clock := _build(ClockConfig, entry, "ui.clocks.clock")).zone.strip()
+    ]
+    for clock in clocks:
+        clock.zone = clock.zone.strip()
+    if len(clocks) > MAX_CLOCKS:
+        log.warning("config: ui.clocks has %d clocks, only the first %d are shown",
+                    len(clocks), MAX_CLOCKS)
+        clocks = clocks[:MAX_CLOCKS]
+    cfg.clocks = clocks
+    return cfg
+
+
+def _table(name: str, obj: Any, skip: tuple[str, ...] = ()) -> list[str]:
+    """One flat `[table]`. `skip` names fields emitted some other way — today only
+    `ui.clocks.clock`, an array of tables (`_array_of_tables`), which cannot be written
+    as a value here: TOML has no inline syntax for it that `tomllib` reads back as one.
+    """
     lines = [f"[{name}]"]
     for f in fields(obj):
         value = getattr(obj, f.name)
-        if is_dataclass(value):
+        if is_dataclass(value) or f.name in skip:
             continue  # nested tables are emitted separately, after this one
         lines.append(f"{f.name} = {_toml_value(value)}")
     lines.append("")
+    return lines
+
+
+def _array_of_tables(name: str, objs: list[Any]) -> list[str]:
+    """`[[name]]` blocks, one per dataclass, in list order — the order *is* the data
+    (it is the left-to-right order of the clocks), so nothing here may sort them."""
+    lines: list[str] = []
+    for obj in objs:
+        lines.append(f"[[{name}]]")
+        for f in fields(obj):
+            lines.append(f"{f.name} = {_toml_value(getattr(obj, f.name))}")
+        lines.append("")
     return lines
 
 
@@ -528,6 +636,8 @@ def dumps(cfg: Config) -> str:
     out += _table("colors.device", cfg.colors.device)
     out += _table("stats", cfg.stats)
     out += _table("ui", cfg.ui)
+    out += _table("ui.clocks", cfg.ui.clocks, skip=("clocks",))
+    out += _array_of_tables("ui.clocks.clock", cfg.ui.clocks.clocks)
     out += _table("update", cfg.update)
     out.append("[agents]")
     out.append(f"enabled = {_toml_value(cfg.enabled_agents)}")

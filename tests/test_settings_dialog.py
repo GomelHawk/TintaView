@@ -28,7 +28,13 @@ pytest.importorskip("PySide6")
 from PySide6 import QtCore, QtWidgets  # noqa: E402
 
 from tintaview.core import config as config_mod  # noqa: E402
-from tintaview.core.config import ColorsConfig, Config, DeviceColorsConfig  # noqa: E402
+from tintaview.core.config import (  # noqa: E402
+    MAX_CLOCKS,
+    ClockConfig,
+    ColorsConfig,
+    Config,
+    DeviceColorsConfig,
+)
 from tintaview.install import detect  # noqa: E402
 from tintaview.install import hooks as hooks_mod  # noqa: E402
 from tintaview.install.detect import Environment  # noqa: E402
@@ -633,3 +639,141 @@ def test_show_estimate_reads_back_from_the_config(qapp, tmp_path):
     dialog = SettingsDialog(cfg)
     assert dialog._estimate_check.isChecked() is False
 
+
+
+# --------------------------------------------------------------------------- clocks tab
+
+
+def test_clocks_tab_offers_one_row_per_clock(qapp, tmp_path):
+    dialog = SettingsDialog(make_cfg(tmp_path))
+
+    assert len(dialog._clock_rows) == MAX_CLOCKS
+    assert dialog._clocks_check.isChecked() is False  # off by default
+    # The rows are what the tick box switches on, so they are gated by it rather than
+    # staying live under an unticked box.
+    assert dialog._clock_rows[0].isEnabled() is False
+    dialog._clocks_check.setChecked(True)
+    assert dialog._clock_rows[0].isEnabled() is True
+
+
+def test_clocks_tab_round_trips_the_configured_clocks(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.ui.clocks.enabled = True
+    cfg.ui.clocks.format = "12h"
+    cfg.ui.clocks.clocks = [
+        ClockConfig("Europe/Warsaw", True),
+        ClockConfig("Asia/Kolkata", False),
+    ]
+
+    dialog = SettingsDialog(cfg)
+    dialog._on_accept()
+
+    saved = config_mod.load(cfg.path)
+    assert saved.ui.clocks.enabled is True
+    assert saved.ui.clocks.format == "12h"
+    assert saved.ui.clocks.clocks == cfg.ui.clocks.clocks
+
+
+def test_each_row_has_its_own_city_tick_box(qapp, tmp_path):
+    """Per row, so one clock can be labelled "United States/New York" while another
+    stays "India" — the tick boxes must not move together."""
+    cfg = make_cfg(tmp_path)
+    cfg.ui.clocks.enabled = True
+    cfg.ui.clocks.clocks = [
+        ClockConfig("Asia/Kolkata", False),
+        ClockConfig("America/New_York", True),
+    ]
+
+    dialog = SettingsDialog(cfg)
+    assert dialog._clock_rows[0].city.isChecked() is False
+    assert dialog._clock_rows[1].city.isChecked() is True
+    # An untouched empty slot has nothing to label.
+    assert dialog._clock_rows[2].city.isEnabled() is False
+
+    dialog._clock_rows[0].city.setChecked(True)
+    dialog._on_accept()
+
+    saved = config_mod.load(cfg.path).ui.clocks.clocks
+    assert [(c.zone, c.show_city) for c in saved] == [
+        ("Asia/Kolkata", True), ("America/New_York", True),
+    ]
+
+
+def test_a_stored_zone_selects_its_own_country(qapp, tmp_path):
+    """The config stores only an id, so the row has to derive the country from it —
+    otherwise reopening the dialog shows an empty picker over a configured clock."""
+    cfg = make_cfg(tmp_path)
+    cfg.ui.clocks.enabled = True  # or the whole tab body is gated off and every
+    cfg.ui.clocks.clocks = [ClockConfig("Asia/Kolkata")]  # child combo reads as disabled
+
+    dialog = SettingsDialog(cfg)
+    row = dialog._clock_rows[0]
+
+    assert row._country.currentText() == "India"
+    assert row.zone() == "Asia/Kolkata"
+    # One zone, so there is nothing to choose and the second combo says so.
+    assert row._zone.isEnabled() is False
+
+
+def test_a_country_with_several_zones_offers_them_all(qapp, tmp_path):
+    """The USA is the case that makes the second combo necessary — 29 zones, and no way
+    to pick one from the country alone."""
+    cfg = make_cfg(tmp_path)
+    cfg.ui.clocks.enabled = True
+    cfg.ui.clocks.clocks = [ClockConfig("America/Los_Angeles")]
+
+    dialog = SettingsDialog(cfg)
+    row = dialog._clock_rows[0]
+
+    assert row._country.currentText() == "United States"
+    assert row._zone.isEnabled() is True
+    zones = [row._zone.itemData(i) for i in range(row._zone.count())]
+    assert "America/Los_Angeles" in zones and "America/New_York" in zones
+    assert row.zone() == "America/Los_Angeles"
+    # Labelled by city, so the pair reads like the flyout's "United States/Los Angeles".
+    assert row._zone.currentText() == "Los Angeles"
+
+
+def test_empty_clock_slots_are_left_out_of_the_saved_list(qapp, tmp_path):
+    """Zones are stored as a plain list in display order, so a cleared middle row must
+    not leave a hole in it."""
+    cfg = make_cfg(tmp_path)
+    cfg.ui.clocks.enabled = True
+    cfg.ui.clocks.clocks = [ClockConfig(z) for z in
+                            ("Europe/Warsaw", "Asia/Kolkata", "America/New_York")]
+
+    dialog = SettingsDialog(cfg)
+    dialog._clock_rows[1].set_zone("")  # "— not set —"
+    dialog._on_accept()
+
+    saved = config_mod.load(cfg.path).ui.clocks.clocks
+    assert [c.zone for c in saved] == ["Europe/Warsaw", "America/New_York"]
+
+
+def test_a_hand_edited_zone_qt_cannot_place_stays_selectable(qapp, tmp_path):
+    """`UTC` is valid but sits in Qt's catch-all territory, which the country picker
+    deliberately doesn't list. Accepting the dialog must not silently delete it."""
+    cfg = make_cfg(tmp_path)
+    cfg.ui.clocks.enabled = True
+    cfg.ui.clocks.clocks = [ClockConfig("UTC")]
+
+    dialog = SettingsDialog(cfg)
+    assert dialog._clock_rows[0].zone() == "UTC"
+
+    dialog._on_accept()
+    assert [c.zone for c in config_mod.load(cfg.path).ui.clocks.clocks] == ["UTC"]
+
+
+def test_the_country_picker_lists_no_pseudo_countries(qapp, tmp_path):
+    """Qt reports zones for two territories that are not countries — `AnyCountry`
+    ("Default", holding the deprecated aliases and `UTC`) and `World` ("world", a second
+    copy of zones already reachable under a real country)."""
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    row = dialog._clock_rows[0]
+    names = [row._country.itemText(i) for i in range(row._country.count())]
+
+    assert "Default" not in names
+    assert "world" not in names
+    assert "Poland" in names and "India" in names and "United States" in names
+    # Every country Qt knows a zone for, plus the leading "not set" row.
+    assert len(names) > 200

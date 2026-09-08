@@ -951,6 +951,9 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
             "engine.mode": "openrgb",
             "colors.idle": "#010203",
             "colors.device.idle": "#040506",
+            "ui.clocks.enabled": True,
+            "ui.clocks.clocks": _clock_list(["Europe/Warsaw", "Asia/Kolkata"], False),
+            "ui.clocks.format": "12h",
         },
     )
 
@@ -967,6 +970,15 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     # The device palette is what the controller actually sends to the hardware.
     assert cfg.colors.device.idle == "#040506"
     assert app_instance.usage_timer.interval() == 90_000
+    # The flyout holds this same Config object, so mirroring these is what makes the
+    # band appear without a restart.
+    assert cfg.ui.clocks.enabled is True
+    assert cfg.ui.clocks.format == "12h"
+    assert [c.zone for c in cfg.ui.clocks.clocks] == ["Europe/Warsaw", "Asia/Kolkata"]
+    assert all(c.show_city is False for c in cfg.ui.clocks.clocks)
+    # Copies, not the dialog's own objects — the dialog goes on owning its config.
+    assert cfg.ui.clocks.clocks[0] is not new_cfg.ui.clocks.clocks[0]
+    assert [c.zone for c in app_instance.flyout._clocks()] == ["Europe/Warsaw", "Asia/Kolkata"]
 
 
 def test_every_stats_field_is_accounted_for():
@@ -992,6 +1004,41 @@ def test_every_stats_field_is_accounted_for():
         "StatsConfig changed. If the settings dialog writes the new field, mirror it in "
         "Tray._apply_settings, assert it in the test above and add it to `dialog_writes`; "
         "otherwise add it to `config_file_only`."
+    )
+
+
+def test_every_clocks_field_is_accounted_for():
+    """The same tripwire as `test_every_stats_field_is_accounted_for`, for
+    `ClocksConfig`: every field is written by the dialog's Clocks tab, so adding one
+    must fail here until it is also mirrored in `_apply_settings`."""
+    from dataclasses import fields
+
+    from tintaview.core.config import ClocksConfig
+
+    # Written by SettingsDialog's Clocks tab and mirrored in Tray._apply_settings —
+    # each is asserted in test_apply_settings_mirrors_every_field_it_can_write above.
+    dialog_writes = {"enabled", "format", "clocks"}
+
+    assert {f.name for f in fields(ClocksConfig)} == dialog_writes, (
+        "ClocksConfig changed. If the settings dialog writes the new field, mirror it in "
+        "Tray._apply_settings, assert it in the test above and add it to `dialog_writes`."
+    )
+
+
+def test_every_per_clock_field_is_accounted_for():
+    """`ClockConfig` is written a row at a time by `_ClockRow.clock()` and copied whole
+    by `_apply_settings`, so a new field reaches the tray for free — but only if the row
+    actually sets it. This fails until someone has decided which."""
+    from dataclasses import fields
+
+    from tintaview.core.config import ClockConfig
+
+    # Set by SettingsDialog's `_ClockRow` — the country/zone combos and the city box.
+    row_writes = {"zone", "show_city"}
+
+    assert {f.name for f in fields(ClockConfig)} == row_writes, (
+        "ClockConfig changed. Give `_ClockRow` a control for the new field (and read it "
+        "in `_ClockRow.clock()`), then add it to `row_writes`."
     )
 
 
@@ -1717,6 +1764,298 @@ def test_missing_hooks_balloon_points_at_settings(tray, monkeypatch):
     assert len(balloons) == 1
     assert "Codex CLI" in balloons[0][1]
     assert "Setup" in balloons[0][1]
+
+
+# --------------------------------------------------------------------------- world clocks
+
+
+def _clock_cfg(zones, fmt="24h", enabled=True, show_city=True) -> Config:
+    """`zones` may be plain ids or `(id, show_city)` pairs."""
+    from tintaview.core.config import ClockConfig
+
+    cfg = Config()
+    cfg.ui.clocks.enabled = enabled
+    cfg.ui.clocks.format = fmt
+    cfg.ui.clocks.clocks = [
+        ClockConfig(*z) if isinstance(z, tuple) else ClockConfig(z, show_city)
+        for z in zones
+    ]
+    return cfg
+
+
+def _clock_list(zones, show_city=True):
+    from tintaview.core.config import ClockConfig
+
+    return [ClockConfig(z, show_city) for z in zones]
+
+
+def _utc(year, month, day, hour, minute=0) -> QtCore.QDateTime:
+    return QtCore.QDateTime(QtCore.QDate(year, month, day), QtCore.QTime(hour, minute),
+                            QtCore.QTimeZone.utc())
+
+
+def test_clock_times_follow_each_zones_daylight_saving(qapp):
+    """The requirement the whole renderer is shaped around: a clock has to be right in
+    January and in July without anything being reconfigured.
+
+    Poland is UTC+1 in winter and UTC+2 in summer; India never shifts. Both are read
+    from the same instant here, so a cached offset (or a fixed one taken at startup)
+    fails this test rather than going wrong silently six months later.
+    """
+    from tintaview.ui.flyout import _clock_time
+
+    winter, summer = _utc(2026, 1, 15, 12), _utc(2026, 7, 15, 12)
+
+    assert _clock_time("Europe/Warsaw", "24h", winter) == "13:00"
+    assert _clock_time("Europe/Warsaw", "24h", summer) == "14:00"
+    # No DST, and a half-hour offset — the other thing a naive renderer gets wrong.
+    assert _clock_time("Asia/Kolkata", "24h", winter) == "17:30"
+    assert _clock_time("Asia/Kolkata", "24h", summer) == "17:30"
+
+
+def test_clock_times_render_in_the_chosen_format(qapp):
+    from tintaview.ui.flyout import _clock_time
+
+    noon = _utc(2026, 1, 15, 12)
+
+    assert _clock_time("Europe/Warsaw", "24h", noon) == "13:00"
+    assert _clock_time("Europe/Warsaw", "12h", noon) == "1:00 PM"
+    # Anything but "12h" means 24-hour, so a hand-edited value can't blank the band.
+    assert _clock_time("Europe/Warsaw", "nonsense", noon) == "13:00"
+
+
+def test_an_unknown_zone_draws_no_time(qapp):
+    from tintaview.ui.flyout import _clock_time
+
+    assert _clock_time("Mars/Olympus", "24h", _utc(2026, 1, 15, 12)) == ""
+
+
+def test_clock_labels_name_the_country_and_the_city(qapp):
+    """"Poland/Warsaw", not the IANA "Europe/Warsaw": the clock is configured by
+    country, so that is the vocabulary the card answers in."""
+    from tintaview.ui.flyout import _clock_labels
+
+    labels, _font = _clock_labels(_clock_list(["Europe/Warsaw", "Asia/Kolkata"]),
+                                  QtGui.QFont(), 200.0)
+
+    assert labels == ["Poland/Warsaw", "India/Kolkata"]
+
+
+def test_clock_labels_can_drop_the_city(qapp):
+    """The point of the switch: a country on its own is short enough that four columns
+    keep the *full* name, where "Country/City" has to fall back to an ISO code."""
+    from tintaview.ui.flyout import _clock_labels
+
+    zones = ["Europe/Warsaw", "Asia/Kolkata", "America/New_York", "Asia/Tokyo"]
+    four_column_width = 76.0
+
+    with_city, _font = _clock_labels(_clock_list(zones, True), QtGui.QFont(),
+                                     four_column_width)
+    without_city, _font = _clock_labels(_clock_list(zones, False), QtGui.QFont(),
+                                        four_column_width)
+
+    assert without_city == ["Poland", "India", "United States", "Japan"]
+    # The city form still names a city, whichever of its two variants fitted — so the
+    # switch is doing something, without this test depending on which one that was.
+    assert all("/" in label for label in with_city)
+
+
+def test_each_clock_carries_its_own_city_choice(qapp):
+    """Per clock, because it is a judgement about the place: two American zones need
+    their cities to be told apart, the one in India does not."""
+    from tintaview.ui.flyout import _clock_labels
+
+    clocks = [
+        ("Asia/Kolkata", False),
+        ("America/New_York", True),
+        ("America/Los_Angeles", True),
+    ]
+    flyout = Flyout(cfg=_clock_cfg(clocks))
+
+    labels, _font = _clock_labels(flyout._clocks(), QtGui.QFont(), 200.0)
+
+    assert labels == ["India", "United States/New York", "United States/Los Angeles"]
+
+
+def test_a_zone_with_no_country_keeps_its_name_without_a_city(qapp):
+    """`UTC` has no country to fall back to, so hiding the city cannot blank it."""
+    from tintaview.ui.flyout import _clock_labels
+
+    labels, _font = _clock_labels(_clock_list(["UTC"], False), QtGui.QFont(), 200.0)
+
+    assert labels == ["UTC"]
+
+
+def test_a_city_less_clock_is_not_dragged_down_to_an_iso_code(qapp):
+    """The middle rung of `_FALLBACKS`, and the reason there are three.
+
+    Abbreviating the labels that carry a city is what buys the room; shortening "India"
+    to "IN" beside them buys nothing, since it was never the label that didn't fit.
+    """
+    from tintaview.ui.flyout import _clock_labels
+
+    clocks = _clock_cfg([
+        ("Europe/Warsaw", True), ("Asia/Kolkata", False),
+        ("America/New_York", True), ("Asia/Tokyo", False),
+    ])
+    flyout = Flyout(cfg=clocks)
+
+    # The real four-column budget: too narrow for "United States/New York", wide enough
+    # for "India" in any sane font.
+    labels, _font = _clock_labels(flyout._clocks(), QtGui.QFont(), 76.0)
+
+    assert labels == ["PL/Warsaw", "India", "US/New York", "Japan"]
+
+
+def test_clock_labels_never_mix_two_styles(qapp):
+    """A band that cannot fit every full country name switches *all* of its columns to
+    the compact form. Mixing them ("Poland/Warsaw" beside "US/New York") reads as two
+    different fields, and which columns fit depends on the system font — so per-column
+    fitting would look inconsistent in a different way on every machine.
+    """
+    from tintaview.ui.flyout import _clock_labels
+
+    zones = ["Europe/Warsaw", "Asia/Kolkata", "America/New_York", "America/Los_Angeles"]
+
+    # Swept rather than asserted at one width: which form fits depends on the system
+    # font, so the invariant under test is the uniformity, not a particular label. Every
+    # clock here shows its city, so all four are the same kind of label and must agree.
+    for width in (40.0, 60.0, 76.0, 100.0, 140.0, 200.0):
+        labels, _font = _clock_labels(_clock_list(zones), QtGui.QFont(), width)
+        compact = {len(label.split("/")[0]) <= 2 for label in labels}
+        assert len(compact) == 1, f"mixed label styles at {width}px: {labels}"
+
+    # Narrow enough that no font can fit "United States/New York": every column is on
+    # the ISO-code form, and the country is still identifiable.
+    labels, _font = _clock_labels(_clock_list(zones), QtGui.QFont(), 40.0)
+    assert [label.split("/")[0] for label in labels] == ["PL", "IN", "US", "US"]
+
+
+def test_a_zone_with_no_country_is_labelled_by_itself(qapp):
+    """`UTC` and the deprecated aliases sit in Qt's catch-all territory, named
+    "Default" — a label of "Default/UTC" would be worse than none."""
+    from tintaview.ui.flyout import _clock_labels
+
+    labels, _font = _clock_labels(_clock_list(["UTC"]), QtGui.QFont(), 200.0)
+
+    assert labels == ["UTC"]
+
+
+def test_clock_zones_drop_the_unknown_and_the_surplus(qapp):
+    """The band renders a `Config` built in code too (tests, the demo), which never went
+    through the loader's own trim — and Qt's Windows backend knows fewer zones than the
+    IANA database, so a zone valid on Linux can be missing there."""
+    from tintaview.core.config import MAX_CLOCKS
+
+    flyout = Flyout(cfg=_clock_cfg([
+        "Europe/Warsaw", "Mars/Olympus", "Asia/Kolkata", "America/New_York",
+        "Europe/Kyiv", "Asia/Tokyo",
+    ]))
+
+    zones = [clock.zone for clock in flyout._clocks()]
+
+    assert "Mars/Olympus" not in zones
+    assert len(zones) <= MAX_CLOCKS
+    assert zones[0] == "Europe/Warsaw"
+
+
+def test_the_clocks_band_pushes_the_agent_sections_down(qapp):
+    """The band is chrome under the title bar, so every section below it moves — if
+    `_layout` kept using the no-band constant the first section would be painted on top
+    of the clocks."""
+    from tintaview.ui.flyout import CONTENT_TOP
+
+    results = _sample_results()
+    without = Flyout(cfg=_clock_cfg([], enabled=False))
+    without.set_results(results)
+    with_band = Flyout(cfg=_clock_cfg(["Europe/Warsaw", "Asia/Kolkata"]))
+    with_band.set_results(results)
+
+    assert without._content_top() == CONTENT_TOP
+    assert with_band._content_top() > CONTENT_TOP
+    assert with_band._layout()[0][0].header_rect.y() == with_band._content_top()
+    assert with_band.height() > without.height()
+    pixmap = QtGui.QPixmap(with_band.size())
+    with_band.render(pixmap)  # must not raise
+    assert not pixmap.isNull()
+
+
+def test_the_clocks_band_is_closed_off_by_its_own_rule(qapp):
+    """The band gets the same divider underneath that the title bar has above it, so it
+    reads as its own strip of chrome and not as a heading for the first agent.
+
+    Sampled from the rendered pixels rather than by counting `drawLine` calls: what
+    matters is that a line is *visible* at the band's bottom edge, in the colour the
+    title bar's rule uses.
+    """
+    from tintaview.ui.flyout import CARD_BG, TOP_BAR_H, _clock_band_height
+
+    flyout = Flyout(cfg=_clock_cfg(["Europe/Warsaw", "Asia/Kolkata"]))
+    flyout.set_results(_sample_results())
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    image = pixmap.toImage()
+
+    x = flyout.width() // 2
+    rule_y = int(TOP_BAR_H + _clock_band_height(flyout.font()))
+    on_rule = QtGui.QColor(image.pixel(x, rule_y))
+    # A few pixels below is plain card, so the rule is a line and not a filled band.
+    below = QtGui.QColor(image.pixel(x, rule_y + 4))
+
+    assert on_rule.lightness() > CARD_BG.lightness()
+    assert below.lightness() == CARD_BG.lightness()
+
+
+def test_the_clocks_band_is_drawn_with_no_agents_enabled(qapp):
+    """It hangs off the title bar, not off a section, so "No agents enabled." must not
+    take the clocks with it."""
+    flyout = Flyout(cfg=_clock_cfg(["Europe/Warsaw"]))
+    flyout.set_results({})
+
+    assert flyout._content_top() > 0
+    assert flyout.height() > Flyout(cfg=_clock_cfg([], enabled=False)).height()
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    assert not pixmap.isNull()
+
+
+def test_the_bands_height_ignores_how_wide_the_current_times_are(qapp):
+    """A 12-hour band is fitted to a smaller font when four columns can't hold
+    "11:33 AM" — but its height must not change with it, or the card would resize under
+    the cursor as 9:59 became 10:00."""
+    zones = ["Europe/Warsaw", "Asia/Kolkata", "America/New_York", "America/Los_Angeles"]
+    short = Flyout(cfg=_clock_cfg(zones, fmt="24h"))
+    long = Flyout(cfg=_clock_cfg(zones, fmt="12h"))
+
+    assert short._content_top() == long._content_top()
+
+
+def test_clocks_tick_only_while_the_card_is_on_screen(qapp):
+    """The flyout is a transient popup; a clock nobody is looking at must cost nothing.
+
+    Also asserts the timer is a single shot: it is re-armed to each minute boundary
+    (`_msecs_to_next_minute`) rather than repeating every second, which is what keeps it
+    correct across a suspend/resume.
+    """
+    flyout = Flyout(cfg=_clock_cfg(["Europe/Warsaw"]))
+    assert not flyout._clock_timer.isActive()
+
+    flyout.show_near(QtCore.QPoint(400, 400))
+    assert flyout._clock_timer.isActive()
+    assert flyout._clock_timer.isSingleShot()
+    assert 0 < flyout._clock_timer.interval() <= 60_050
+
+    flyout.hide()
+    assert not flyout._clock_timer.isActive()
+
+
+def test_a_card_with_the_band_switched_off_never_arms_the_tick(qapp):
+    flyout = Flyout(cfg=_clock_cfg(["Europe/Warsaw"], enabled=False))
+
+    flyout.show_near(QtCore.QPoint(400, 400))
+
+    assert not flyout._clock_timer.isActive()
+    flyout.hide()
 
 
 # --------------------------------------------------------------------------- second launch / quit

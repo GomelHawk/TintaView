@@ -248,7 +248,7 @@ Right-click the tray icon for:
 | **Refresh usage** | Poll every agent now instead of waiting for the 5-minute cycle. |
 | **Sound on confirm** | Play a sound the moment a session first needs your approval. |
 | **Pause lighting** | Hand your devices straight back to Synapse / G HUB / OpenRGB and stop driving them — for recording, streaming or screenshots. The tray icon and the usage panel keep working; only the hardware is released. It is deliberately **not** remembered across restarts, so you can never end up with permanently dead lights and no idea why. |
-| **Settings…** | The settings window (agents, language, colours, engine, update options). |
+| **Settings…** | The settings window (agents, language, clocks, colours, engine, update options). |
 | **Check for updates** | Run the update check now and offer to install. |
 | **Open logs folder** | Open the log directory in your file manager — on Windows that's inside `%LOCALAPPDATA%\TintaView`, which is worth a menu item because nothing else tells you where it is. |
 | **Run diagnostics** | Run the same checks as `tintaview doctor -v` and show the report in a window you can select and copy from — handy when there's no terminal to hand, which on Windows is the normal case. The two steps that ask you a question (the live hook test, the paint self-test) are skipped here — there's nowhere to answer them; run `tintaview doctor -v --paint` in a terminal for those. |
@@ -290,6 +290,43 @@ result is cached on disk. Right after switching language, a section still showin
 numbers keeps its old wording until the next poll (or the tray menu's "Refresh usage")
 replaces it.
 
+## World clocks
+
+Optional: a band of up to four clocks in the usage panel, between the TintaView title
+and the first agent. Off until you switch it on, in the tray menu's **Settings…**
+window on the *Clocks* tab.
+
+Each clock is picked by **country**, then by city where the country has more than one
+zone (Poland and India have one each; the USA has 29, so it asks). What the panel prints
+under each time is the country and, if you tick **City** on that row, the city with it:
+
+```
+  21:17        00:47        15:17        04:17
+PL/Warsaw      India      US/New York    Japan
+```
+
+The **City** tick box is per clock, because it is a judgement about the place — two
+American clocks need their cities to be told apart, a lone Indian one does not. It only
+changes the label; the time is the same either way. Whether a country is spelled out
+("Poland/Warsaw") or abbreviated ("PL/Warsaw") is *not* a setting: the panel measures
+what fits its 380px card in your system font and shortens as little as it has to, always
+treating labels of the same kind alike. One clock keeps full names at any size; four with
+cities generally do not.
+
+**Time format** is one setting for all four — `24-hour (20:42)` or `12-hour (8:42 PM)`.
+Deliberately not per clock: a card mixing the two reads as a bug rather than a preference.
+
+Daylight saving needs no attention. Each time is converted from its zone at the moment it
+is drawn, so a zone that shifts in March and October (Warsaw) follows its own rules, one
+that never shifts (Kolkata, +5:30) stays put, and a future change to the time-zone
+database arrives with your OS rather than needing a TintaView update. The clocks tick on
+the minute, and only while the panel is open.
+
+Configured entirely in that dialog, or by hand — see `ui.clocks.*` and
+`[[ui.clocks.clock]]` in [Configuration](#configuration). The console setup wizard does
+not cover clocks (it stays focused on hooks, engines and autostart), same as the chime
+and the local-estimate switch.
+
 ## Configuration
 
 One file: `~/.tintaview/config.toml` (Windows: `%LOCALAPPDATA%\TintaView\config.toml`),
@@ -321,6 +358,9 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `stats.show_estimate` | `true` | Show the local token/cost estimate under each agent's official rows. Also a tick box in **Settings…**. Off skips the transcript scan entirely, not just the rows. |
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
+| `ui.clocks.enabled` | `false` | Show world clocks in the usage panel — a band of up to four times between the TintaView title and the first agent. Also a tick box in **Settings…** → **Clocks**. |
+| `[[ui.clocks.clock]]` | *(none)* | One table per clock, in display order, up to four. `zone` is an IANA id (`zone = 'Europe/Warsaw'`); `show_city` (default `true`) labels that clock "Poland/Warsaw" rather than "Poland". Each clock follows its own zone's daylight-saving changes — nothing to update twice a year. Pick them by country in **Settings…** → **Clocks**; extras beyond four are dropped on load. |
+| `ui.clocks.format` | `24h` | `24h` (20:42) or `12h` (8:42 PM). One setting for every clock, not per clock. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |

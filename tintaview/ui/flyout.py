@@ -19,12 +19,13 @@ import math
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QRectF, Qt
 
-from tintaview.core.config import Config
+from tintaview.core.config import MAX_CLOCKS, ClockConfig, Config
 from tintaview.i18n import t
 from tintaview.stats import format as fmt
 from tintaview.ui import icons
@@ -80,7 +81,212 @@ _REASON_NO_LEAD = ("—", "–", "-", "·")
 TOP_BAR_H = 40  # logo + "TintaView" + settings/close row, above the separator
 TOP_BAR_BTN = 20.0  # settings/close hit-box side (also the icon's own bounding box)
 TOP_BAR_BTN_GAP = 8.0  # gap between the settings and close hit-boxes
-CONTENT_TOP = TOP_BAR_H + SECTION_GAP  # y where the first agent section begins
+#: y where the first agent section begins when there is no clocks band. With one, the
+#: band's measured height is added — `Flyout._content_top`, which every consumer of this
+#: goes through, because the band is optional and its height depends on the system font.
+CONTENT_TOP = TOP_BAR_H + SECTION_GAP
+
+# --------------------------------------------------------------------------- clocks band
+
+#: The two type sizes in the clocks band. The time is deliberately the largest text on
+#: the card — it is what the band exists to be read at a glance — and the zone id under
+#: it only has to be legible enough to confirm *which* place a time belongs to.
+CLOCK_TIME_PT = 15
+#: Floor `_fit_time_font` may shrink the time to. Four 12-hour columns ("11:33 AM") on a
+#: 380px card do not fit at the preferred size — they overlapped their neighbours and the
+#: fourth was clipped mid-word — and a locale whose am/pm text is longer than English's,
+#: or a wider system font, moves that boundary again. So the size is fitted to what is
+#: actually being drawn rather than assumed, and this is how small that may go before
+#: legibility matters more than the last column's width.
+CLOCK_TIME_PT_MIN = 10
+CLOCK_ZONE_PT = 8
+#: Floor for the zone label, fitted the same way and for the same reason as the time —
+#: "Poland/Warsaw" is 83px in this repo's CI font and a four-column card gives it 76.
+CLOCK_ZONE_PT_MIN = 6
+CLOCK_LINE_GAP = 0.0  # between a time and the zone id under it (both rects are tight)
+CLOCK_BAND_PAD = 9.0  # above the times and below the zone ids
+CLOCK_LABEL_INSET = 5.0  # kept clear either side of a zone id, so it can't touch a divider
+CLOCK_TIME_INSET = 4.0  # ditto for a time, which is `_fit_time_font`'s width budget
+
+#: The vertical divider between two clocks. Fainter than `BORDER`: it separates two
+#: readings of the same kind, so it should be the last thing on the card you notice.
+CLOCK_SEP = QtGui.QColor(255, 255, 255, 26)
+
+
+def _clock_fonts(base: QtGui.QFont) -> tuple[QtGui.QFont, QtGui.QFont]:
+    """(time font, zone-id font) derived from the widget's own font."""
+    time_font = QtGui.QFont(base)
+    time_font.setPointSize(CLOCK_TIME_PT)
+    zone_font = QtGui.QFont(base)
+    zone_font.setPointSize(CLOCK_ZONE_PT)
+    return time_font, zone_font
+
+
+def _clock_band_height(base: QtGui.QFont) -> float:
+    """Measured from the fonts rather than fixed as a constant.
+
+    Same reasoning as `_wrap_reason`'s: the card is laid out in points against whatever
+    the system font happens to be, and a hardcoded band height that fits on one machine
+    clips a descender or leaves a gap on another.
+
+    Always the *preferred* time size, even when `_fit_time_font` ends up drawing smaller.
+    The band's height then depends only on the fonts — not on how wide the current times
+    happen to be — so the card doesn't resize under the cursor when 9:59 becomes 10:00.
+    """
+    time_font, zone_font = _clock_fonts(base)
+    return (CLOCK_BAND_PAD + QtGui.QFontMetricsF(time_font).height() + CLOCK_LINE_GAP
+            + QtGui.QFontMetricsF(zone_font).height() + CLOCK_BAND_PAD)
+
+
+@lru_cache(maxsize=64)
+def _zone_valid(zone_id: str) -> bool:
+    """Does Qt know this IANA id? Cached — the answer cannot change while we run, and
+    the question is asked from `_layout`, which runs on every paint and mouse-move.
+
+    Qt, not `zoneinfo`, on purpose: Windows ships no tz database, so `zoneinfo` there
+    needs the `tzdata` wheel — see `ClocksConfig`. The trade-off is that Qt's Windows
+    backend only knows the zones Windows knows, which is why an id is checked at all
+    rather than assumed good.
+    """
+    return QtCore.QTimeZone(zone_id.encode()).isValid()
+
+
+def _clock_time(zone_id: str, fmt: str, now: QtCore.QDateTime | None = None) -> str:
+    """The current time in `zone_id`, or "" for a zone Qt doesn't know.
+
+    Converted from the live zone on every call, never from a stored offset: that is what
+    makes a DST change (and any future tz database update) show up on its own.
+    """
+    tz = QtCore.QTimeZone(zone_id.encode())
+    if not tz.isValid():
+        return ""
+    utc = QtCore.QDateTime.currentDateTimeUtc() if now is None else now
+    # "AP" renders the locale's own am/pm text, which is what a 12-hour clock is for;
+    # 24-hour stays zero-padded so four columns line up.
+    return utc.toTimeZone(tz).toString("h:mm AP" if fmt == "12h" else "HH:mm")
+
+
+def _fit_time_font(base: QtGui.QFont, texts: list[str], width: float) -> QtGui.QFont:
+    """The largest time size, `CLOCK_TIME_PT` down to `CLOCK_TIME_PT_MIN`, at which
+    every one of `texts` fits `width`.
+
+    Fitted to the strings actually being drawn because the inputs vary more than a fixed
+    size can absorb: 24-hour "20:33" against 12-hour "11:33 AM", one column against
+    four, English am/pm against a locale with longer words, and whatever the system font
+    is. Measured, not guessed — an unfitted size drew four 12-hour columns straight
+    through each other.
+    """
+    font = QtGui.QFont(base)
+    for points in range(CLOCK_TIME_PT, CLOCK_TIME_PT_MIN - 1, -1):
+        font.setPointSize(points)
+        metrics = QtGui.QFontMetricsF(font)
+        if all(metrics.horizontalAdvance(text) <= width for text in texts):
+            break
+    return font
+
+
+@lru_cache(maxsize=64)
+def _zone_place(zone_id: str) -> tuple[str, str, str]:
+    """(country, ISO code, city) for an IANA id — ("Poland", "PL", "Warsaw").
+
+    The country is Qt's, from the zone's own territory, so it needs no table here and
+    stays in step with whatever tz database the OS has. Cached because it cannot change
+    while we run and the band is laid out on every repaint.
+    """
+    territory = QtCore.QTimeZone(zone_id.encode()).territory()
+    city = zone_id.rsplit("/", 1)[-1].replace("_", " ")
+    if territory in (QtCore.QLocale.Country.AnyCountry, QtCore.QLocale.Country.World):
+        # Qt's catch-all territories, named "Default" and "world" — `UTC` and the
+        # deprecated aliases land here. Neither name says anything about where the time
+        # is, so those zones are labelled by their own name alone.
+        return "", "", city
+    return QtCore.QLocale.territoryToString(territory), QtCore.QLocale.territoryToCode(territory), city
+
+
+def _zone_label(zone_id: str, *, code: bool, city: bool) -> str:
+    """"Poland/Warsaw", "PL/Warsaw" (`code`), or "Poland" (no `city`).
+
+    Country/city rather than the raw IANA id ("Europe/Warsaw"): the region prefix is an
+    artefact of how the tz database is organised, and the clock is configured by country
+    in the first place, so that is the vocabulary the card answers in.
+
+    A zone with no country falls back to its own name whatever the arguments say — Qt
+    files `UTC` and the deprecated aliases under a territory called "Default", and
+    "Default" is not a place.
+    """
+    country, iso, town = _zone_place(zone_id)
+    prefix = iso if code else country
+    if not prefix:
+        return town
+    return f"{prefix}/{town}" if city else prefix
+
+
+#: How `_clock_labels` gives way when the full wording doesn't fit, as
+#: (abbreviate the labels *with* a city, abbreviate the labels without one). Ordered by
+#: what each step costs the reader: the city labels are the long ones, so they abbreviate
+#: first, and a label that is only a country name shortens last because it was never the
+#: problem. Applied to whole kinds of label, never to individual columns.
+_FALLBACKS: tuple[tuple[bool, bool], ...] = ((False, False), (True, False), (True, True))
+
+
+def _clock_labels(clocks: list[ClockConfig], base: QtGui.QFont,
+                  width: float) -> tuple[list[str], QtGui.QFont]:
+    """The band's labels and the font they fit in — one form per *kind* of label.
+
+    Whether a clock shows its city is the user's, per clock (`ClockConfig.show_city`):
+    it is a judgement about the place, since two American zones need a city to be told
+    apart and the one in India does not. Whether a country is spelled out or abbreviated
+    is not that — it is a question about the space available, which is decided here.
+
+    Four columns leave ~76px each, which fits "India" and "PL/Warsaw" but neither
+    "Poland/Warsaw" (83px) nor "United States/New York" (128px), so something has to
+    give. `_FALLBACKS` gives way in order of how much each step costs the reader, and
+    every label of the same kind always takes the same step:
+
+        (full, full)  Poland/Warsaw · India · United States/New York · Japan
+        (code, full)  PL/Warsaw · India · US/New York · Japan
+        (code, code)  PL/Warsaw · IN · US/New York · JP
+
+    Each is tried at `CLOCK_ZONE_PT` and shrunk towards `CLOCK_ZONE_PT_MIN` before the
+    next one is considered, so the fuller wording survives wherever it can.
+
+    The middle step is the point of having three. Abbreviating the *city* labels is what
+    buys the room, and dragging "India" down to "IN" alongside them buys nothing — it
+    was already short. What must not happen is two labels of the same kind disagreeing
+    ("Poland/Warsaw" next to "IN/Kolkata"), because which of them fits depends on the
+    system font, so the same config would look inconsistent in a different way on every
+    machine.
+    """
+    font = QtGui.QFont(base)
+    labels: list[str] = []
+    for city_code, country_code in _FALLBACKS:
+        labels = [
+            _zone_label(c.zone, code=city_code if c.show_city else country_code,
+                        city=c.show_city)
+            for c in clocks
+        ]
+        for points in range(CLOCK_ZONE_PT, CLOCK_ZONE_PT_MIN - 1, -1):
+            font.setPointSize(points)
+            metrics = QtGui.QFontMetricsF(font)
+            if all(metrics.horizontalAdvance(label) <= width for label in labels):
+                return labels, font
+    # Nothing fits even compact and small: elide, still uniformly. Reachable with a very
+    # wide system font, or a city name long enough to beat the column on its own.
+    font.setPointSize(CLOCK_ZONE_PT_MIN)
+    metrics = QtGui.QFontMetricsF(font)
+    return [metrics.elidedText(label, Qt.ElideRight, width) for label in labels], font
+
+
+def _msecs_to_next_minute() -> int:
+    """Delay until the top of the next minute, plus a little slack.
+
+    Re-armed every tick instead of a 1-second repeating timer: with HH:MM there is
+    nothing to redraw in between, and a boundary-aligned single shot re-syncs itself
+    after a suspend/resume rather than drifting. The slack stops a tick that fires a
+    hair early from repainting the minute it was supposed to replace.
+    """
+    since_minute = QtCore.QTime.currentTime().msecsSinceStartOfDay() % 60_000
+    return max(250, 60_000 - since_minute + 50)
 
 #: Effective session status (see `core.events`/`core.state.StateStore`) -> the
 #: `ColorsConfig` attribute driving that status's colour. `"none"` (no session open
@@ -491,6 +697,12 @@ class Flyout(QtWidgets.QWidget):
         self._on_toggle = on_toggle
         self.hidden_at = 0.0
         self._anchor: QtCore.QPoint | None = None
+        # Repaints the clocks band on each minute boundary, and only while the card is
+        # on screen (`_sync_clock_timer`) — the flyout is a transient popup, so a clock
+        # nobody is looking at costs nothing.
+        self._clock_timer = QtCore.QTimer(self)
+        self._clock_timer.setSingleShot(True)
+        self._clock_timer.timeout.connect(self._on_clock_tick)
         self.resize(CARD_W, 140)
 
     def event(self, e: QtCore.QEvent) -> bool:
@@ -500,11 +712,20 @@ class Flyout(QtWidgets.QWidget):
             self.hide()
         return super().event(e)
 
+    def showEvent(self, e: QtGui.QShowEvent) -> None:
+        # A card shown after a long spell hidden would otherwise open on whatever minute
+        # was current when it was last painted, so the times are recomputed here rather
+        # than waiting for the first tick.
+        self.update()
+        self._sync_clock_timer()
+        super().showEvent(e)
+
     def hideEvent(self, e: QtGui.QHideEvent) -> None:
         # Recorded so the tray can tell "this click just closed the flyout via
         # focus-out" apart from "this click should open it" — see tray.py's
         # CLICK_REOPEN_GUARD_S.
         self.hidden_at = time.monotonic()
+        self._clock_timer.stop()
         super().hideEvent(e)
 
     # --- positioning -------------------------------------------------------------
@@ -542,7 +763,40 @@ class Flyout(QtWidgets.QWidget):
         """`results`: dict[str, UsageResult] keyed by agent key, in display order."""
         self._results = dict(results or {})
         self._resize_to_content()
+        # Also the path a settings change arrives on: `TrayApp._apply_settings` mirrors
+        # `ui.clocks` into the live config (this widget holds that same object) and then
+        # calls this, so turning the band on or off has to re-arm the tick here.
+        self._sync_clock_timer()
         self.update()
+
+    # --- clocks ------------------------------------------------------------------
+
+    def _clocks(self) -> list[ClockConfig]:
+        """The clocks to draw, in order — empty when the band is switched off.
+
+        `MAX_CLOCKS` is applied here as well as by `core.config._clocks`, because a
+        `Config` built in code (tests, the demo) never goes through the loader.
+        """
+        clocks = self._cfg.ui.clocks
+        if not clocks.enabled:
+            return []
+        return [c for c in clocks.clocks[:MAX_CLOCKS] if _zone_valid(c.zone)]
+
+    def _content_top(self) -> float:
+        """y of the first agent section: `CONTENT_TOP`, plus the clocks band if shown."""
+        if not self._clocks():
+            return float(CONTENT_TOP)
+        return CONTENT_TOP + _clock_band_height(self.font())
+
+    def _sync_clock_timer(self) -> None:
+        if self.isVisible() and self._clocks():
+            self._clock_timer.start(_msecs_to_next_minute())
+        else:
+            self._clock_timer.stop()
+
+    def _on_clock_tick(self) -> None:
+        self.update()
+        self._sync_clock_timer()
 
     def set_status(self, status: dict[str, str], tools: dict[str, str] | None = None) -> None:
         """`status`: dict[str, str] of agent key -> effective session status, from
@@ -578,7 +832,7 @@ class Flyout(QtWidgets.QWidget):
         paint/mouse-move: a handful of agents, no QPainter involved — only the
         `QFontMetrics` an errored section's wrapped reason has to be measured with."""
         x, w = float(PAD), float(CARD_W - 2 * PAD)
-        y = float(CONTENT_TOP)
+        y = self._content_top()
         reason_metrics = QtGui.QFontMetrics(_reason_font(self.font()))
         sections: list[_SectionLayout] = []
         for i, result in enumerate(self._results.values()):
@@ -641,7 +895,7 @@ class Flyout(QtWidgets.QWidget):
 
     def _resize_to_content(self) -> None:
         if not self._results:
-            h = CONTENT_TOP + 20 + 8 + PAD  # "no agents enabled" message
+            h = self._content_top() + 20 + 8 + PAD  # "no agents enabled" message
         else:
             _sections, y = self._layout()
             h = y + PAD
@@ -703,6 +957,55 @@ class Flyout(QtWidgets.QWidget):
 
     # --- paint ------------------------------------------------------------------
 
+    def _paint_clocks(self, p: QtGui.QPainter, x: float, w: float) -> None:
+        """The clocks band: up to four equal columns, each a big time over its zone id.
+
+        Drawn even when no agent is enabled — it is chrome hanging off the title bar,
+        not a section, which is also why it sits at a fixed y and never collapses: a
+        band that moved as sections opened and closed would be hard to read at a glance,
+        and glanceability is the whole point of it.
+        """
+        clocks = self._clocks()
+        if not clocks:
+            return
+        preferred_time, preferred_zone = _clock_fonts(self.font())
+        band = QRectF(x, TOP_BAR_H, w, _clock_band_height(self.font()))
+        col_w = band.width() / len(clocks)
+        fmt = self._cfg.ui.clocks.format
+        times = [_clock_time(clock.zone, fmt) for clock in clocks]
+        time_font = _fit_time_font(self.font(), times, col_w - 2 * CLOCK_TIME_INSET)
+        labels, zone_font = _clock_labels(clocks, self.font(), col_w - 2 * CLOCK_LABEL_INSET)
+        # Both rows sit in rects sized for the *preferred* fonts — what
+        # `_clock_band_height` reserved — so text fitted smaller stays centred in the
+        # band instead of riding up against the title bar, and the band's height never
+        # depends on how wide the current times happen to be.
+        time_h = QtGui.QFontMetricsF(preferred_time).height()
+        zone_h = QtGui.QFontMetricsF(preferred_zone).height()
+        for i, (text, label) in enumerate(zip(times, labels, strict=True)):
+            left = band.x() + i * col_w
+            if i:
+                # Short of the band's full height, so the divider reads as separating
+                # two readings rather than as a rule boxing the band in.
+                p.setPen(QtGui.QPen(CLOCK_SEP))
+                p.drawLine(QtCore.QPointF(left, band.y() + CLOCK_BAND_PAD),
+                           QtCore.QPointF(left, band.bottom() - CLOCK_BAND_PAD))
+            time_rect = QRectF(left, band.y() + CLOCK_BAND_PAD, col_w, time_h)
+            p.setFont(time_font)
+            p.setPen(TEXT)
+            p.drawText(time_rect, Qt.AlignHCenter | Qt.AlignVCenter, text)
+            label_rect = QRectF(left, time_rect.bottom() + CLOCK_LINE_GAP, col_w, zone_h)
+            p.setFont(zone_font)
+            p.setPen(SUBTLE)
+            p.drawText(label_rect, Qt.AlignHCenter | Qt.AlignVCenter, label)
+
+        # Closed off underneath with the same rule the title bar sits on, so the band
+        # reads as its own strip of chrome rather than as a heading for the first agent.
+        # Only when there are clocks: with the band off, the title bar's own rule is the
+        # single divider above the sections and a second one would box in nothing.
+        p.setPen(QtGui.QPen(BORDER))
+        p.drawLine(QtCore.QPointF(band.x(), band.bottom()),
+                   QtCore.QPointF(band.right(), band.bottom()))
+
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
@@ -743,12 +1046,15 @@ class Flyout(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(BORDER))
         p.drawLine(QtCore.QPointF(x, TOP_BAR_H), QtCore.QPointF(x + w, TOP_BAR_H))
 
+        self._paint_clocks(p, x, w)
+
         if not self._results:
+            top = self._content_top()
             f.setPointSize(10)
             p.setFont(f)
             p.setPen(SUBTLE)
             p.drawText(
-                QRectF(x, CONTENT_TOP, w, self.height() - CONTENT_TOP - PAD),
+                QRectF(x, top, w, self.height() - top - PAD),
                 Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
                 t("flyout.no_agents"),
             )

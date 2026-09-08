@@ -8,7 +8,13 @@ Everything writes into `tmp_path` — none of this may touch a real `~/.tintavie
 from __future__ import annotations
 
 from tintaview.core import config as config_mod
-from tintaview.core.config import CONFIG_VERSION, Config, EngineConfig
+from tintaview.core.config import (
+    CONFIG_VERSION,
+    MAX_CLOCKS,
+    ClockConfig,
+    Config,
+    EngineConfig,
+)
 
 
 def _write(path, text: str) -> None:
@@ -219,3 +225,96 @@ def test_a_non_list_enabled_agents_falls_back(tmp_path):
 enabled = 'claude'
 """)
     assert config_mod.load(path).enabled_agents == ["claude"]
+
+
+# --------------------------------------------------------------------------- world clocks
+
+
+def test_clocks_round_trip_through_dumps_and_load(tmp_path):
+    path = tmp_path / "config.toml"
+    cfg = Config()
+    cfg.ui.clocks.enabled = True
+    cfg.ui.clocks.format = "12h"
+    cfg.ui.clocks.clocks = [
+        ClockConfig(zone="Europe/Warsaw", show_city=True),
+        ClockConfig(zone="Asia/Kolkata", show_city=False),
+    ]
+
+    config_mod.save(cfg, path)
+    loaded = config_mod.load(path)
+
+    assert loaded.ui.clocks.enabled is True
+    assert loaded.ui.clocks.format == "12h"
+    assert loaded.ui.clocks.clocks == cfg.ui.clocks.clocks  # order included
+    text = path.read_text(encoding="utf-8")
+    assert "[ui.clocks]" in text
+    assert text.count("[[ui.clocks.clock]]") == 2
+    # The array of tables must never also be written as an inline value in `[ui.clocks]`
+    # — `tomllib` would read a list of dicts back as strings.
+    assert "clocks = " not in text
+
+
+def test_a_config_with_no_clocks_table_gets_the_defaults(tmp_path):
+    """Every config.toml written before this feature existed has a `[ui]` and no
+    `[ui.clocks]` — it must load, with the band simply off."""
+    path = tmp_path / "config.toml"
+    _write(path, "version = 2\n\n[ui]\nchime_on_confirm = true\nlanguage = 'pl'\n")
+
+    loaded = config_mod.load(path)
+
+    assert loaded.ui.language == "pl"
+    assert loaded.ui.clocks.enabled is False
+    assert loaded.ui.clocks.clocks == []
+    assert loaded.ui.clocks.format == "24h"
+
+
+def test_an_unknown_clock_format_falls_back_to_24h(tmp_path):
+    path = tmp_path / "config.toml"
+    _write(path, "[ui.clocks]\nenabled = true\nformat = 'military'\n")
+
+    assert config_mod.load(path).ui.clocks.format == "24h"
+
+
+def test_more_clocks_than_the_band_shows_are_trimmed_on_load(tmp_path):
+    """Trimmed rather than kept, so the config equals what is on screen — the extras
+    would otherwise sit in the file, invisible, with nothing to explain why."""
+    path = tmp_path / "config.toml"
+    zones = ["Europe/Warsaw", "Asia/Kolkata", "America/New_York", "Europe/Kyiv", "Asia/Tokyo"]
+    _write(path, "".join(f"[[ui.clocks.clock]]\nzone = '{z}'\n\n" for z in zones))
+
+    loaded = config_mod.load(path)
+
+    assert len(loaded.ui.clocks.clocks) == MAX_CLOCKS
+    assert [c.zone for c in loaded.ui.clocks.clocks] == zones[:MAX_CLOCKS]
+
+
+def test_a_clock_table_with_no_zone_is_dropped(tmp_path):
+    """`_build` would hand back the "" default happily, and the band would then reserve
+    a column it can draw nothing in."""
+    path = tmp_path / "config.toml"
+    _write(path, "[[ui.clocks.clock]]\nzone = 'Europe/Warsaw'\n\n"
+                 "[[ui.clocks.clock]]\nshow_city = false\n\n"
+                 "[[ui.clocks.clock]]\nzone = '   '\n")
+
+    clocks = config_mod.load(path).ui.clocks.clocks
+
+    assert [c.zone for c in clocks] == ["Europe/Warsaw"]
+
+
+def test_a_clocks_show_city_defaults_to_true_when_the_table_omits_it(tmp_path):
+    path = tmp_path / "config.toml"
+    _write(path, "[[ui.clocks.clock]]\nzone = 'Europe/Warsaw'\n")
+
+    assert config_mod.load(path).ui.clocks.clocks[0].show_city is True
+
+
+def test_a_non_list_clock_key_falls_back_to_no_clocks(tmp_path):
+    """`clock = "Europe/Warsaw"` is a plausible hand-edit, and must not stop the config
+    from loading."""
+    path = tmp_path / "config.toml"
+    _write(path, "[ui.clocks]\nenabled = true\nclock = 'Europe/Warsaw'\n")
+
+    loaded = config_mod.load(path)
+
+    assert loaded.ui.clocks.enabled is True
+    assert loaded.ui.clocks.clocks == []

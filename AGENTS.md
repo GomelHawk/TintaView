@@ -48,10 +48,12 @@ Two habits follow from that. Keep unrelated work out of one commit, so a reviewe
 see what a change contains. And when the description doesn't mention something the change adds,
 that is the bug — not a detail to leave out for brevity.
 
-At the end of implementing any update or feature, give a short commit-style description of the
-change (what changed, in one or two sentences) — that description is what the maintainer commits
-with, and is the reason it reads like a commit message despite the rule above. **Really short**
-— one line naming what changed. Not why, not how; that belongs in the comments and in this file.
+At the end of implementing anything — a feature, an update, a bug fix, a one-line change — give a
+short commit-style description of the change (what changed, in one or two sentences). That
+description is what the maintainer commits with, and is the reason it reads like a commit message
+despite the rule above. **Really short** — one line naming what changed. Not why, not how; that
+belongs in the comments and in this file. It is the last thing in the reply, after the
+verified/not-verified line the next section asks for.
 
 ## Definition of done
 
@@ -812,6 +814,45 @@ smoke test that the wheel installs and `python -m tintaview` works, then it atta
 GitHub Release. Building on Linux also keeps `install.sh` from being CRLF-mangled on the way into
 the release — see `.gitattributes`. Third-party actions are pinned to a commit SHA (with the tag in
 a comment) and `.github/dependabot.yml` proposes the bumps; `ci.yml` runs with `contents: read`.
+
+**Asked for a release, or for release notes?** Write a detailed description of it, derived from
+**every commit on `main` after the most recent tag** — not from memory, not from what this session
+happens to have worked on, and not from the working tree (uncommitted work is not in the release):
+
+```sh
+LAST=$(git describe --tags --abbrev=0)          # e.g. v0.4.6
+git log --no-merges --pretty='%h %s' "$LAST..main"
+git diff --shortstat "$LAST..main"              # scale, so a thin write-up is visibly wrong
+git show --stat <sha>                           # for any commit whose subject doesn't say enough
+```
+
+State the range you used (`v0.4.6..main`, N commits) at the top, so the maintainer can check the
+notes against the same list you read.
+
+**Read the commits, not just their subjects.** In the v0.4.6..HEAD range alone, `37d36ad` is
+"Removed not used functionality" and `49c8e64` is "Messages align fix" — neither says what
+changed, and one 1464-line commit (`c26b34b`) once hid three unrequested features behind a subject
+that mentioned none of them. A subject is a lead, not a source.
+
+What the description has to contain:
+
+- **Grouped by what it means to a user** — added / changed / fixed / internal — with each item
+  naming the effect, not the file. "The estimate tick box now takes effect without a restart"
+  beats "mirror `stats.show_estimate` in `_apply_settings`".
+- **Every new, renamed or removed `config.toml` key and settings control**, spelled out. Those are
+  the things a user has to go and look at, and a renamed key is the one change that can silently
+  drop someone's setting.
+- **Anything needing an action on upgrade** — re-running `tintaview setup`, reinstalling hooks, a
+  changed engine default — called out on its own, not buried in a list.
+- **The internal-only commits too**, in their own group. Omitting them makes the notes look
+  thinner than the diff, and a reviewer comparing the two has to work out which of you is wrong.
+- **A suggested version number**, with the reasoning in one clause (new user-visible feature →
+  minor; fixes only → patch). A suggestion: the tag is the maintainer's.
+
+Then stop. **Do not tag, do not push, do not create or edit the GitHub Release** — the tag *is*
+the version (setuptools-scm reads it, `build.yml` fires on it), so tagging ships a release, and
+that is the maintainer's call for exactly the reasons under "Never commit". If a commit's effect
+can't be worked out from the diff, say so in the notes rather than guessing at it.
 
 ## Testing conventions
 
