@@ -50,7 +50,45 @@ that is the bug — not a detail to leave out for brevity.
 
 At the end of implementing any update or feature, give a short commit-style description of the
 change (what changed, in one or two sentences) — that description is what the maintainer commits
-with, and is the reason it reads like a commit message despite the rule above.
+with, and is the reason it reads like a commit message despite the rule above. **Really short**
+— one line naming what changed. Not why, not how; that belongs in the comments and in this file.
+
+## Definition of done
+
+Every rule here exists because a change was reported as working when it was not. They are cheap
+to follow and each one has already caught something.
+
+**Run it.** A change that touches the tray, the flyout or the settings dialog is not finished
+until the app has actually been launched and the change observed there — see the `run` skill.
+A green test, an `QT_QPA_PLATFORM=offscreen` render and a config round-trip are all *proxies*,
+and every one of them can pass while the feature does nothing. `stats.show_estimate` shipped as
+a tick box that saved correctly to `config.toml` and changed nothing in the running tray,
+behind a passing test and a rendered screenshot of the dialog.
+
+**Say what was verified and what wasn't.** One line at the end of the change. Writing "verified:
+the value reaches `config.toml`; not verified: that the running tray picks it up" is usually
+enough to see the hole before the maintainer does. Never describe a proxy as if it were the
+thing — an offscreen render is not "I saw it work", and neither is a passing test.
+
+**Never fabricate what can be fetched.** A screenshot, a number or an example that stands in for
+real data must say so in the same breath. A flyout render in this session hand-built a Cursor
+section rather than calling the provider; it happened to match reality, which is luck, not
+verification.
+
+**Derive tests from the source of truth, never from a hand-written list.** A test whose name
+claims to check "every" field must enumerate them — `dataclasses.fields`, the registry dict, the
+catalogue keys — or it silently checks only what someone remembered to add.
+`test_apply_settings_mirrors_every_field_it_can_write` was green for exactly the field it was
+missing. Don't trust a test by its name; open it.
+
+**A clean answer to a nearby question is not an answer.** Checking whether the console wizard
+also needed the new field returned "no, it never touches `stats.*`" — true, and it felt like it
+had settled "where else does this field have to appear". It hadn't: the answer was
+`TrayApp._apply_settings`, a third site nobody had asked about. When a check comes back clean,
+ask what it did *not* cover.
+
+**Keep unrelated work out of one change.** Three unrequested features hid inside `c26b34b` —
+1464 lines across 24 files — for a week. At 200 lines they would have been obvious.
 
 ## Layout
 
