@@ -1789,6 +1789,21 @@ def _clock_list(zones, show_city=True):
     return [ClockConfig(z, show_city) for z in zones]
 
 
+def _label_width(labels, points) -> float:
+    """The width `labels` need at `points` — how the clock-label tests size their budget.
+
+    Never a pixel constant. A budget picked against this machine's font is a test that
+    fails somewhere else: at a hardcoded 76px, Windows CI (whose offscreen font is much
+    wider) could not fit even "Poland" and landed two rungs further down `_FALLBACKS`
+    than the assertion expected. Sizing the budget from the very strings the rung is
+    supposed to produce makes the assertion mean the same thing in any font.
+    """
+    font = QtGui.QFont()
+    font.setPointSize(points)
+    metrics = QtGui.QFontMetricsF(font)
+    return max(metrics.horizontalAdvance(label) for label in labels) + 2.0
+
+
 def _utc(year, month, day, hour, minute=0) -> QtCore.QDateTime:
     return QtCore.QDateTime(QtCore.QDate(year, month, day), QtCore.QTime(hour, minute),
                             QtCore.QTimeZone.utc())
@@ -1842,19 +1857,20 @@ def test_clock_labels_name_the_country_and_the_city(qapp):
 
 
 def test_clock_labels_can_drop_the_city(qapp):
-    """The point of the switch: a country on its own is short enough that four columns
-    keep the *full* name, where "Country/City" has to fall back to an ISO code."""
-    from tintaview.ui.flyout import _clock_labels
+    """The point of the switch: a country on its own is short enough to be spelled out
+    in a column where "Country/City" has to fall back to an ISO code."""
+    from tintaview.ui.flyout import CLOCK_ZONE_PT, _clock_labels
 
     zones = ["Europe/Warsaw", "Asia/Kolkata", "America/New_York", "Asia/Tokyo"]
-    four_column_width = 76.0
+    countries = ["Poland", "India", "United States", "Japan"]
+    # Exactly enough room for the country names and no more — so "United States/New
+    # York" cannot fit and the city form must give way, in any font.
+    width = _label_width(countries, CLOCK_ZONE_PT)
 
-    with_city, _font = _clock_labels(_clock_list(zones, True), QtGui.QFont(),
-                                     four_column_width)
-    without_city, _font = _clock_labels(_clock_list(zones, False), QtGui.QFont(),
-                                        four_column_width)
+    with_city, _font = _clock_labels(_clock_list(zones, True), QtGui.QFont(), width)
+    without_city, _font = _clock_labels(_clock_list(zones, False), QtGui.QFont(), width)
 
-    assert without_city == ["Poland", "India", "United States", "Japan"]
+    assert without_city == countries
     # The city form still names a city, whichever of its two variants fitted — so the
     # switch is doing something, without this test depending on which one that was.
     assert all("/" in label for label in with_city)
@@ -1892,19 +1908,21 @@ def test_a_city_less_clock_is_not_dragged_down_to_an_iso_code(qapp):
     Abbreviating the labels that carry a city is what buys the room; shortening "India"
     to "IN" beside them buys nothing, since it was never the label that didn't fit.
     """
-    from tintaview.ui.flyout import _clock_labels
+    from tintaview.ui.flyout import CLOCK_ZONE_PT, CLOCK_ZONE_PT_MIN, _clock_labels
 
-    clocks = _clock_cfg([
+    flyout = Flyout(cfg=_clock_cfg([
         ("Europe/Warsaw", True), ("Asia/Kolkata", False),
         ("America/New_York", True), ("Asia/Tokyo", False),
-    ])
-    flyout = Flyout(cfg=clocks)
+    ]))
+    middle_rung = ["PL/Warsaw", "India", "US/New York", "Japan"]
+    width = _label_width(middle_rung, CLOCK_ZONE_PT)
+    # The premise: that budget cannot hold the full form even shrunk to the floor, so
+    # the ladder has to step down — and this is the step it must stop on.
+    assert width < _label_width(["United States/New York"], CLOCK_ZONE_PT_MIN)
 
-    # The real four-column budget: too narrow for "United States/New York", wide enough
-    # for "India" in any sane font.
-    labels, _font = _clock_labels(flyout._clocks(), QtGui.QFont(), 76.0)
+    labels, _font = _clock_labels(flyout._clocks(), QtGui.QFont(), width)
 
-    assert labels == ["PL/Warsaw", "India", "US/New York", "Japan"]
+    assert labels == middle_rung
 
 
 def test_clock_labels_never_mix_two_styles(qapp):

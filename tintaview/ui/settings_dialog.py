@@ -124,28 +124,59 @@ _NON_COUNTRIES = (QtCore.QLocale.Country.AnyCountry, QtCore.QLocale.Country.Worl
 
 
 @lru_cache(maxsize=1)
-def _countries() -> tuple[tuple[str, QtCore.QLocale.Country], ...]:
-    """(name, territory) for every country Qt knows a time zone for, sorted by name.
+def _zones_by_country() -> dict[QtCore.QLocale.Country, tuple[str, ...]]:
+    """Country -> its IANA ids, from *both* things Qt can be asked, unioned.
 
     Enumerated from Qt rather than from a table shipped here: a hand-written country
-    list is a second source of truth that goes stale, and the only names worth showing
-    are the ones `availableTimeZoneIds` will actually return something for.
+    list is a second source of truth that goes stale.
+
+    Two questions, because neither backend answers both reliably and a country missing
+    from this map is a country the user cannot pick at all:
+
+      - `availableTimeZoneIds(territory)` — "which zones are in this country?" Its
+        implementation is per platform (ICU on macOS, a CLDR mapping on Windows, the tz
+        database on Linux), and macOS CI listed *fewer* countries this way than Linux.
+      - `QTimeZone(id).territory()` — "which country is this zone in?", asked of every
+        id Qt reports, which is the same list `_zone_valid` trusts in the flyout.
+
+    A union can only ever add a country, never drop one, so this is strictly more
+    complete than either source and needs no platform branch. Cheap enough to do once:
+    ~550 ids, cached for the process.
 
     Names come back from Qt in English and stay English, like the rest of the data
     TintaView quotes rather than translates (an agent's plan name, a provider's error).
     """
-    found = [
-        (QtCore.QLocale.territoryToString(territory), territory)
-        for territory in QtCore.QLocale.Country
-        if territory not in _NON_COUNTRIES and QtCore.QTimeZone.availableTimeZoneIds(territory)
-    ]
-    return tuple(sorted(found, key=lambda pair: pair[0]))
+    found: dict[QtCore.QLocale.Country, set[str]] = {}
+    for territory in QtCore.QLocale.Country:
+        if territory in _NON_COUNTRIES:
+            continue
+        ids = {bytes(z).decode() for z in QtCore.QTimeZone.availableTimeZoneIds(territory)}
+        if ids:
+            found[territory] = ids
+    for raw in QtCore.QTimeZone.availableTimeZoneIds():
+        zone_id = bytes(raw).decode()
+        territory = QtCore.QTimeZone(raw).territory()
+        if territory in _NON_COUNTRIES:
+            continue
+        found.setdefault(territory, set()).add(zone_id)
+    return {territory: tuple(sorted(ids)) for territory, ids in found.items()}
+
+
+@lru_cache(maxsize=1)
+def _countries() -> tuple[tuple[str, QtCore.QLocale.Country], ...]:
+    """(name, territory) for every country Qt knows a zone for, sorted by name."""
+    return tuple(sorted(
+        ((QtCore.QLocale.territoryToString(territory), territory)
+         for territory in _zones_by_country()),
+        key=lambda pair: pair[0],
+    ))
 
 
 @cache
 def _zones_for(territory: QtCore.QLocale.Country) -> tuple[str, ...]:
-    """The IANA ids in one country — one for Poland or India, 29 for the USA."""
-    return tuple(bytes(zone).decode() for zone in QtCore.QTimeZone.availableTimeZoneIds(territory))
+    """The IANA ids in one country — one for Poland or India, 29 for the USA (and more
+    on a backend that also reports deprecated aliases, as macOS does)."""
+    return _zones_by_country().get(territory, ())
 
 
 class _ClockRow(QtWidgets.QWidget):

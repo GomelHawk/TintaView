@@ -711,8 +711,14 @@ def test_a_stored_zone_selects_its_own_country(qapp, tmp_path):
 
     assert row._country.currentText() == "India"
     assert row.zone() == "Asia/Kolkata"
-    # One zone, so there is nothing to choose and the second combo says so.
-    assert row._zone.isEnabled() is False
+    # Nothing to choose from means the combo says so — derived from what Qt actually
+    # reports for this country, not from a count: macOS CI lists India's deprecated
+    # alias (`Asia/Calcutta`) alongside `Asia/Kolkata`, so "India has one zone" is not
+    # true on every backend, while "one zone means disabled" is.
+    from tintaview.ui.settings_dialog import _zones_for
+
+    only_one = len(_zones_for(row._country.currentData())) == 1
+    assert row._zone.isEnabled() is not only_one
 
 
 def test_a_country_with_several_zones_offers_them_all(qapp, tmp_path):
@@ -774,6 +780,44 @@ def test_the_country_picker_lists_no_pseudo_countries(qapp, tmp_path):
 
     assert "Default" not in names
     assert "world" not in names
-    assert "Poland" in names and "India" in names and "United States" in names
-    # Every country Qt knows a zone for, plus the leading "not set" row.
-    assert len(names) > 200
+    # Every country Qt knows a zone for, plus the leading "not set" row. Loose, because
+    # how many countries a backend reports is its own business (Linux CI: 247).
+    assert len(names) > 100
+
+
+def test_every_zone_qt_knows_is_reachable_through_the_picker(qapp, tmp_path):
+    """The invariant behind `_zones_by_country`'s union, and the one that broke.
+
+    macOS CI listed fewer countries via `availableTimeZoneIds(territory)` than Linux
+    did, which does not merely fail a test — it means a real zone, in a real country,
+    that a macOS user cannot select at all. Asserted against Qt's own id list rather
+    than a hand-written sample of countries, so it holds wherever the suite runs.
+    """
+    from tintaview.ui.settings_dialog import _NON_COUNTRIES, _countries, _zones_for
+
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    row = dialog._clock_rows[0]
+    offered = {row._country.itemData(i) for i in range(row._country.count())}
+    known_countries = {territory for _name, territory in _countries()}
+
+    for raw in QtCore.QTimeZone.availableTimeZoneIds():
+        zone_id = bytes(raw).decode()
+        territory = QtCore.QTimeZone(raw).territory()
+        if territory in _NON_COUNTRIES:
+            continue  # `UTC` and the aliases — deliberately not in a country picker
+        assert territory in known_countries, f"{zone_id}: {territory} is not offered"
+        assert territory in offered, f"{zone_id}: {territory} missing from the combo"
+        assert zone_id in _zones_for(territory), f"{zone_id} unreachable under {territory}"
+
+    # The loop above skips a zone Qt files under no country, so it cannot see the other
+    # way this breaks: a backend that reports *no* territory for a zone people obviously
+    # want. These four are checked by name for exactly that, and the message says which
+    # case it is — the country picker has no answer for a zone with no country, and the
+    # fix would have to be a shipped zone-to-country table.
+    for zone_id in ("Europe/Warsaw", "Asia/Kolkata", "America/New_York", "Asia/Tokyo"):
+        timezone = QtCore.QTimeZone(zone_id.encode())
+        if not timezone.isValid():
+            continue  # a backend that doesn't know the zone at all is a separate matter
+        territory = timezone.territory()
+        assert territory not in _NON_COUNTRIES, f"Qt reports no country for {zone_id} here"
+        assert territory in offered, f"{zone_id}'s country is missing from the picker"

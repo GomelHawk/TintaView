@@ -820,13 +820,21 @@ a comment) and `.github/dependabot.yml` proposes the bumps; `ci.yml` runs with `
 happens to have worked on, and not from the working tree (uncommitted work is not in the release):
 
 ```sh
-LAST=$(git describe --tags --abbrev=0)          # e.g. v0.4.6
+git fetch --tags                                # local tags go stale; see below
+LAST=$(git tag | sort -V | tail -1)             # highest version, e.g. v0.4.12
 git log --no-merges --pretty='%h %s' "$LAST..main"
 git diff --shortstat "$LAST..main"              # scale, so a thin write-up is visibly wrong
 git show --stat <sha>                           # for any commit whose subject doesn't say enough
 ```
 
-State the range you used (`v0.4.6..main`, N commits) at the top, so the maintainer can check the
+**Find the last tag by version, and fetch first.** Neither shortcut works here.
+`git describe --tags --abbrev=0` reported `v0.4.6` while the real latest was `v0.4.12`, because
+this checkout's tags were six releases stale — six commits were written up as unreleased when
+they had all shipped. `--sort=creatordate` is no better: these are lightweight tags, so it sorts
+by *commit* date, which is not release order. `sort -V` over a fetched tag list is what to trust,
+and if the maintainer names a different tag, theirs wins — ask before writing anything.
+
+State the range you used (`v0.4.12..main`, N commits) at the top, so the maintainer can check the
 notes against the same list you read.
 
 **Read the commits, not just their subjects.** In the v0.4.6..HEAD range alone, `37d36ad` is
