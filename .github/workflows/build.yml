@@ -114,12 +114,21 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: tintaview-${{ github.ref_name }}
-          path: dist/release/*
-          # These files are also attached permanently to the GitHub Release below;
-          # the workflow-artifact copy is only useful for the few days after a run,
-          # e.g. to inspect a workflow_dispatch build before it's tagged. Left at the
-          # default 90 days, they pile up (14+ tags so far) and blow the account's
-          # Actions storage cap.
+          # Deliberately not `dist/release/*`: the sdist is left out. The step below
+          # attaches it permanently to the Release -- which is free, does not count
+          # against Actions storage, and is where every download actually comes from.
+          # This copy exists only to eyeball a workflow_dispatch build before it is
+          # tagged, and you do that by installing the wheel, never by reading the
+          # tarball. SHA256SUMS.txt is generated above from the full `dist/release/*`
+          # and stays byte-identical to the Release's copy, so it still lists a
+          # .tar.gz that is not in this zip; harmless, nothing verifies this zip.
+          path: |
+            dist/release/*.whl
+            dist/release/install.*
+            dist/release/SHA256SUMS.txt
+          # Matches the repo-wide artifact-and-log retention (Settings -> Actions).
+          # At the 90-day default these piled up one per tag and ate the account's
+          # Actions storage allowance for files nobody opens after the day they build.
           retention-days: 3
 
       - name: Attach to GitHub Release

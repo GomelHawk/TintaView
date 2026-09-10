@@ -1,0 +1,26 @@
+# What the source distribution (the release `.tar.gz`) ships.
+#
+# setuptools-scm replaces setuptools' default sdist file list with "every file git
+# tracks", so without this the tarball carried 4.2 MB of design PNGs: assets/promo.png
+# (the README banner) and assets/source/*.png (the artwork build_assets.py renders from).
+# Those are build-time *inputs*. The two files anything actually loads at runtime --
+# tintaview/assets/generated/{logo_full.png,tintaview.ico} -- are committed inside the
+# package and shipped via [tool.setuptools.package-data], which MANIFEST.in does not
+# govern, so pruning here cannot reach them: the wheel came out byte-identical (77
+# entries, same CRCs) while the sdist went from 4.70 MB to 0.59 MB.
+#
+# Nothing on any install or update path reads the sdist. install.sh, install.ps1 and
+# `tintaview update` all fetch the wheel from the GitHub Release, and the wheel is
+# py3-none-any, so pip prefers it everywhere. The tarball exists only so the wheel can be
+# rebuilt from source, and that needs none of the files below.
+prune assets
+
+# Pruned *for coherence, not for size* -- together these are 48 KB. scripts/build_assets.py
+# renders from assets/source/, and tests/test_assets.py loads that script to exercise its
+# --check. Leave either in and the tarball ships a script and a test that cannot run:
+# both fail with FileNotFoundError once the artwork above is gone (verified). The cost is
+# that the suite can no longer be run from an unpacked sdist, which matters to distro
+# packagers and to nobody else; CI runs it from the git checkout, which this file does
+# not affect.
+prune scripts
+prune tests
