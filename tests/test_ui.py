@@ -24,6 +24,7 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 import tintaview.ui.tray as tray_mod  # noqa: E402
 import tintaview.ui.workers as workers_mod  # noqa: E402
 from tintaview.core.config import Config  # noqa: E402
+from tintaview.install import win_identity  # noqa: E402
 from tintaview.stats.model import UsageResult, UsageRow  # noqa: E402
 from tintaview.ui import icons  # noqa: E402
 from tintaview.ui.flyout import Flyout  # noqa: E402
@@ -203,9 +204,15 @@ def test_flyout_draws_the_burn_rate_under_everything_else(qapp):
     sections, _ = flyout._layout()
     section = sections[0]
 
-    assert section.trend_lines == [trend]
+    # Wrapped, not compared line for line: how many lines the sentence takes depends on
+    # the platform's default UI font (on Windows it takes two), so what must hold
+    # everywhere is that the whole sentence is there and the section grew by exactly the
+    # lines it produced.
+    assert " ".join(section.trend_lines) == trend
     assert section.trend_at >= section.rows_at
-    assert flyout.height() == without + int(TREND_GAP + REASON_LINE_H)
+    assert flyout.height() == without + int(
+        TREND_GAP + REASON_LINE_H * len(section.trend_lines)
+    )
     pixmap = QtGui.QPixmap(flyout.size())
     flyout.render(pixmap)
     assert not pixmap.isNull()
@@ -2221,13 +2228,34 @@ def test_brand_png_is_written_for_the_shell(qapp, tmp_path):
 
 
 def test_registering_the_windows_identity_is_a_no_op_elsewhere(qapp, monkeypatch):
-    """It must not touch the config directory (or raise) on Linux/macOS."""
+    """It must not touch the config directory (or raise) on Linux/macOS.
+
+    The platform is forced rather than inferred from the host: run for real on Windows
+    this writes a PNG into the user's config directory and a key into their registry,
+    which is not something a test run may do — and on a Windows CI runner it did.
+    """
+    monkeypatch.setattr(tray_mod.sys, "platform", "linux")
     written: list = []
     monkeypatch.setattr(icons, "write_brand_png", lambda *a, **k: written.append(a))
 
     tray_mod._register_windows_identity()
 
     assert written == []
+
+
+def test_registering_the_windows_identity_names_the_rendered_icon(qapp, monkeypatch):
+    """...and on Windows it hands the shell a freshly rendered icon to show."""
+    monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+    monkeypatch.setattr(icons, "write_brand_png", lambda path, *a, **k: path)
+    registered: list = []
+    monkeypatch.setattr(
+        win_identity, "register_app_identity", lambda icon_path: registered.append(icon_path)
+    )
+
+    tray_mod._register_windows_identity()
+
+    assert len(registered) == 1
+    assert registered[0].name == "notification-icon.png"
 
 
 # --------------------------------------------------------------------------- escalation
