@@ -38,6 +38,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from tintaview.core.config import Config
 from tintaview.core.events import STATUS_NONE
 from tintaview.i18n import set_language, t
+from tintaview.stats import format as fmt
 from tintaview.ui import icons
 from tintaview.ui.dialogs import DoctorReportDialog, show_about
 from tintaview.ui.flyout import Flyout
@@ -911,7 +912,6 @@ class TrayApp(QtCore.QObject):
     def _escalate_confirm(self, waited: float, agents_payload: dict) -> None:
         """Nag: chime again, balloon, and (once per confirm) run the user's command."""
         self._chime()
-        minutes = max(1, int(waited // 60))
         waiting = [
             _agent_label(key)
             for key, value in sorted(agents_payload.items())
@@ -919,9 +919,12 @@ class TrayApp(QtCore.QObject):
         ]
         self.tray.showMessage(
             "TintaView",
-            t("tray.escalate.balloon_body", minutes=minutes, agents=", ".join(waiting))
+            # `duration_text`, not a minutes count of our own: an interval set to 15 s
+            # made the first three reminders all claim "1 min".
+            t("tray.escalate.balloon_body", waited=fmt.duration_text(waited),
+              agents=", ".join(waiting))
             if waiting
-            else t("tray.escalate.balloon_body_unknown", minutes=minutes),
+            else t("tray.escalate.balloon_body_unknown", waited=fmt.duration_text(waited)),
             QtWidgets.QSystemTrayIcon.Warning,
             10000,
         )

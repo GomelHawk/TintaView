@@ -168,23 +168,34 @@ def reset_row_text(reset_at: float, style: str = RESET_RELATIVE) -> str:
     return reset_text(dt)
 
 
+def duration_text(seconds: float) -> str:
+    """A plain length of time: "45 s", "3 min", "1 hr 20 min".
+
+    A *duration*, not a countdown — nothing here says "in" or "resets", so a caller can
+    put it wherever its own sentence needs it. Seconds are kept below a minute rather
+    than rounded up to one: an escalation reminder set to 15 s reported "1 min" for its
+    first three nags, which is the bug this exists to prevent.
+    """
+    secs = max(1, int(round(seconds)))
+    if secs < 60:
+        return t("usage.duration.seconds", seconds=secs)
+    hours, rem = divmod(secs, 3600)
+    minutes = rem // 60
+    if hours and minutes:
+        return t("usage.duration.hours_minutes", hours=hours, minutes=minutes)
+    if hours:
+        return t("usage.duration.hours", hours=hours)
+    return t("usage.duration.minutes", minutes=minutes)
+
+
 def burn_rate_text(label: str, eta_s: float) -> str:
     """"At this pace, 5-hour limit empties in ~40 min" — see `stats/trend.py`.
 
     Worded here, with every other shared phrase, and deliberately coarse: it is a
     straight-line projection off a handful of samples, so a figure to the minute would
-    claim a precision the estimate does not have. Anything under a minute still reads
-    "1 min", for the same reason `cache_age_text` never says "0 min".
+    claim a precision the estimate does not have.
     """
-    # Rounded to five minutes, and never below it: "empties in ~1 hr 47 min" claims a
-    # precision a straight line through a handful of samples does not have.
+    # Rounded to five minutes, and never below it — which is also why `duration_text`'s
+    # seconds form can never show up in a burn rate.
     secs = max(300, int(round(eta_s / 300.0)) * 300)
-    hours, rem = divmod(secs, 3600)
-    minutes = rem // 60
-    if hours and minutes:
-        duration = t("usage.duration.hours_minutes", hours=hours, minutes=minutes)
-    elif hours:
-        duration = t("usage.duration.hours", hours=hours)
-    else:
-        duration = t("usage.duration.minutes", minutes=minutes)
-    return t("usage.trend.burn_rate", label=label, duration=duration)
+    return t("usage.trend.burn_rate", label=label, duration=duration_text(secs))

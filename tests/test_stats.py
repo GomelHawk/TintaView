@@ -2206,3 +2206,21 @@ class TestBurnRate:
         stored = json.loads((tmp_path / "cache.json").read_text(encoding="utf-8"))
 
         assert "trend" not in stored["claude"]
+
+
+class TestDurationText:
+    """`fmt.duration_text` — a plain length of time, shared by the burn-rate line and the
+    escalation balloon."""
+
+    def test_under_a_minute_stays_in_seconds(self):
+        """The escalation reminder's own bug: a 15 s interval reported "1 min"."""
+        assert fmt.duration_text(15) == "15 s"
+        assert fmt.duration_text(59.6) == "1 min"  # rounds to 60, which is a minute
+
+    def test_never_says_zero(self):
+        assert fmt.duration_text(0) == "1 s"
+
+    def test_minutes_and_hours(self):
+        assert fmt.duration_text(180) == "3 min"
+        assert fmt.duration_text(3600) == "1 hr"
+        assert fmt.duration_text(4800) == "1 hr 20 min"

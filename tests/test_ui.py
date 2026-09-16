@@ -2311,10 +2311,30 @@ def test_an_unanswered_confirm_nags_once_per_interval(escalation_tray):
     assert len(balloons) == 1
     assert "Claude Code" in balloons[0][1], "the balloon must name who is waiting"
     assert "Codex" not in balloons[0][1], "only agents actually waiting are named"
+    assert "1 min" in balloons[0][1]
 
     clock["now"] += 60
     app_instance._poll_state()
     assert (len(chimes), len(balloons)) == (3, 2)
+
+
+def test_a_short_interval_is_reported_in_seconds(escalation_tray):
+    """A 15 s interval used to make the first three reminders all say "(1 min)" — the
+    balloon rounded the wait to whole minutes and floored it at one."""
+    app_instance, server, clock, _chimes, balloons, _commands = escalation_tray
+    app_instance._cfg.escalation.after_seconds = 15
+    server.set(_confirm_payload())
+    app_instance._poll_state()
+
+    clock["now"] += 15
+    app_instance._poll_state()
+    clock["now"] += 15
+    app_instance._poll_state()
+
+    assert [m for _t, m in balloons] == [
+        "Claude Code — still waiting for your answer (15 s).",
+        "Claude Code — still waiting for your answer (30 s).",
+    ]
 
 
 def test_the_escalation_command_runs_once_per_confirm(escalation_tray):
