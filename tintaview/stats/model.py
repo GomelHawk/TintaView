@@ -81,6 +81,14 @@ class UsageResult:
     #: Never persisted either: it is recomputed from `fetched_at` on every substitution,
     #: and a stored one would go on claiming an age that stopped being true.
     notice: str | None = None
+    #: "At this pace, 5-hour limit empties in ~40 min", drawn under this section's rows.
+    #: Built by `StatsService` from `stats/trend.py`'s samples when `stats.show_trend` is
+    #: on, and empty far more often than not — see that module for every case where a
+    #: projection is deliberately withheld.
+    #:
+    #: Not persisted, for the same reason `notice` isn't: it is a sentence about *now*,
+    #: and a cached copy would go on projecting from a rate that stopped being true.
+    trend: str = ""
     #: When these rows were fetched, epoch seconds — 0.0 meaning "unknown", which is
     #: what a cache file written before this field existed reads back as. Stamped by
     #: `StatsService` so no provider has to remember to, and deliberately carried

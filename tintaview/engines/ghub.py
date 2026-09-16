@@ -51,6 +51,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from ..core.config import GHubConfig, expand
 from .base import BaseEngine
@@ -156,9 +157,13 @@ def _dll_path_from_registry() -> Path | None:
         import winreg
     except ImportError:
         return None
+    # Guarded by the ImportError above rather than by a `sys.platform` check — this
+    # module is imported on every platform (the engine factory lists it before knowing
+    # whether it can run), and typeshed only declares winreg's contents on Windows.
+    reg: Any = winreg
     try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _LED_SDK_CLSID_KEY) as key:
-            value, _kind = winreg.QueryValueEx(key, "")
+        with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, _LED_SDK_CLSID_KEY) as key:
+            value, _kind = reg.QueryValueEx(key, "")
     except OSError:
         return None
     return Path(value) if value else None
@@ -558,7 +563,9 @@ class GHubEngine(BaseEngine):
         super().__init__()
         self._cfg = cfg or GHubConfig()
         self._dll_override = dll
-        self._dll = None
+        # `Any`, not `ctypes.CDLL | None`: this is also set to `_dll_override` (a test
+        # double) and is only ever called through `getattr`/dynamic attributes anyway.
+        self._dll: Any = None
         self._resolved_path: Path | None = None
         self._pump = _CallPump()
         self._device_mask = _device_mask(self._cfg.device_types)
@@ -579,7 +586,10 @@ class GHubEngine(BaseEngine):
         from .ghub_sidecar import should_use_ghub_sidecar
 
         self._use_sidecar = should_use_ghub_sidecar(dll_override=dll)
-        self._sidecar = None
+        #: `GHubSidecar | None`, spelled `Any` because the class is imported lazily —
+        #: `ghub_sidecar` pulls in the worker plumbing, which a status-only install
+        #: never needs to load.
+        self._sidecar: Any = None
 
     @property
     def active(self) -> bool:
@@ -776,7 +786,9 @@ class GHubEngine(BaseEngine):
         if self._dll is None:
             return
         dll = self._dll
-        pct = tuple(round(v * 100 / 255) for v in (r, g, b))
+        # Spelled out rather than built by a generator: the SDK takes exactly three
+        # percentages, and a `tuple[int, ...]` is not that.
+        pct = (round(r * 100 / 255), round(g * 100 / 255), round(b * 100 / 255))
         try:
             painted = self._pump.call(
                 lambda: _paint(dll, pct), timeout=_COLOR_TIMEOUT, key=_COLOR_KEY,

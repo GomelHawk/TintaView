@@ -15,18 +15,19 @@ from .chroma import ChromaEngine
 from .ghub import GHubEngine
 from .null import NullEngine
 from .openrgb import OpenRGBEngine
+from .steelseries import SteelSeriesEngine
 
 log = logging.getLogger(__name__)
 
 #: Every engine the wizard/`` auto`` mode knows about, in the order `available_engines`
 #: reports them — independent of `cfg.engine.order`, so the wizard always shows the full
 #: picture (detected/not-running/unsupported) regardless of what's configured.
-_KNOWN_ENGINES = ("chroma", "ghub", "openrgb", "none")
+_KNOWN_ENGINES = ("chroma", "ghub", "steelseries", "openrgb", "none")
 
 #: The pickable values of `engine.mode`, in the order both config UIs offer them.
 #: "auto" first and default — see `ui.wizard._step_engine` for why pinning one engine is
 #: the riskier answer.
-ENGINE_MODES: tuple[str, ...] = ("auto", "chroma", "ghub", "openrgb", "none")
+ENGINE_MODES: tuple[str, ...] = ("auto", "chroma", "ghub", "steelseries", "openrgb", "none")
 
 #: Human label per mode, shared by the console wizard (`ui.wizard`) and the tray's
 #: settings dialog (`ui.settings_dialog`) so an engine is never named one thing in one
@@ -36,6 +37,7 @@ ENGINE_DISPLAY: dict[str, str] = {
     "auto": "Detect automatically (recommended)",
     "chroma": "Razer Chroma",
     "ghub": "Logitech G HUB",
+    "steelseries": "SteelSeries GameSense",
     "openrgb": "OpenRGB",
     "none": "Status only — no lights",
 }
@@ -47,6 +49,7 @@ ENGINE_DISPLAY: dict[str, str] = {
 ENGINE_SUPPORTED = {
     "chroma": lambda env: env.supports_chroma,
     "ghub": lambda env: env.supports_ghub,
+    "steelseries": lambda env: env.supports_steelseries,
     "openrgb": lambda env: env.supports_openrgb,
 }
 
@@ -69,6 +72,8 @@ def _build(name: str, cfg: Config) -> LightingEngine | None:
         return ChromaEngine(cfg.engine.chroma)
     if name == "ghub":
         return GHubEngine(cfg.engine.ghub)
+    if name == "steelseries":
+        return SteelSeriesEngine(cfg.engine.steelseries)
     if name == "openrgb":
         return OpenRGBEngine(cfg.engine.openrgb)
     if name == "none":
@@ -97,13 +102,13 @@ def make_engine(cfg: Config) -> LightingEngine:
     NullEngine so there is always something to return.
     """
     mode = cfg.engine.mode
-    if mode == "chroma":
-        return ChromaEngine(cfg.engine.chroma)
-    if mode == "ghub":
-        return GHubEngine(cfg.engine.ghub)
-    if mode == "openrgb":
-        return OpenRGBEngine(cfg.engine.openrgb)
-    if mode == "none":
+    # A forced mode is built straight from `_build`, which is also what `auto` and the
+    # wizard use — three copies of the same if-chain is how an engine ends up pickable in
+    # one place and unknown in another.
+    if mode != "auto":
+        forced = _build(mode, cfg)
+        if forced is not None:
+            return forced
         return NullEngine()
 
     for name in cfg.engine.order:

@@ -39,6 +39,13 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      # `core/` and `engines/` only — see [tool.mypy] in pyproject.toml for why the Qt
+      # layer is out of scope. Runs here rather than in the matrix: the result is the
+      # same on every OS and Python version, and a type error failing nine legs buries
+      # whatever real test failure is underneath it.
+      - name: Type-check (mypy)
+        run: mypy
+
       # Regenerates the assets into a temp directory and compares bytes, so a source
       # re-export whose output nobody rebuilt fails here rather than shipping stale.
       - name: Verify generated assets are up to date
@@ -84,3 +91,147 @@ jobs:
 
       - name: Test (pytest)
         run: pytest -q
+
+  # AGENTS.md names install as this project's biggest source of pain, and
+  # `tests/test_packaging.py` can only assert what the installer scripts *say* — it never
+  # runs one. This job runs the real thing end to end on a clean machine: install, wire up
+  # an agent's hooks, start the daemon, and make `doctor` agree that all of it worked,
+  # then uninstall and check the prefix is gone. `--headless` deliberately: PySide6 is a
+  # ~150 MB download that adds nothing to an installer check, and it is also the install
+  # shape a server or a WSL-only box gets.
+
+  # AGENTS.md names install as this project's biggest source of pain, and
+  # `tests/test_packaging.py` can only assert what the installer scripts *say* — it never
+  # runs one. This job runs the real thing end to end on a clean machine: install, wire up
+  # an agent's hooks, start the daemon, and make `doctor` agree that all of it worked,
+  # then uninstall and check what should be gone is gone. `--headless` deliberately:
+  # PySide6 is a large download that adds nothing to an installer check, and it is also
+  # the install shape a server or a WSL-only box gets.
+  smoke-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      # Never the runner's real ~/.tintaview: the installer writes hook.env and the hook
+      # script there, and the uninstall deliberately leaves them behind.
+      TINTAVIEW_HOME: ${{ runner.temp }}/tvhome
+      TV_PREFIX: ${{ runner.temp }}/tvprefix
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (headless, no autostart)
+        run: |
+          sh packaging/install.sh --prefix "$TV_PREFIX" --no-autostart --headless
+
+      - name: Install an agent's hooks
+        run: |
+          "$TV_PREFIX/venv/bin/tintaview" hooks install --agent claude --yes
+
+      - name: Start the daemon
+        run: |
+          "$TV_PREFIX/venv/bin/tintaview" --headless > "$RUNNER_TEMP/daemon.log" 2>&1 &
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8777/state >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo "the daemon never answered"
+          cat "$RUNNER_TEMP/daemon.log"
+          exit 1
+
+      - name: Diagnose the install
+        run: |
+          "$TV_PREFIX/venv/bin/tintaview" doctor --json > "$RUNNER_TEMP/doctor.json"
+          python scripts/check_doctor_report.py "$RUNNER_TEMP/doctor.json"
+
+      - name: Stop the daemon
+        if: always()
+        run: |
+          curl -fsS http://127.0.0.1:8777/quit >/dev/null 2>&1 || true
+
+      - name: Uninstall
+        run: |
+          sh packaging/install.sh --prefix "$TV_PREFIX" --uninstall
+
+      - name: The prefix is gone, the config directory is not
+        run: |
+          test ! -d "$TV_PREFIX" || { echo "$TV_PREFIX survived the uninstall"; exit 1; }
+          test -f "$TINTAVIEW_HOME/hook.env" || { echo "the uninstall took the config with it"; exit 1; }
+
+  # The Windows twin. Its own job rather than a third matrix leg: every step is a
+  # different shell, a different path layout and a different uninstall contract —
+  # `install.ps1` removes only the venv it created, because on Windows the install prefix
+  # *is* the config directory (see that script's header).
+  smoke-install-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      TV_PREFIX: ${{ runner.temp }}\tintaview
+      TINTAVIEW_HOME: ${{ runner.temp }}\tintaview
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # setuptools-scm needs the tag history to name the wheel built below.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # `-WheelPath` is the installer's own "no download, no checksum" path, so this job
+      # tests the commit in hand rather than whatever the latest release happens to be.
+      - name: Build the wheel the installer will consume
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - name: Install (silent, no autostart)
+        run: |
+          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          & .\packaging\install.ps1 -Prefix $env:TV_PREFIX -WheelPath $wheel -NoAutostart -Silent
+
+      - name: Install an agent's hooks
+        run: |
+          & "$env:TV_PREFIX\venv\Scripts\tintaview.exe" hooks install --agent claude --yes
+
+      - name: Start the daemon
+        run: |
+          Start-Process -FilePath "$env:TV_PREFIX\venv\Scripts\tintaview.exe" -ArgumentList '--headless'
+          foreach ($i in 1..20) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:8777/state -TimeoutSec 2 | Out-Null
+              exit 0
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+          throw "the daemon never answered"
+
+      - name: Diagnose the install
+        run: |
+          & "$env:TV_PREFIX\venv\Scripts\tintaview.exe" doctor --json | Out-File -Encoding utf8 "$env:RUNNER_TEMP\doctor.json"
+          python scripts\check_doctor_report.py "$env:RUNNER_TEMP\doctor.json"
+
+      - name: Stop the daemon
+        if: always()
+        run: |
+          try { Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:8777/quit -TimeoutSec 2 | Out-Null } catch {}
+
+      - name: Uninstall
+        run: |
+          & .\packaging\install.ps1 -Prefix $env:TV_PREFIX -Uninstall -Silent
+
+      # Windows keeps the prefix (config.toml, hook.env, bin\ and logs\ live there) and
+      # removes only the venv — asserting the opposite would encode a bug.
+      - name: The venv is gone, the config directory is not
+        run: |
+          if (Test-Path "$env:TV_PREFIX\venv") { throw "the venv survived the uninstall" }
+          if (-not (Test-Path "$env:TINTAVIEW_HOME\hook.env")) { throw "the uninstall took the config with it" }

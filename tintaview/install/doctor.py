@@ -77,14 +77,33 @@ def _can_prompt() -> bool:
 class _Reporter:
     """Prints the checklist and keeps score. Never raises — a bug in one check must
     not stop the rest of the report, or crash the very tool a confused user was
-    pointed at."""
+    pointed at.
 
-    def __init__(self, verbose: bool) -> None:
+    Every line is also kept in `records`, which is what `--json` serialises. The two
+    outputs are the *same* checks by construction: a JSON mode that re-ran anything, or
+    that assembled its own document from a second pass, would be a second diagnostic to
+    keep in step with this one — and the whole point of the machine-readable form is
+    that a pasted file says exactly what the user saw.
+    """
+
+    def __init__(self, verbose: bool, quiet: bool = False) -> None:
         self.verbose = verbose
+        #: Suppresses the human report (`--json` prints one document at the end instead).
+        #: Scoring and `records` are unaffected.
+        self.quiet = quiet
         self.fails = 0
         self.warns = 0
+        self.records: list[dict[str, str]] = []
 
     def _emit(self, tag: str, section: str, message: str, fix: str | None) -> None:
+        self.records.append({
+            "level": tag.lower(),
+            "section": section,
+            "message": message,
+            "fix": fix or "",
+        })
+        if self.quiet:
+            return
         print(f"[{tag:<4}] {section:<14} {message}")
         if fix:
             for line in fix.splitlines():
@@ -287,6 +306,25 @@ def _engine_unavailable_reason(name: str, env: Environment, cfg: Config) -> str:
             'is running with "Game lighting control" enabled in its settings, and that '
             "G HUB was started before TintaView (restart TintaView if you started G HUB "
             "afterwards)"
+        )
+    if name == "steelseries":
+        if not env.supports_steelseries:
+            return (
+                "SteelSeries GG ships on Windows and macOS only; this machine reports "
+                f"platform={env.platform}"
+            )
+        from ..engines.steelseries import core_props_path, read_address
+
+        path = core_props_path(cfg.engine.steelseries.core_props)
+        if read_address(cfg.engine.steelseries.core_props) is None:
+            return (
+                f"SteelSeries GG doesn't seem to be running — it publishes the address "
+                f"TintaView talks to in {path}, and that file is missing or unreadable"
+            )
+        return (
+            "SteelSeries GG published an address but isn't answering on it — this "
+            "usually means GG is mid-restart or mid-update; try again once it has "
+            "finished starting"
         )
     if name == "openrgb":
         # Two different failures wear the same "not available" label, and only one of
@@ -772,17 +810,25 @@ def _paint_selftest(reporter: _Reporter, cfg: Config, interactive: bool = True) 
 
 
 def run_doctor(verbose: bool = False, paint: bool = False,
-               interactive: bool | None = None) -> int:
+               interactive: bool | None = None, as_json: bool = False) -> int:
     """Run every check and print a report. 0 if everything essential is healthy, else 1.
 
     `interactive` gates the two steps that ask the user a question. None (the default)
     auto-detects a console; False forbids prompting even when one exists — which is what
     a GUI caller must pass, since a tray started from a terminal *does* have a usable
     stdin and would otherwise block on a prompt nobody can see.
+
+    `as_json` swaps the checklist for one JSON document on stdout — for pasting into an
+    issue, and for anything that would otherwise have to parse `[FAIL] SECTION message`
+    back out of prose. It never prompts (a machine-readable run has nobody to answer the
+    live-hook or paint questions) and it prints *nothing* else, so the output is always a
+    single parseable object even when checks fail.
     """
+    if as_json:
+        interactive = False
     if interactive is None:
         interactive = _can_prompt()
-    reporter = _Reporter(verbose)
+    reporter = _Reporter(verbose, quiet=as_json)
 
     env = _check_environment(reporter)
     cfg = _check_config(reporter)
@@ -800,6 +846,10 @@ def run_doctor(verbose: bool = False, paint: bool = False,
     if paint:
         _paint_selftest(reporter, cfg, interactive)
 
+    if as_json:
+        print(json.dumps(_json_report(reporter), indent=2))
+        return 1 if reporter.fails else 0
+
     print()
     if reporter.fails:
         extra = f", {reporter.warns} warning(s)" if reporter.warns else ""
@@ -811,3 +861,25 @@ def run_doctor(verbose: bool = False, paint: bool = False,
     print(f"Log file: {log_mod.log_path('tintaview')}")
 
     return 1 if reporter.fails else 0
+
+
+#: Bumped when the shape below changes incompatibly, so a consumer can refuse a document
+#: it doesn't understand instead of guessing. Additive changes (a new key) don't bump it.
+JSON_REPORT_VERSION = 1
+
+
+def _json_report(reporter: _Reporter) -> dict:
+    """The `--json` document: the same checks, the same score, plus the few facts every
+    triage question starts with (which version, which platform, where the log is)."""
+    return {
+        "report_version": JSON_REPORT_VERSION,
+        "tintaview_version": __version__,
+        "generated_at": time.time(),
+        "platform": sys.platform,
+        "python": platform.python_version(),
+        "ok": reporter.fails == 0,
+        "fails": reporter.fails,
+        "warns": reporter.warns,
+        "log_path": str(log_mod.log_path("tintaview")),
+        "checks": reporter.records,
+    }

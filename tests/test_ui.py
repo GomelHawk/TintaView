@@ -22,6 +22,7 @@ pytest.importorskip("PySide6")
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 import tintaview.ui.tray as tray_mod  # noqa: E402
+import tintaview.ui.workers as workers_mod  # noqa: E402
 from tintaview.core.config import Config  # noqa: E402
 from tintaview.stats.model import UsageResult, UsageRow  # noqa: E402
 from tintaview.ui import icons  # noqa: E402
@@ -184,6 +185,35 @@ def test_flyout_draws_the_estimate_under_the_official_rows(qapp):
     pixmap = QtGui.QPixmap(flyout.size())
     flyout.render(pixmap)
     assert not pixmap.isNull()
+
+
+def test_flyout_draws_the_burn_rate_under_everything_else(qapp):
+    """The projection is a footnote to the rows, not a heading over them — and it
+    disappears with them when the section is collapsed, the same as a staleness notice.
+    """
+    from tintaview.ui.flyout import REASON_LINE_H, TREND_GAP
+
+    flyout = Flyout()
+    official = [UsageRow(label="5-hour limit", pct=62.0, kind="limit")]
+    flyout.set_results({"claude": UsageResult(agent="claude", rows=official)})
+    without = flyout.height()
+
+    trend = "At this pace, 5-hour limit empties in ~40 min."
+    flyout.set_results({"claude": UsageResult(agent="claude", rows=official, trend=trend)})
+    sections, _ = flyout._layout()
+    section = sections[0]
+
+    assert section.trend_lines == [trend]
+    assert section.trend_at >= section.rows_at
+    assert flyout.height() == without + int(TREND_GAP + REASON_LINE_H)
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    assert not pixmap.isNull()
+
+    flyout._collapsed.add("claude")
+    flyout.set_results({"claude": UsageResult(agent="claude", rows=official, trend=trend)})
+    sections, _ = flyout._layout()
+    assert sections[0].trend_lines == []
 
 
 def test_flyout_shows_an_error_and_the_estimate_at_once(qapp):
@@ -947,6 +977,12 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
             "ui.chime_on_confirm": True,
             "stats.poll_seconds": 90,
             "stats.show_estimate": False,
+            "stats.show_trend": False,
+            "stats.alert_enabled": False,
+            "stats.alert_threshold": 75,
+            "escalation.enabled": False,
+            "escalation.after_seconds": 120,
+            "escalation.command": "notify-send hi",
             "update.check": False,
             "engine.mode": "openrgb",
             "colors.idle": "#010203",
@@ -964,6 +1000,12 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     assert cfg.ui.chime_on_confirm is True
     assert cfg.stats.poll_seconds == 90
     assert cfg.stats.show_estimate is False
+    assert cfg.stats.show_trend is False
+    assert cfg.stats.alert_enabled is False
+    assert cfg.stats.alert_threshold == 75
+    assert cfg.escalation.enabled is False
+    assert cfg.escalation.after_seconds == 120
+    assert cfg.escalation.command == "notify-send hi"
     assert cfg.update.check is False
     assert cfg.engine.mode == "openrgb"
     assert cfg.colors.idle == "#010203"
@@ -996,7 +1038,8 @@ def test_every_stats_field_is_accounted_for():
 
     # Written by SettingsDialog and mirrored in Tray._apply_settings — each is asserted
     # in test_apply_settings_mirrors_every_field_it_can_write above.
-    dialog_writes = {"poll_seconds", "show_estimate"}
+    dialog_writes = {"poll_seconds", "show_estimate", "show_trend",
+                     "alert_enabled", "alert_threshold"}
     # Not reachable from the dialog at all (config-file only).
     config_file_only = {"enabled"}
 
@@ -1004,6 +1047,23 @@ def test_every_stats_field_is_accounted_for():
         "StatsConfig changed. If the settings dialog writes the new field, mirror it in "
         "Tray._apply_settings, assert it in the test above and add it to `dialog_writes`; "
         "otherwise add it to `config_file_only`."
+    )
+
+
+def test_every_escalation_field_is_accounted_for():
+    """Same tripwire as `StatsConfig` above, for the escalation settings — and for the
+    same reason: every one of them is read off the live `Config` the tray already holds,
+    so a field the dialog writes but `_apply_settings` forgets is a control that silently
+    does nothing until the next restart."""
+    from dataclasses import fields
+
+    from tintaview.core.config import EscalationConfig
+
+    dialog_writes = {"enabled", "after_seconds", "command"}
+
+    assert {f.name for f in fields(EscalationConfig)} == dialog_writes, (
+        "EscalationConfig changed. Mirror the new field in Tray._apply_settings, assert "
+        "it in test_apply_settings_mirrors_every_field_it_can_write, and list it here."
     )
 
 
@@ -1572,7 +1632,7 @@ def test_workers_drop_a_second_request_while_one_is_running(qapp):
     release = threading.Event()
     runs: list[int] = []
 
-    class _Slow(tray_mod._GuardedWorker):
+    class _Slow(workers_mod._GuardedWorker):
         def _run(self) -> None:
             runs.append(1)
             started.set()
@@ -2168,3 +2228,237 @@ def test_registering_the_windows_identity_is_a_no_op_elsewhere(qapp, monkeypatch
     tray_mod._register_windows_identity()
 
     assert written == []
+
+
+# --------------------------------------------------------------------------- escalation
+
+
+def _confirm_payload() -> dict:
+    return {
+        "effective": "confirm",
+        "agents": {"claude": {"effective": "confirm", "count": 1},
+                   "codex": {"effective": "idle", "count": 1}},
+        "count": 2,
+    }
+
+
+@pytest.fixture
+def escalation_tray(tray, monkeypatch):
+    """A tray whose confirm clock is ours to move, with the chime and the balloon
+    recorded rather than played."""
+    app_instance, server = tray
+    app_instance._cfg.ui.chime_on_confirm = True
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(tray_mod.time, "monotonic", lambda: clock["now"])
+    chimes: list[int] = []
+    monkeypatch.setattr(tray_mod.TrayApp, "_chime", lambda self: chimes.append(1))
+    balloons: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage",
+        lambda self, title, message, *a, **k: balloons.append((title, message)),
+    )
+    commands: list[str] = []
+    monkeypatch.setattr(
+        tray_mod.TrayApp, "_run_escalation_command",
+        lambda self, waiting: commands.append(", ".join(waiting)),
+    )
+    return app_instance, server, clock, chimes, balloons, commands
+
+
+def test_an_unanswered_confirm_nags_once_per_interval(escalation_tray):
+    """The whole point: one chime is missed by whoever walked away."""
+    app_instance, server, clock, chimes, balloons, commands = escalation_tray
+    server.set(_confirm_payload())
+
+    app_instance._poll_state()  # confirm starts: the transition chime, nothing else
+    assert (len(chimes), balloons) == (1, [])
+
+    clock["now"] += 59
+    app_instance._poll_state()
+    assert (len(chimes), balloons) == (1, []), "escalated before the interval was up"
+
+    clock["now"] += 2  # 61 s of unbroken confirm
+    app_instance._poll_state()
+    assert len(chimes) == 2
+    assert len(balloons) == 1
+    assert "Claude Code" in balloons[0][1], "the balloon must name who is waiting"
+    assert "Codex" not in balloons[0][1], "only agents actually waiting are named"
+
+    clock["now"] += 60
+    app_instance._poll_state()
+    assert (len(chimes), len(balloons)) == (3, 2)
+
+
+def test_the_escalation_command_runs_once_per_confirm(escalation_tray):
+    """A command that pushes to a phone must not push once a minute for an hour."""
+    app_instance, server, clock, _chimes, _balloons, commands = escalation_tray
+    server.set(_confirm_payload())
+    app_instance._poll_state()
+
+    for _ in range(3):
+        clock["now"] += 60
+        app_instance._poll_state()
+
+    assert commands == ["Claude Code"]
+
+
+def test_answering_the_confirm_stops_the_nagging_and_rearms_it(escalation_tray):
+    app_instance, server, clock, chimes, balloons, commands = escalation_tray
+    server.set(_confirm_payload())
+    app_instance._poll_state()
+    clock["now"] += 61
+    app_instance._poll_state()
+    assert len(balloons) == 1
+
+    server.set({"effective": "working",
+                "agents": {"claude": {"effective": "working", "count": 1}}, "count": 1})
+    clock["now"] += 600
+    app_instance._poll_state()
+    assert len(balloons) == 1, "escalated after the confirm was answered"
+
+    # A second confirm is a second confirm: it gets its own interval and its own command
+    # run, rather than inheriting the first one's spent counters.
+    server.set(_confirm_payload())
+    app_instance._poll_state()
+    clock["now"] += 61
+    app_instance._poll_state()
+    assert len(balloons) == 2
+    assert commands == ["Claude Code", "Claude Code"]
+
+
+def test_a_long_suspend_owes_exactly_one_escalation(escalation_tray):
+    """A laptop that slept for an hour must not wake up and fire sixty balloons."""
+    app_instance, server, clock, _chimes, balloons, _commands = escalation_tray
+    server.set(_confirm_payload())
+    app_instance._poll_state()
+
+    clock["now"] += 3600
+    app_instance._poll_state()
+
+    assert len(balloons) == 1
+
+
+def test_escalation_can_be_switched_off(escalation_tray):
+    app_instance, server, clock, chimes, balloons, commands = escalation_tray
+    app_instance._cfg.escalation.enabled = False
+    server.set(_confirm_payload())
+    app_instance._poll_state()
+
+    clock["now"] += 600
+    app_instance._poll_state()
+
+    assert (len(chimes), balloons, commands) == (1, [], []), "only the transition chime"
+
+
+def test_the_escalation_command_is_handed_the_state_in_its_environment(tray, monkeypatch):
+    """`Popen` with the user's own string, detached, with nothing interpolated into it."""
+    app_instance, _server = tray
+    app_instance._cfg.escalation.command = "  notify-send 'agent waiting'  "
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        tray_mod.subprocess, "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    app_instance._run_escalation_command(["Claude Code"])
+
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == "notify-send 'agent waiting'"
+    assert kwargs["shell"] is True
+    assert kwargs["env"]["TINTAVIEW_STATUS"] == "confirm"
+    assert kwargs["env"]["TINTAVIEW_AGENTS"] == "Claude Code"
+
+
+def test_an_empty_escalation_command_spawns_nothing(tray, monkeypatch):
+    app_instance, _server = tray
+    app_instance._cfg.escalation.command = "   "
+    calls: list[tuple] = []
+    monkeypatch.setattr(tray_mod.subprocess, "Popen", lambda *a, **k: calls.append(a))
+
+    app_instance._run_escalation_command(["Claude Code"])
+
+    assert calls == []
+
+
+def test_a_broken_escalation_command_never_reaches_the_user(tray, monkeypatch):
+    """It is the user's string to fix; a modal at 2am is worse than the log line."""
+    app_instance, _server = tray
+    app_instance._cfg.escalation.command = "does-not-exist"
+    monkeypatch.setattr(
+        tray_mod.subprocess, "Popen",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("no such file")),
+    )
+    boxes: list = []
+    for name in ("information", "warning", "critical"):
+        monkeypatch.setattr(QtWidgets.QMessageBox, name,
+                            staticmethod(lambda *a, **k: boxes.append(a)))
+
+    app_instance._run_escalation_command(["Claude Code"])  # must not raise
+
+    assert boxes == []
+
+
+# --------------------------------------------------------------------------- usage alerts
+
+
+def _usage_result(agent: str, pct: float, label: str = "5-hour limit") -> UsageResult:
+    return UsageResult(agent=agent, rows=[UsageRow(label=label, pct=pct)])
+
+
+def test_a_usage_window_crossing_the_threshold_alerts_once(tray, monkeypatch):
+    app_instance, _server = tray
+    balloons: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage",
+        lambda self, title, message, *a, **k: balloons.append((title, message)),
+    )
+
+    app_instance._apply_results({"claude": _usage_result("claude", 88)})
+    assert balloons == []
+
+    app_instance._apply_results({"claude": _usage_result("claude", 91)})
+    assert len(balloons) == 1
+    assert "Claude Code" in balloons[0][1] and "91" in balloons[0][1]
+
+    # Still over the line on the next poll: it has already said its piece.
+    app_instance._apply_results({"claude": _usage_result("claude", 96)})
+    assert len(balloons) == 1
+
+    # Back under (a reset, or a new week) — and over again, which is news a second time.
+    app_instance._apply_results({"claude": _usage_result("claude", 4)})
+    app_instance._apply_results({"claude": _usage_result("claude", 93)})
+    assert len(balloons) == 2
+
+
+def test_usage_alerts_respect_the_configured_threshold_and_switch(tray, monkeypatch):
+    app_instance, _server = tray
+    balloons: list = []
+    monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage",
+                        lambda self, *a, **k: balloons.append(a))
+
+    app_instance._cfg.stats.alert_threshold = 50
+    app_instance._apply_results({"claude": _usage_result("claude", 55)})
+    assert len(balloons) == 1
+
+    app_instance._cfg.stats.alert_enabled = False
+    app_instance._apply_results({"codex": _usage_result("codex", 99)})
+    assert len(balloons) == 1
+
+
+def test_only_real_limit_rows_can_raise_a_usage_alert(tray, monkeypatch):
+    """A credits row's percentage is spend against a budget, and an info row's is
+    meaningless — neither is a window that runs out."""
+    app_instance, _server = tray
+    balloons: list = []
+    monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage",
+                        lambda self, *a, **k: balloons.append(a))
+
+    app_instance._apply_results({
+        "claude": UsageResult(agent="claude", rows=[
+            UsageRow(label="Credits", pct=99, kind="credits"),
+            UsageRow(label="Plan", pct=99, kind="info", show_pct=False),
+        ])
+    })
+
+    assert balloons == []

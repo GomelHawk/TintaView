@@ -23,8 +23,8 @@ and engine balloons say one thing each, so they keep a title that says what it i
 from __future__ import annotations
 
 import contextlib
-import datetime
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -39,7 +39,16 @@ from tintaview.core.config import Config
 from tintaview.core.events import STATUS_NONE
 from tintaview.i18n import set_language, t
 from tintaview.ui import icons
+from tintaview.ui.dialogs import DoctorReportDialog, show_about
 from tintaview.ui.flyout import Flyout
+from tintaview.ui.workers import (
+    DoctorWorker,
+    HookCheckWorker,
+    ManualUpdateWorker,
+    StateWorker,
+    StatsWorker,
+    UpdateCheckWorker,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - types only
     from tintaview.stats.model import UsageResult
@@ -53,7 +62,6 @@ ANIM_TICK_MS = 200
 USAGE_MIN_REFRESH_S = 30.0  # ignore flyout-open refreshes more frequent than this
 CLICK_REOPEN_GUARD_S = 0.25  # guards against "the click that just closed it" reopening it
 ICON_SIZE = 128
-FIRST_COPYRIGHT_YEAR = 2026
 
 
 def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]:
@@ -64,6 +72,21 @@ def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]
     """
     return tuple(max(0, min(255, int(c * factor))) for c in rgb)  # type: ignore[return-value]
 
+
+
+def _agent_label(key: str) -> str:
+    """Human name for an agent key, for the escalation balloon.
+
+    Lazy import plus a fallback, the same shape as `flyout._display_name`: the registry
+    is the one place a key becomes a label, and a cosmetic lookup must never be able to
+    break the thing it is labelling.
+    """
+    try:
+        from tintaview.agents.base import display_name
+
+        return display_name(key)
+    except Exception:
+        return key.replace("_", " ").title() or key
 
 
 def _stdin_is_interactive() -> bool:
@@ -139,303 +162,6 @@ def run_console_setup() -> None:
         QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.wizard.open_failed"))
 
 
-class _GuardedWorker(QtCore.QObject):
-    """Base for the tray's background workers: **one run at a time**, later requests
-    dropped rather than queued.
-
-    Everything below is triggered by something the user can repeat freely (the "Refresh
-    usage" menu item, "Check for updates", a timer that also fires on demand) and each run
-    is seconds of real I/O. Unguarded they stack: several concurrent Cursor RPCs against a
-    ~300 MB `state.vscdb`, or — worse — two `doctor` runs whose process-global
-    `redirect_stdout` unwinds in the wrong order and leaves `sys.stdout` pointing at a dead
-    buffer for the rest of the process's life. A non-blocking lock makes a request that
-    arrives mid-run a no-op, which is what "refresh" means to a user anyway.
-
-    `_run()` is deliberately callable directly (the tests do): the lock lives in `_start`,
-    not in the body, so a synchronous call is never asked to release a lock it never took.
-    """
-
-    #: Thread name for the default `fetch()` entry point.
-    _thread_name = "tv-tray-worker"
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._inflight = threading.Lock()
-
-    def _start(self, fn: Any, name: str) -> bool:
-        """Run `fn` on a daemon thread unless one is already in flight. True if started."""
-        if not self._inflight.acquire(blocking=False):
-            return False
-
-        def run() -> None:
-            try:
-                fn()
-            finally:
-                self._inflight.release()
-
-        try:
-            threading.Thread(target=run, daemon=True, name=name).start()
-        except Exception:
-            self._inflight.release()
-            raise
-        return True
-
-    def fetch(self) -> None:
-        self._start(self._run, self._thread_name)
-
-    def _run(self) -> None:  # pragma: no cover - always overridden
-        raise NotImplementedError
-
-
-class StatsWorker(_GuardedWorker):
-    """Runs `StatsService.fetch_all()` off the GUI thread — it's real network/disk
-    I/O (Claude/Codex JSONL scans, a Cursor RPC call) and must never block painting.
-    """
-
-    results_ready = QtCore.Signal(dict)  # dict[str, UsageResult]
-    _thread_name = "tv-tray-stats"
-
-    def __init__(self, cfg: Config) -> None:
-        super().__init__()
-        self._cfg = cfg
-        self._svc: Any = None  # built lazily, off the GUI thread, on first use
-
-    def _run(self) -> None:
-        try:
-            # Imported lazily: the stats layer (service.py/cache.py/providers/) may
-            # still be under construction by another agent when this module loads,
-            # and importing it eagerly would make that a hard dependency at import
-            # time instead of at first use.
-            from tintaview.stats.service import StatsService
-
-            # Built here rather than in __init__ and, thanks to `_GuardedWorker`, only
-            # ever by one thread at a time — two overlapping fetches used to be able to
-            # construct (and cache-open) two services.
-            if self._svc is None:
-                self._svc = StatsService(self._cfg)
-            results = self._svc.fetch_all()
-        except Exception:
-            # Never let a stats failure reach the GUI thread as a crash — the tray
-            # just keeps showing whatever usage it already had.
-            log.exception("stats fetch_all() failed - keeping last known usage")
-            return
-        self.results_ready.emit(results)
-
-
-class StateWorker(_GuardedWorker):
-    """HTTP fallback path only — see module docstring. Direct `state_payload()`
-    reads happen straight on the GUI thread in `TrayApp._poll_state`, since that
-    call is documented as an in-process lock + dict build, not I/O.
-    """
-
-    state_ready = QtCore.Signal(dict)
-    _thread_name = "tv-tray-state-http"
-
-    def __init__(self, server: Any) -> None:
-        super().__init__()
-        self._server = server
-
-    def _run(self) -> None:
-        import json
-        import urllib.request
-
-        try:
-            with urllib.request.urlopen(f"{self._server.url}/state", timeout=2) as r:
-                payload = json.loads(r.read().decode("utf-8"))
-        except Exception as e:
-            log.warning("state poll (HTTP fallback) failed: %r", e)
-            payload = {"effective": "none", "agents": {}, "count": 0}
-        self.state_ready.emit(payload)
-
-
-class UpdateCheckWorker(_GuardedWorker):
-    """One-shot background check against the GitHub Releases API, off the GUI thread —
-    same reasoning as `StatsWorker`: real network I/O must never block painting.
-
-    Only emits when a strictly newer release actually exists; "up to date" and "the
-    check failed" (no network, rate-limited, no releases yet) are silent, since this
-    runs unattended on every start and neither is something the user needs to see.
-    """
-
-    update_available = QtCore.Signal(str, str)  # (latest_tag, current_version)
-    _thread_name = "tv-tray-update-check"
-
-    def _run(self) -> None:
-        from tintaview import __version__
-
-        try:
-            from tintaview.install import update as update_mod
-        except ImportError:
-            return
-
-        try:
-            release = update_mod.latest_release()
-            if release is None:
-                return
-            tag = str(release.get("tag_name") or "").lstrip("vV").strip()
-            if not tag or update_mod.compare_versions(__version__, tag) >= 0:
-                return
-        except Exception:
-            log.exception("startup update check failed")
-            return
-        self.update_available.emit(tag, __version__)
-
-
-class DoctorWorker(_GuardedWorker):
-    """Runs `tintaview doctor` off the GUI thread and hands back its report as text.
-
-    `doctor` writes a human report to stdout and returns an exit code; a windowed build
-    has no stdout anyone can read, so it is captured and shown in a dialog instead.
-    `run_doctor` has no "write to this stream" parameter, so the capture stays
-    `redirect_stdout` — which is process-global, and therefore only safe because
-    `_GuardedWorker` serialises runs: two overlapping ones unwind their redirects in the
-    wrong order and leave `sys.stdout` bound to a StringIO nobody reads again. It is worth
-    it: the alternative is spawning a console the user has to keep open, on a platform
-    where the tray runs as pythonw precisely so that no console ever appears.
-    """
-
-    report_ready = QtCore.Signal(str)
-    _thread_name = "tv-tray-doctor"
-
-    def _run(self) -> None:
-        import io
-        import traceback
-
-        buffer = io.StringIO()
-        try:
-            from tintaview.install.doctor import run_doctor
-
-            with contextlib.redirect_stdout(buffer):
-                # interactive=False, not just paint=False: `doctor -v` also offers a
-                # live hook test, and *both* prompts are unanswerable here. A windowed
-                # process has no stdin at all (`sys.stdin` is None under pythonw), and a
-                # tray started from a terminal has one the user cannot see — so this
-                # would either raise or hang on "Running diagnostics…" forever.
-                run_doctor(verbose=True, paint=False, interactive=False)
-        except Exception:
-            log.exception("doctor run failed")
-            # Emit what actually went wrong, plus whatever the report managed before it
-            # broke. A generic "couldn't run it" tells the user nothing and sends them
-            # to a log they have to find first — which is the same problem the logs menu
-            # item exists to solve.
-            partial = buffer.getvalue().strip()
-            detail = t("tray.diagnostics.crashed") + "\n\n" + traceback.format_exc()
-            self.report_ready.emit(f"{partial}\n\n{detail}" if partial else detail)
-            return
-        self.report_ready.emit(buffer.getvalue().strip())
-
-
-class ManualUpdateWorker(_GuardedWorker):
-    """The "Check for updates" menu item's background half — the *check* and the
-    *install*, both off the GUI thread.
-
-    Neither is anything a GUI thread may run. `latest_release()` is an HTTPS call with a
-    10 s timeout, and `run_update()` on Linux/macOS is a blocking `sh install.sh` that
-    tears down and rebuilds the private venv — minutes, not seconds. Run inline they froze
-    the tray icon, the flyout and every one of the broker's own Qt callbacks, with no
-    window on screen to say why. (On Windows `run_update` detaches the installer and
-    returns immediately; a thread is harmless there and keeps one code path.)
-
-    The check and the install share one in-flight lock: they are two halves of the same
-    user action, and starting a second check while an install is running makes no sense.
-    """
-
-    #: `outcome` values carried by `check_ready`. Deliberately not translated strings —
-    #: the wording lives in the catalogue, this is the state the GUI slot switches on.
-    OUTCOME_UNSUPPORTED = "unsupported"
-    OUTCOME_FAILED = "failed"
-    OUTCOME_CURRENT = "current"
-    OUTCOME_AVAILABLE = "available"
-
-    check_ready = QtCore.Signal(str, str, str)  # (outcome, latest_tag, release_notes)
-    install_done = QtCore.Signal(int)  # run_update()'s exit code
-
-    #: Release notes are the project's own published text, quoted as written (the rule
-    #: every usage provider follows) — just not all of it in a message box.
-    NOTES_LIMIT = 500
-
-    def check(self) -> bool:
-        """Start a check. False if a check or an install is already running."""
-        return self._start(self._check, "tv-tray-update-manual")
-
-    def install(self) -> bool:
-        """Start the install. False if a check or an install is already running."""
-        return self._start(self._install, "tv-tray-update-install")
-
-    def _check(self) -> None:
-        from tintaview import __version__
-
-        try:
-            from tintaview.install import update as update_mod
-        except ImportError:
-            self.check_ready.emit(self.OUTCOME_UNSUPPORTED, "", "")
-            return
-
-        try:
-            release = update_mod.latest_release()
-            if release is None:
-                self.check_ready.emit(self.OUTCOME_FAILED, "", "")
-                return
-            tag = str(release.get("tag_name") or "").lstrip("vV").strip()
-            if not tag or update_mod.compare_versions(__version__, tag) >= 0:
-                self.check_ready.emit(self.OUTCOME_CURRENT, "", "")
-                return
-            notes = str(release.get("body") or "").strip()
-        except Exception:
-            log.exception("manual update check failed")
-            self.check_ready.emit(self.OUTCOME_FAILED, "", "")
-            return
-
-        if len(notes) > self.NOTES_LIMIT:
-            notes = notes[: self.NOTES_LIMIT].rstrip() + "…"
-        self.check_ready.emit(self.OUTCOME_AVAILABLE, tag, notes)
-
-    def _install(self) -> None:
-        try:
-            from tintaview.install import update as update_mod
-
-            code = update_mod.run_update(check_only=False)
-        except Exception:
-            log.exception("update install failed")
-            code = 1
-        self.install_done.emit(int(code))
-
-
-class HookCheckWorker(_GuardedWorker):
-    """One hook check at startup, off the GUI thread — no timer, no menu item.
-
-    Agents rewrite their config on upgrade, so hooks that were installed can disappear
-    and TintaView simply stops hearing about sessions, which reads as "the lights are
-    broken". The whole check is `install.wsl.missing_hooks`, the same WSL-aware resolution
-    `doctor` uses: in a split install it compares against the distro's `tv-hook.sh` and
-    reads the agent configs behind their UNC paths, because measured against the
-    Windows-side paths every agent on a working machine is "stale". It runs off the GUI
-    thread since that resolution can wait on `wsl.exe`.
-    """
-
-    #: Display names of the agents whose hooks need (re)installing. Never emitted when
-    #: the state could not be determined (an unreachable distro): unknown is not missing.
-    missing_ready = QtCore.Signal(list)
-    _thread_name = "tv-tray-hooks"
-
-    def __init__(self, cfg: Config) -> None:
-        super().__init__()
-        self._cfg = cfg
-
-    def _run(self) -> None:
-        try:
-            from tintaview.install import wsl
-        except ImportError:
-            return
-        try:
-            missing = wsl.missing_hooks(self._cfg)
-        except Exception:
-            log.exception("startup hook check failed")
-            return
-        if missing is not None:
-            self.missing_ready.emit(missing)
-
-
 class TrayApp(QtCore.QObject):
     """Owns the tray icon, the flyout and the polling timers.
 
@@ -482,6 +208,16 @@ class TrayApp(QtCore.QObject):
         # re-fire a notification on every state poll.
         self._engine_note_shown: str | None = None
 
+        #: Unanswered-confirm escalation (see `_escalate_confirm`). `None` whenever the
+        #: effective status is anything but confirm, so leaving confirm — for any reason,
+        #: including the watchdog releasing a dead session — is what resets the nagging.
+        self._confirm_since: float | None = None
+        self._escalations_sent = 0
+        self._escalation_command_ran = False
+
+        #: (agent, row label) pairs already alerted on — see `_check_usage_alerts`.
+        self._usage_alerted: set[tuple[str, str]] = set()
+
         # If `server` doesn't expose `state_payload` (some other object standing in
         # for a real StatusServer), fall back to polling its `/state` HTTP endpoint.
         self._has_direct_state = callable(getattr(server, "state_payload", None))
@@ -502,7 +238,7 @@ class TrayApp(QtCore.QObject):
         self._hook_worker = HookCheckWorker(cfg)
         self._hook_worker.missing_ready.connect(self._on_hooks_missing)
         self._doctor_worker.report_ready.connect(self._show_doctor_report)
-        self._doctor_dialog: QtWidgets.QDialog | None = None
+        self._doctor_dialog: DoctorReportDialog | None = None
 
         #: One engine rebuild at a time — see `_refresh_lighting`. The thread is kept so
         #: tests can join it; nothing in the app waits on it.
@@ -651,43 +387,19 @@ class TrayApp(QtCore.QObject):
             )
 
     def _run_diagnostics(self) -> None:
-        """Run `doctor` in the background and show its report in a dialog.
-
-        The dialog opens immediately on a "running…" placeholder rather than after the
-        run: `doctor` probes the daemon, the lighting engine and every agent's hooks
-        over the network, which takes seconds — long enough that a menu item that
-        appeared to do nothing would get clicked again.
+        """Run `doctor` in the background and show its report — see `DoctorReportDialog`,
+        which is what opens immediately on a placeholder while the run takes its seconds.
         """
-        dialog = self._doctor_dialog
-        if dialog is None:
-            dialog = QtWidgets.QDialog()
-            dialog.setWindowTitle(t("tray.diagnostics.title"))
-            dialog.resize(760, 520)
-            layout = QtWidgets.QVBoxLayout(dialog)
-            view = QtWidgets.QPlainTextEdit()
-            view.setReadOnly(True)
-            # Monospace: `doctor` aligns its report in columns, which a proportional
-            # font shreds. Selectable (a read-only QPlainTextEdit still is) so the
-            # report can be copied into a bug report.
-            view.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
-            layout.addWidget(view)
-            buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
-            buttons.rejected.connect(dialog.reject)
-            layout.addWidget(buttons)
-            dialog._view = view  # type: ignore[attr-defined]
-            self._doctor_dialog = dialog
-
-        dialog._view.setPlainText(t("tray.diagnostics.running"))  # type: ignore[attr-defined]
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        if self._doctor_dialog is None:
+            self._doctor_dialog = DoctorReportDialog()
+        self._doctor_dialog.set_text(t("tray.diagnostics.running"))
+        self._doctor_dialog.surface()
         self._doctor_worker.fetch()
 
     def _show_doctor_report(self, report: str) -> None:
-        dialog = self._doctor_dialog
-        if dialog is None:
+        if self._doctor_dialog is None:
             return
-        dialog._view.setPlainText(report or t("tray.diagnostics.failed"))  # type: ignore[attr-defined]
+        self._doctor_dialog.set_text(report or t("tray.diagnostics.failed"))
 
     def _on_show_requested(self) -> None:
         """A second `tintaview` launch asked this instance to surface itself."""
@@ -772,6 +484,23 @@ class TrayApp(QtCore.QObject):
         # take effect without a restart — see `tests/test_ui.py`'s mirror guard, which
         # exists because omitting exactly this line shipped a tick box that did nothing.
         self._cfg.stats.show_estimate = new_cfg.stats.show_estimate
+        # `StatsService` reads `show_trend` on its next poll; the alert thresholds are
+        # read by `_check_usage_alerts` right here. Lowering the threshold re-arms every
+        # window that is already over the new one — the latch is keyed by row, not by
+        # threshold, so a window sitting above both values would otherwise stay silent
+        # about a limit the user just said they wanted to hear about.
+        self._cfg.stats.show_trend = new_cfg.stats.show_trend
+        if new_cfg.stats.alert_threshold != self._cfg.stats.alert_threshold:
+            self._usage_alerted.clear()
+        self._cfg.stats.alert_enabled = new_cfg.stats.alert_enabled
+        self._cfg.stats.alert_threshold = new_cfg.stats.alert_threshold
+        # Escalation is read by `_track_confirm` off the state poll, so these take effect
+        # on the next tick — including mid-confirm, which is the point: someone who opens
+        # Settings *because* the nagging is too frequent must not have to wait for the
+        # current confirm to clear.
+        self._cfg.escalation.enabled = new_cfg.escalation.enabled
+        self._cfg.escalation.after_seconds = new_cfg.escalation.after_seconds
+        self._cfg.escalation.command = new_cfg.escalation.command
         self._cfg.update.check = new_cfg.update.check
         # The flyout holds this very `Config`, so the band picks these up on its next
         # paint — which the `set_results` call further down schedules, along with the
@@ -891,39 +620,7 @@ class TrayApp(QtCore.QObject):
             log.exception("could not re-apply lighting after a settings change")
 
     def _show_about(self) -> None:
-        from tintaview import __version__
-
-        year = datetime.date.today().year
-        copyright_years = str(FIRST_COPYRIGHT_YEAR) if year <= FIRST_COPYRIGHT_YEAR else f"{FIRST_COPYRIGHT_YEAR}-{year}"
-
-        dialog = QtWidgets.QDialog(None)
-        dialog.setWindowTitle(t("tray.about.title"))
-
-        logo = QtWidgets.QLabel()
-        pixmap = icons.logo_pixmap(480)
-        if not pixmap.isNull():
-            logo.setPixmap(pixmap)
-        logo.setAlignment(QtCore.Qt.AlignCenter)
-
-        version_label = QtWidgets.QLabel(t("tray.about.version", version=__version__))
-        version_label.setAlignment(QtCore.Qt.AlignCenter)
-
-        # Not translated on purpose: a copyright notice is the same line in every
-        # language, and the two names in it are names.
-        copyright_label = QtWidgets.QLabel(f"Copyright (C) {copyright_years} Dmitry Koshelenko, Igor Koshelenko")
-        copyright_label.setAlignment(QtCore.Qt.AlignCenter)
-
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-        buttons.accepted.connect(dialog.accept)
-
-        layout = QtWidgets.QVBoxLayout(dialog)
-        layout.addWidget(logo)
-        layout.addWidget(version_label)
-        layout.addWidget(copyright_label)
-        layout.addWidget(buttons)
-        layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
-
-        dialog.exec()
+        show_about()
 
     def _on_update_available(self, tag: str, current: str) -> None:
         """Startup check found a newer release — surface it as a tray balloon rather
@@ -1079,6 +776,8 @@ class TrayApp(QtCore.QObject):
             self._chime()
         self._prev_effective = effective
 
+        self._track_confirm(effective, agents_payload)
+
         self._surface_engine_note(payload)
 
         # Tooltip likewise: it is a function of exactly these two values, and this runs
@@ -1177,6 +876,92 @@ class TrayApp(QtCore.QObject):
             return t("tray.tooltip.no_sessions")
         return t("tray.tooltip.active_sessions", count=count)
 
+    # --- unanswered confirm ---------------------------------------------------------
+
+    def _track_confirm(self, effective: str, agents_payload: dict) -> None:
+        """Keep the "how long has this confirm been waiting?" clock, and escalate on it.
+
+        Driven from `_apply_state`, i.e. off the existing 1.5 s state poll, rather than
+        from a timer of its own: the poll already knows the moment confirm starts and the
+        moment it ends, and a second clock could only ever disagree with it.
+        """
+        if effective != "confirm":
+            self._confirm_since = None
+            self._escalations_sent = 0
+            self._escalation_command_ran = False
+            return
+
+        now = time.monotonic()
+        if self._confirm_since is None:
+            self._confirm_since = now
+            return
+
+        escalation = self._cfg.escalation
+        if not escalation.enabled or escalation.after_seconds <= 0:
+            return
+        waited = now - self._confirm_since
+        # `// after_seconds` rather than a running deadline: a laptop that suspended for
+        # an hour comes back owing exactly one escalation, not sixty.
+        due = int(waited // escalation.after_seconds)
+        if due <= self._escalations_sent:
+            return
+        self._escalations_sent = due
+        self._escalate_confirm(waited, agents_payload)
+
+    def _escalate_confirm(self, waited: float, agents_payload: dict) -> None:
+        """Nag: chime again, balloon, and (once per confirm) run the user's command."""
+        self._chime()
+        minutes = max(1, int(waited // 60))
+        waiting = [
+            _agent_label(key)
+            for key, value in sorted(agents_payload.items())
+            if value.get("effective") == "confirm"
+        ]
+        self.tray.showMessage(
+            "TintaView",
+            t("tray.escalate.balloon_body", minutes=minutes, agents=", ".join(waiting))
+            if waiting
+            else t("tray.escalate.balloon_body_unknown", minutes=minutes),
+            QtWidgets.QSystemTrayIcon.Warning,
+            10000,
+        )
+        if not self._escalation_command_ran:
+            self._escalation_command_ran = True
+            self._run_escalation_command(waiting)
+
+    def _run_escalation_command(self, waiting: list[str]) -> None:
+        """Fire the configured command and forget about it.
+
+        Through the shell, because the whole point is that the user writes whatever their
+        setup needs (`curl`, `ntfy`, a PowerShell one-liner) in one config field, and
+        detached, because it is not ours to wait for: `Popen` returns immediately, the
+        exit code is never read, and a command that blocks forever blocks only itself.
+        TintaView's own state is handed over in the environment rather than interpolated
+        into the string — a quoting bug in `TINTAVIEW_AGENTS` must not be able to change
+        what the command does.
+        """
+        command = self._cfg.escalation.command.strip()
+        if not command:
+            return
+        env = dict(os.environ)
+        env["TINTAVIEW_STATUS"] = "confirm"
+        env["TINTAVIEW_AGENTS"] = ", ".join(waiting)
+        try:
+            kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                # No console flash: the tray runs windowed, and `shell=True` here means
+                # cmd.exe, which would otherwise pop a window for a `curl` one-liner.
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                # Its own process group, so a command that outlives the tray isn't killed
+                # by the Ctrl+C that stops a dev run.
+                kwargs["start_new_session"] = True
+            subprocess.Popen(command, shell=True, env=env, **kwargs)  # noqa: S602 - the user's own command, by design
+        except Exception:
+            # A broken command is the user's to fix, and telling them about it in a
+            # modal at 2am is worse than the log line they can find when they look.
+            log.exception("escalation command failed to start: %r", command)
+
     def _chime(self) -> None:
         if not self._cfg.ui.chime_on_confirm:
             return
@@ -1201,6 +986,45 @@ class TrayApp(QtCore.QObject):
         self._reorder_results()
         self._last_usage_fetch = time.monotonic()
         self.flyout.set_results(self._usage_results)
+        self._check_usage_alerts(results)
+
+    def _check_usage_alerts(self, results: dict) -> None:
+        """Balloon the first time a usage window crosses `stats.alert_threshold`.
+
+        Fed only the results of *this* poll, not the merged set: a cached section that
+        nobody refreshed has not crossed anything, and re-alerting on it every poll is
+        exactly the noise this is supposed to replace.
+
+        One alert per window per crossing. The latch is keyed by (agent, row label) and
+        released only when that row comes back *under* the threshold — a window that
+        sits at 94% for three hours has one thing to say, and it already said it.
+        """
+        stats = self._cfg.stats
+        if not stats.alert_enabled:
+            return
+        threshold = stats.alert_threshold
+        for key, result in results.items():
+            for row in getattr(result, "rows", []):
+                # `kind == "limit"` only: a credits row's percentage is a spend figure
+                # against a budget, which is not a window that runs out and resets, and
+                # an info row's `pct` is meaningless (`show_pct` is what says so).
+                if row.kind != "limit" or not row.show_pct:
+                    continue
+                latch = (key, row.label)
+                if row.pct < threshold:
+                    self._usage_alerted.discard(latch)
+                    continue
+                if latch in self._usage_alerted:
+                    continue
+                self._usage_alerted.add(latch)
+                self._chime()
+                self.tray.showMessage(
+                    "TintaView",
+                    t("tray.usage_alert.balloon_body",
+                      agent=_agent_label(key), label=row.label, pct=int(row.pct)),
+                    QtWidgets.QSystemTrayIcon.Warning,
+                    10000,
+                )
 
     def _reorder_results(self) -> None:
         """Re-key `_usage_results` into `cfg.enabled_agents` order.

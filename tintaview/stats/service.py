@@ -28,6 +28,7 @@ from .providers.codex import CodexUsageProvider
 from .providers.copilot import CopilotUsageProvider
 from .providers.cursor import CursorUsageProvider
 from .providers.jetbrains import JetBrainsUsageProvider
+from .trend import TrendStore
 
 log = logging.getLogger(__name__)
 
@@ -98,9 +99,11 @@ class StatsService:
         cfg: Config,
         cache: UsageCache | None = None,
         providers: Mapping[str, UsageProvider] | None = None,
+        trend: TrendStore | None = None,
     ) -> None:
         self._cfg = cfg
         self._cache = cache or UsageCache()
+        self._trend = trend or TrendStore()
         self._providers: dict[str, UsageProvider] = (
             dict(providers) if providers is not None else {key: cls() for key, cls in DEFAULT_PROVIDERS.items()}
         )
@@ -142,9 +145,30 @@ class StatsService:
         if fresh:
             self._cache.update_many(fresh)
 
+        # Recorded from every poll, worded only when the setting is on: the samples cost
+        # a few bytes and make the line available the moment someone ticks the box,
+        # whereas a history that only starts being kept when the box is ticked means a
+        # blank card for the next half hour — the setting would look broken.
+        self._trend.record(results.values())
+        if self._cfg.stats.show_trend:
+            self._apply_trend(results)
+
         with self._lock:
             self._latest.update(results)
         return results
+
+    def _apply_trend(self, results: dict[str, UsageResult]) -> None:
+        """Attach "empties in ~40 min" to whichever row of each section runs out first.
+
+        Mutates the results in place, after the cache write: `trend` is not persisted
+        (see `UsageResult.trend`), and a sentence about the next 40 minutes has no
+        business in a file that can be read back two days later.
+        """
+        for result in results.values():
+            soonest = self._trend.soonest(result)
+            result.trend = (
+                fmt.burn_rate_text(soonest[0].label, soonest[1]) if soonest else ""
+            )
 
     def latest(self, agent: str) -> UsageResult | None:
         """The most recent result for `agent` from the last `fetch_all()` call, if any."""

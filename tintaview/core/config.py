@@ -20,9 +20,10 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "TintaView"
 DEFAULT_PORT = 8777
-#: Bumped to 2 when the `ghub` engine was added — see `_migrate_engine_order` for why
-#: a version bump is what triggers the one-time `engine.order` fix-up.
-CONFIG_VERSION = 2
+#: Bumped to 2 when the `ghub` engine was added and to 3 for `steelseries` — see
+#: `_migrate_engine_order` for why a version bump is what triggers the one-time
+#: `engine.order` fix-up.
+CONFIG_VERSION = 3
 
 
 # --------------------------------------------------------------------------- paths
@@ -123,12 +124,32 @@ class OpenRGBConfig:
 
 
 @dataclass
+class SteelSeriesConfig:
+    """SteelSeries GG's GameSense HTTP API — see `engines/steelseries.py`.
+
+    No host/port: GG writes its own ephemeral address into `coreProps.json` on every
+    start, so a configured one would be wrong by the next reboot. `core_props` overrides
+    *where that file is*, which is only useful for a non-default GG install or a test.
+    """
+
+    core_props: str = ""  # empty = the platform's fixed GG location
+    # Device *classes* in GameSense's own vocabulary, deliberately spelled like the
+    # OpenRGB engine's `device_types` so one mental model covers both. GG accepts more
+    # names than these three (`rgb-per-key-zones`, `indicator`, …) and anything listed
+    # here is passed through untouched, so a user can target one of those instead.
+    device_types: list[str] = field(default_factory=lambda: ["mouse", "keyboard", "headset"])
+
+
+@dataclass
 class EngineConfig:
-    mode: str = "auto"  # auto | chroma | ghub | openrgb | none
-    order: list[str] = field(default_factory=lambda: ["chroma", "ghub", "openrgb"])
+    mode: str = "auto"  # auto | chroma | ghub | openrgb | steelseries | none
+    order: list[str] = field(
+        default_factory=lambda: ["chroma", "ghub", "steelseries", "openrgb"]
+    )
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
     ghub: GHubConfig = field(default_factory=GHubConfig)
     openrgb: OpenRGBConfig = field(default_factory=OpenRGBConfig)
+    steelseries: SteelSeriesConfig = field(default_factory=SteelSeriesConfig)
 
 
 @dataclass
@@ -226,6 +247,21 @@ class StatsConfig:
     #: — over a WSL-split UNC path the sweep is a `stat` per session file every poll,
     #: and someone who does not want the numbers should not pay for them.
     show_estimate: bool = True
+    #: Draw a "at this pace the window empties in ~40 min" line under an agent's rows.
+    #: Derived from the samples `stats/cache.py` already keeps, so it costs no extra
+    #: polling — but it only appears once two samples far enough apart exist *and* the
+    #: usage is actually climbing, which is why it can be on by default without adding a
+    #: line that is usually noise.
+    show_trend: bool = True
+    #: Balloon (and chime, if `ui.chime_on_confirm` is on) the first time a usage window
+    #: crosses `alert_threshold`. Usage is otherwise entirely passive — you learn you are
+    #: near the cap only if you happen to open the panel, which is generally after the
+    #: agent has already started refusing work.
+    alert_enabled: bool = True
+    #: Percent of a window. One alert per window per crossing: it re-arms when the window
+    #: drops back under the threshold (a reset, or a new week), never on a poll-to-poll
+    #: wobble above it.
+    alert_threshold: int = 90
 
 
 #: How many world clocks the flyout band holds. Four is what fits across a 380px card
@@ -290,6 +326,30 @@ class UIConfig:
 
 
 @dataclass
+class EscalationConfig:
+    """What happens when a confirm goes *unanswered* — the *"I walked away"* case.
+
+    A single chime and a red icon are a fine signal for someone at their desk, and no
+    signal at all for someone who left the room: the agent then sits waiting for an
+    answer for an hour. So once `after_seconds` of unbroken confirm have passed, the
+    tray starts nagging — it re-chimes (only if `ui.chime_on_confirm` is on; that switch
+    stays the one place sound is turned off) and balloons, once per interval, until the
+    confirm clears.
+
+    `command` is the extension point for everything TintaView deliberately does not do
+    itself — a phone push, a webhook, a smart bulb, a message to another machine. It runs
+    through the shell, exactly once per confirm rather than once per interval: a command
+    that pushes to a phone must not push sixty times while you are at lunch. Its output is
+    ignored and its failures are logged, never surfaced — a broken command is not a reason
+    to interrupt anyone.
+    """
+
+    enabled: bool = True
+    after_seconds: int = 60
+    command: str = ""
+
+
+@dataclass
 class UpdateConfig:
     check: bool = True
 
@@ -302,6 +362,7 @@ class Config:
     colors: ColorsConfig = field(default_factory=ColorsConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    escalation: EscalationConfig = field(default_factory=EscalationConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     enabled_agents: list[str] = field(default_factory=lambda: ["claude"])
     agents: dict[str, AgentConfig] = field(default_factory=dict)
@@ -417,22 +478,39 @@ def _build(cls: type, data: Any, table: str = ""):
     return obj
 
 
-def _migrate_engine_order(order: list[str], version: int) -> list[str]:
-    """Fix up a pre-`ghub` `engine.order` on load, so upgrading doesn't silently drop
-    the new engine out of `auto` mode's probe order.
+#: `engine.order` insertions a new-engine migration performs, oldest first: the engine
+#: to add, and the engine it goes *after* (None = the front of the list). Adding an
+#: engine means one entry here and a `CONFIG_VERSION` bump — not a new function.
+_ORDER_MIGRATIONS: tuple[tuple[str, str | None], ...] = (
+    ("ghub", "chroma"),
+    # Ahead of OpenRGB, behind the two vendor SDKs, for the same reason the default
+    # order has it there: it drives only SteelSeries hardware, while OpenRGB is the
+    # catch-all that will happily claim a machine's motherboard.
+    ("steelseries", "ghub"),
+)
 
-    `dumps()` writes every field, so essentially every config.toml saved by a version
-    before this one has `order = ["chroma", "openrgb"]` sitting in the file explicitly —
-    a newer *default* order is not enough, because the explicit value always wins. Only
-    runs for a file whose `version` predates `CONFIG_VERSION` and that doesn't already
-    list `ghub` (an already-migrated or hand-edited file is left alone either way).
+
+def _migrate_engine_order(order: list[str], version: int) -> list[str]:
+    """Fix up an `engine.order` written before an engine existed, so upgrading doesn't
+    silently leave the new one out of `auto` mode's probe order.
+
+    `dumps()` writes every field, so essentially every config.toml saved by an older
+    TintaView has its `order` sitting in the file explicitly — a newer *default* is not
+    enough, because the explicit value always wins. Only runs for a file whose `version`
+    predates `CONFIG_VERSION`, and each engine is skipped if it is already listed (an
+    already-migrated or hand-edited file is left alone either way).
     """
-    if version >= CONFIG_VERSION or "ghub" in order:
+    if version >= CONFIG_VERSION:
         return order
-    if "chroma" in order:
-        idx = order.index("chroma") + 1
-        return order[:idx] + ["ghub"] + order[idx:]
-    return ["ghub", *order]
+    migrated = list(order)
+    for engine, after in _ORDER_MIGRATIONS:
+        if engine in migrated:
+            continue
+        if after is not None and after in migrated:
+            migrated.insert(migrated.index(after) + 1, engine)
+        else:
+            migrated.insert(0, engine)
+    return migrated
 
 
 def _int_or_default(value: Any, key: str, default: int) -> int:
@@ -466,6 +544,9 @@ def load(path: Path | None = None) -> Config:
     engine.chroma = _build(ChromaConfig, engine_raw.get("chroma", {}), "engine.chroma")
     engine.ghub = _build(GHubConfig, engine_raw.get("ghub", {}), "engine.ghub")
     engine.openrgb = _build(OpenRGBConfig, engine_raw.get("openrgb", {}), "engine.openrgb")
+    engine.steelseries = _build(
+        SteelSeriesConfig, engine_raw.get("steelseries", {}), "engine.steelseries"
+    )
 
     migrated_order = _migrate_engine_order(list(engine.order), version)
     if migrated_order != engine.order:
@@ -494,6 +575,7 @@ def load(path: Path | None = None) -> Config:
         colors=_colors(raw.get("colors", {})),
         stats=_build(StatsConfig, raw.get("stats", {}), "stats"),
         ui=ui,
+        escalation=_build(EscalationConfig, raw.get("escalation", {}), "escalation"),
         update=_build(UpdateConfig, raw.get("update", {}), "update"),
         enabled_agents=[str(a) for a in enabled],
         agents=agents,
@@ -632,12 +714,14 @@ def dumps(cfg: Config) -> str:
     out += _table("engine.chroma", cfg.engine.chroma)
     out += _table("engine.ghub", cfg.engine.ghub)
     out += _table("engine.openrgb", cfg.engine.openrgb)
+    out += _table("engine.steelseries", cfg.engine.steelseries)
     out += _table("colors", cfg.colors)
     out += _table("colors.device", cfg.colors.device)
     out += _table("stats", cfg.stats)
     out += _table("ui", cfg.ui)
     out += _table("ui.clocks", cfg.ui.clocks, skip=("clocks",))
     out += _array_of_tables("ui.clocks.clock", cfg.ui.clocks.clocks)
+    out += _table("escalation", cfg.escalation)
     out += _table("update", cfg.update)
     out.append("[agents]")
     out.append(f"enabled = {_toml_value(cfg.enabled_agents)}")

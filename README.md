@@ -39,20 +39,22 @@ embedders, not a documented external shell-command hook the other three expose.
 | --- | --- | --- | --- | --- |
 | **Chroma** (Razer) | Default | Default (daemon runs on the Windows side) | Not available (Windows-only SDK) | Not available (Synapse was discontinued on macOS) |
 | **G HUB** (Logitech) | Supported — G HUB can keep running | Supported (daemon runs on the Windows side) | Not available (Windows-only SDK) | Not available (Windows-only SDK) |
+| **GameSense** (SteelSeries) | Supported — GG can keep running | Supported (daemon runs on the Windows side) | Not available (no Linux build of GG) | Supported — the only engine that is |
 | **OpenRGB** (Razer, Logitech, Corsair, ASUS, …) | Supported | Supported | Supported — best device coverage | Very limited device support |
 | **Status-only** | Always available | Always available | Always available | Always available |
 
-In practice: **macOS gets status and usage stats only, no physical lighting.**
-Chroma and G HUB are both Windows-only SDKs, and OpenRGB's macOS device support is too
-thin to rely on. If your devices are Logitech, prefer **G HUB** over OpenRGB — it's the
-one engine that doesn't need you to quit the vendor app first (see
+In practice: **on macOS, SteelSeries devices are the only ones that light up.** Chroma
+and G HUB are both Windows-only SDKs and OpenRGB's macOS device support is too thin to
+rely on, but SteelSeries GG runs there and its GameSense API is plain local HTTP. If your
+devices are Logitech, prefer **G HUB** over OpenRGB — like GameSense, it doesn't need you
+to quit the vendor app first (see
 [Troubleshooting](docs/TROUBLESHOOTING.md#openrgb-fights-synapse--g-hub)).
 
 On Windows the tray itself always starts as **`pythonw.exe`** (no console window). Only
 the **G HUB** engine additionally spawns a short-lived **`python.exe`** child to talk to
 Logitech's LED SDK — that SDK returns success under `pythonw` but does not actually
 change the lights (see [Troubleshooting](docs/TROUBLESHOOTING.md#g-hub-lights-dont-change)).
-Chroma and OpenRGB stay in the tray process.
+Chroma, GameSense and OpenRGB stay in the tray process.
 
 ## Install
 
@@ -169,7 +171,7 @@ by `install.sh`, or by hand:
    override it if detection guessed wrong.
 3. **Agents** — probes `~/.claude`, `~/.codex`, `~/.cursor` and `PATH`, pre-ticks
    whatever it finds, and asks which you want TintaView to watch (at least one).
-4. **Lighting engine** — probes Chroma, G HUB and OpenRGB and shows each as detected /
+4. **Lighting engine** — probes Chroma, G HUB, GameSense and OpenRGB and shows each as detected /
    not running / unsupported here; warns that OpenRGB and Razer Synapse / Logitech G HUB
    fight over the same hardware (G HUB itself doesn't — it can keep running), and that
    Linux OpenRGB usually needs udev rules and the `i2c-dev` kernel module. Pinning
@@ -337,13 +339,15 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `server.host` | `127.0.0.1` | Where the status broker listens. |
 | `server.port` | `8777` | Port for the status broker (hooks and the tray both talk to this). |
 | `server.watchdog_timeout` | `600` | Seconds of silence from a session before it is dropped and its lighting released (crash safety, for an agent that died without sending its end-of-session hook). Counted per session, so one busy agent never keeps another agent's dead session alive. |
-| `engine.mode` | `auto` | `auto` \| `chroma` \| `ghub` \| `openrgb` \| `none`. `auto` probes `engine.order` and uses the first that responds. |
-| `engine.order` | `["chroma", "ghub", "openrgb"]` | Probe order for `auto` mode. |
+| `engine.mode` | `auto` | `auto` \| `chroma` \| `ghub` \| `steelseries` \| `openrgb` \| `none`. `auto` probes `engine.order` and uses the first that responds. |
+| `engine.order` | `["chroma", "ghub", "steelseries", "openrgb"]` | Probe order for `auto` mode. |
 | `engine.chroma.devices` | `["mouse", "headset"]` | Chroma device endpoints to drive. |
 | `engine.ghub.dll_path` | *(auto-detected)* | Path to the Logitech LED Illumination SDK DLL; empty searches `LGHUB\\sdks\\` then the G HUB install root, the registry, then `PATH`. |
 | `engine.ghub.settings_db` | *(auto-detected)* | Path to G HUB's `settings.db` (Integrations list); empty uses `%LOCALAPPDATA%\\LGHUB\\settings.db`. Read-only — never written. |
 | `engine.ghub.device_types` | `["monochrome", "rgb", "perkey"]` | Which SDK device *classes* to drive — a capability bitmask, not per-device targeting like OpenRGB's `device_types`; there's no way to address "just the mouse". |
 | `engine.ghub.restore_on_release` | `true` | Save the current lighting on open, restore it on close. |
+| `engine.steelseries.core_props` | *(auto-detected)* | Path to SteelSeries GG's `coreProps.json`, which is where GG publishes the address of its GameSense server. Empty uses `%PROGRAMDATA%\\SteelSeries\\SteelSeries Engine 3\\coreProps.json` (Windows) or `/Library/Application Support/SteelSeries Engine 3/coreProps.json` (macOS). Read-only. There is no host/port setting because GG picks a fresh port on every start. |
+| `engine.steelseries.device_types` | `["mouse", "keyboard", "headset"]` | Which GameSense device classes to drive. GG accepts more names than these (`rgb-per-key-zones`, `indicator`, …) and anything listed here is passed through as-is. |
 | `engine.openrgb.host` / `.port` | `127.0.0.1` / `6742` | Where the OpenRGB SDK server is listening. |
 | `engine.openrgb.device_types` | `["mouse", "keyboard", "headset"]` | Which OpenRGB devices to drive. Peripherals only by default — motherboard, RAM, GPU and case lighting is ambient decoration, and driving it makes the whole room flash on every tool call. Set to `[]` for every detected device, or add any `openrgb.utils.DeviceType` name (e.g. `"mousemat"`). |
 | `engine.openrgb.restore_on_release` | `true` | Snapshot each device's mode/colors on open, restore them on close. |
@@ -355,12 +359,18 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `colors.blink_ms` | `400` | Blink interval for the `confirm` state, in milliseconds. |
 | `stats.poll_seconds` | `300` | How often usage providers are polled. |
 | `stats.enabled` | `true` | Turn the usage panel off entirely. |
+| `stats.show_trend` | `true` | Show a burn-rate line under an agent's rows — "At this pace, 5-hour limit empties in ~40 min." Only appears while a window is actually climbing and would run out *before* it resets, and needs ~15 minutes of history first. Also a tick box in **Settings…**. |
+| `stats.alert_enabled` | `true` | Notify (and chime, if `ui.chime_on_confirm` is on) the first time a usage window crosses `stats.alert_threshold`. Re-arms when that window drops back under it. Also a tick box in **Settings…** → **Alerts**. |
+| `stats.alert_threshold` | `90` | Percent of a window that triggers the alert above. |
 | `stats.show_estimate` | `true` | Show the local token/cost estimate under each agent's official rows. Also a tick box in **Settings…**. Off skips the transcript scan entirely, not just the rows. |
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
 | `ui.clocks.enabled` | `false` | Show world clocks in the usage panel — a band of up to four times between the TintaView title and the first agent. Also a tick box in **Settings…** → **Clocks**. |
 | `[[ui.clocks.clock]]` | *(none)* | One table per clock, in display order, up to four. `zone` is an IANA id (`zone = 'Europe/Warsaw'`); `show_city` (default `true`) labels that clock "Poland/Warsaw" rather than "Poland". Each clock follows its own zone's daylight-saving changes — nothing to update twice a year. Pick them by country in **Settings…** → **Clocks**; extras beyond four are dropped on load. |
 | `ui.clocks.format` | `24h` | `24h` (20:42) or `12h` (8:42 PM). One setting for every clock, not per clock. |
+| `escalation.enabled` | `true` | Keep reminding you while an agent waits for confirmation: the chime repeats (if `ui.chime_on_confirm` is on) and a notification appears every `escalation.after_seconds`, until you answer. A single chime is missed by anyone who walked away. Also on the **Alerts** tab in **Settings…**. |
+| `escalation.after_seconds` | `60` | How long a confirmation must go unanswered before the first reminder, and the interval between reminders after that. |
+| `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. `TINTAVIEW_STATUS` and `TINTAVIEW_AGENTS` are set in its environment; its output and exit code are ignored, and a failure is logged rather than shown. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
@@ -376,7 +386,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `tintaview` | Run the tray UI with the status broker in-process (the normal case). |
 | `tintaview run [--headless]` | Same as above; `--headless` runs the broker only, with no GUI. |
 | `tintaview setup [--platform P] [-y]` | Run the install/reconfigure wizard. `--platform` overrides platform detection; `-y` accepts every default. |
-| `tintaview doctor [-v] [--paint]` | Diagnose an install — see [Troubleshooting](docs/TROUBLESHOOTING.md). `-v` also offers a live 30-second hook test. `--paint` cycles the lighting engine through red/yellow/green and asks whether you saw it. |
+| `tintaview doctor [-v] [--paint] [--json]` | Diagnose an install — see [Troubleshooting](docs/TROUBLESHOOTING.md). `-v` also offers a live 30-second hook test. `--paint` cycles the lighting engine through red/yellow/green and asks whether you saw it. `--json` prints the same checks as one JSON document (and never prompts) — the thing to attach to a bug report. |
 | `tintaview hooks {install,status,uninstall} [--agent A] [--scope user\|project] [--hook-bin PATH] [--all-agents] [-y]` | Manage one agent's (or all agents') hook configuration, with a diff-and-confirm flow. |
 | `tintaview update [--check-only]` | Check for, and install, a newer version. |
 | `tintaview --version` | Print the installed version. |
@@ -393,7 +403,7 @@ tv-hook.sh / tv-hook.cmd         (~5 ms: sh/cmd + curl, no Python, always exits 
 TintaView status broker (127.0.0.1:8777, in-process with the tray)
         │  tracks state per (agent, session); confirm > working > idle > none
         ▼
-Lighting engine (Chroma / OpenRGB / none)
+Lighting engine (Chroma / G HUB / GameSense / OpenRGB / none)
         │
         ▼
 Mouse / keyboard / headset LEDs

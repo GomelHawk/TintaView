@@ -381,6 +381,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         tabs = QtWidgets.QTabWidget(self)
         tabs.addTab(self._build_general_tab(), t("settings.tab.general"))
+        tabs.addTab(self._build_alerts_tab(), t("settings.tab.alerts"))
         tabs.addTab(self._build_clocks_tab(), t("settings.tab.clocks"))
         tabs.addTab(self._build_lighting_tab(), t("settings.tab.lighting"))
 
@@ -470,6 +471,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self._estimate_check.setToolTip(t("settings.stats_estimate.tooltip"))
         form.addRow(self._estimate_check)
 
+        self._trend_check = QtWidgets.QCheckBox(t("settings.stats_trend"))
+        self._trend_check.setChecked(self._cfg.stats.show_trend)
+        self._trend_check.setToolTip(t("settings.stats_trend.tooltip"))
+        form.addRow(self._trend_check)
+
         self._update_check = QtWidgets.QCheckBox(t("settings.update_check"))
         self._update_check.setChecked(self._cfg.update.check)
         form.addRow(self._update_check)  # spanning, same reason as the chime row
@@ -494,6 +500,72 @@ class SettingsDialog(QtWidgets.QDialog):
         index = combo.findData(normalize_language(self._cfg.ui.language))
         combo.setCurrentIndex(index if index >= 0 else 0)
         return combo
+
+    # --- Alerts tab ----------------------------------------------------------
+
+    def _build_alerts_tab(self) -> QtWidgets.QWidget:
+        """The two things TintaView says out loud on its own: an unanswered confirm, and
+        a usage window about to run out.
+
+        Their own tab rather than three more rows on General, because both are
+        "interrupt me when…" settings with a threshold and a switch each, and General is
+        already the tab everything lands on by default.
+        """
+        widget = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(widget)
+
+        escalation = self.result_cfg.escalation
+        self._escalate_check = QtWidgets.QCheckBox(t("settings.escalate"))
+        self._escalate_check.setChecked(escalation.enabled)
+        outer.addWidget(self._escalate_check)
+        outer.addWidget(_hint(t("settings.escalate.hint")))
+
+        # Same shape as the clocks tab: what the tick box switches on follows it, and is
+        # disabled with it rather than sitting live under an unticked box.
+        body = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(body)
+        self._escalate_spin = QtWidgets.QSpinBox()
+        # Never clamp a hand-edited value on open — the same reasoning as the poll
+        # interval on General: a floor applied here would be written back on accept.
+        stored_after = int(escalation.after_seconds or 0)
+        self._escalate_spin.setRange(max(5, min(15, stored_after)), max(3600, stored_after))
+        self._escalate_spin.setSuffix(f" {t('settings.poll.suffix')}")
+        self._escalate_spin.setValue(stored_after)
+        form.addRow(t("settings.escalate.after"), self._escalate_spin)
+
+        self._escalate_command = QtWidgets.QLineEdit(escalation.command)
+        self._escalate_command.setPlaceholderText(t("settings.escalate.command.placeholder"))
+        form.addRow(t("settings.escalate.command"), self._escalate_command)
+        form.addRow(_hint(t("settings.escalate.command.hint")))
+        outer.addWidget(body)
+        self._escalate_check.toggled.connect(body.setEnabled)
+        body.setEnabled(escalation.enabled)
+
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        outer.addWidget(line)
+
+        stats = self.result_cfg.stats
+        self._usage_alert_check = QtWidgets.QCheckBox(t("settings.usage_alert"))
+        self._usage_alert_check.setChecked(stats.alert_enabled)
+        outer.addWidget(self._usage_alert_check)
+        outer.addWidget(_hint(t("settings.usage_alert.hint")))
+
+        alert_body = QtWidgets.QWidget()
+        alert_form = QtWidgets.QFormLayout(alert_body)
+        self._usage_alert_spin = QtWidgets.QSpinBox()
+        stored_threshold = int(stats.alert_threshold or 0)
+        self._usage_alert_spin.setRange(max(1, min(50, stored_threshold)), 100)
+        self._usage_alert_spin.setSuffix(" %")
+        self._usage_alert_spin.setValue(stored_threshold)
+        alert_form.addRow(t("settings.usage_alert.threshold"), self._usage_alert_spin)
+        outer.addWidget(alert_body)
+        self._usage_alert_check.toggled.connect(alert_body.setEnabled)
+        alert_body.setEnabled(stats.alert_enabled)
+
+        outer.addStretch(1)
+        return widget
 
     # --- Clocks tab ----------------------------------------------------------
 
@@ -703,6 +775,12 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.ui.language = self._language_combo.currentData()
         cfg.stats.poll_seconds = self._poll_spin.value()
         cfg.stats.show_estimate = self._estimate_check.isChecked()
+        cfg.stats.show_trend = self._trend_check.isChecked()
+        cfg.stats.alert_enabled = self._usage_alert_check.isChecked()
+        cfg.stats.alert_threshold = self._usage_alert_spin.value()
+        cfg.escalation.enabled = self._escalate_check.isChecked()
+        cfg.escalation.after_seconds = self._escalate_spin.value()
+        cfg.escalation.command = self._escalate_command.text().strip()
         cfg.update.check = self._update_check.isChecked()
         cfg.ui.clocks.enabled = self._clocks_check.isChecked()
         # Empty slots drop out, so the stored order is the on-screen order with no gaps.

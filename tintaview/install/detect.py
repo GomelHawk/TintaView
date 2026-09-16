@@ -55,6 +55,14 @@ class Environment:
         return self.platform == PLATFORM_WINDOWS
 
     @property
+    def supports_steelseries(self) -> bool:
+        # SteelSeries GG ships on Windows and macOS only — there is no Linux build at
+        # all, so this is not a "start GG and retry" case the way a stopped service is.
+        # WSL follows the same rule as Chroma/G HUB: the daemon that would reach GG runs
+        # on the Windows side, not in the distro.
+        return self.platform in (PLATFORM_WINDOWS, PLATFORM_MACOS)
+
+    @property
     def supports_openrgb(self) -> bool:
         return self.platform in (PLATFORM_WINDOWS, PLATFORM_LINUX, PLATFORM_WSL, PLATFORM_MACOS)
 

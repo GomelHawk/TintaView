@@ -13,6 +13,10 @@ additionally offers to wait up to 30 seconds for a real hook event from a live a
 session. Every `WARN`/`FAIL` line names the exact next command or file to fix, not just
 "something is wrong" — if you ever see one that doesn't, that's a bug in `doctor` itself.
 
+Reporting a problem? `tintaview doctor --json > tintaview-doctor.json` writes the same
+checks as a single JSON document and never prompts, so it can be attached to an issue
+whole rather than pasted as a wall of text.
+
 ## Lights never change
 
 1. `tintaview doctor` — check the `ENGINE` line. If it says `auto mode found no usable

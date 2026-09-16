@@ -2143,3 +2143,66 @@ class TestResetTextIsWordedAtRenderTime:
 
         assert fmt.reset_row_text(0.0, fmt.RESET_RELATIVE) == ""
         assert fmt.reset_row_text(1e30, fmt.RESET_RELATIVE) == ""
+
+
+class TestBurnRate:
+    """`StatsService` attaching `stats/trend.py`'s projection to a section.
+
+    The projection itself is covered in `tests/test_trend.py`; what matters here is the
+    wiring — that the samples are recorded from every poll (so the line is available the
+    moment the setting is ticked, not half an hour later), and that only the setting
+    decides whether a sentence is attached.
+    """
+
+    def _service(self, tmp_path, pct_sequence, *, show_trend=True):
+        from tintaview.stats.trend import TrendStore
+
+        cfg = Config()
+        cfg.enabled_agents = ["claude"]
+        cfg.stats.show_trend = show_trend
+        pcts = iter(pct_sequence)
+        provider = _FakeProvider("claude", lambda c, t: UsageResult(
+            agent="claude", rows=[UsageRow(label="5-hour limit", pct=next(pcts))]))
+        return StatsService(
+            cfg,
+            cache=UsageCache(path=tmp_path / "cache.json"),
+            providers={"claude": provider},
+            trend=TrendStore(tmp_path / "trend.json"),
+        )
+
+    def _poll(self, service, monkeypatch, at):
+        monkeypatch.setattr("tintaview.stats.trend.time.time", lambda: at)
+        return service.fetch_all()
+
+    def test_a_climbing_limit_gets_a_burn_rate_line(self, tmp_path, monkeypatch):
+        service = self._service(tmp_path, [40.0, 60.0])
+
+        first = self._poll(service, monkeypatch, 1_700_000_000.0)
+        assert first["claude"].trend == "", "one sample is not a trend"
+
+        second = self._poll(service, monkeypatch, 1_700_003_600.0)
+        assert second["claude"].trend == (
+            "At this pace, 5-hour limit empties in ~2 hr."
+        )
+
+    def test_the_setting_decides_whether_the_line_is_worded(self, tmp_path, monkeypatch):
+        service = self._service(tmp_path, [40.0, 60.0], show_trend=False)
+
+        self._poll(service, monkeypatch, 1_700_000_000.0)
+        results = self._poll(service, monkeypatch, 1_700_003_600.0)
+
+        assert results["claude"].trend == ""
+        # ...but the history is there, so ticking the box works immediately.
+        service._cfg.stats.show_trend = True
+        assert service._trend.soonest(results["claude"], now=1_700_003_600.0) is not None
+
+    def test_the_line_is_never_persisted(self, tmp_path, monkeypatch):
+        """It is a sentence about the next two hours; a cache read two days later must
+        not repeat it (the same rule `notice` follows)."""
+        service = self._service(tmp_path, [40.0, 60.0])
+        self._poll(service, monkeypatch, 1_700_000_000.0)
+        self._poll(service, monkeypatch, 1_700_003_600.0)
+
+        stored = json.loads((tmp_path / "cache.json").read_text(encoding="utf-8"))
+
+        assert "trend" not in stored["claude"]

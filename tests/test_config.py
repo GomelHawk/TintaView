@@ -55,11 +55,29 @@ order = ['chroma', 'openrgb']
 
     cfg = config_mod.load(path)
 
-    assert cfg.engine.order == ["chroma", "ghub", "openrgb"]
+    # Every engine added since v1, each in its own place: ghub behind Chroma, SteelSeries
+    # behind ghub, both ahead of OpenRGB's catch-all.
+    assert cfg.engine.order == ["chroma", "ghub", "steelseries", "openrgb"]
     assert cfg.version == CONFIG_VERSION
 
 
-def test_migration_inserts_ghub_first_when_chroma_is_absent(tmp_path):
+def test_a_v2_config_gains_only_the_engine_it_is_missing(tmp_path):
+    """A config written between the two additions must not have ghub inserted twice."""
+    path = tmp_path / "config.toml"
+    _write(path, """
+version = 2
+
+[engine]
+mode = 'auto'
+order = ['chroma', 'ghub', 'openrgb']
+""")
+
+    cfg = config_mod.load(path)
+
+    assert cfg.engine.order == ["chroma", "ghub", "steelseries", "openrgb"]
+
+
+def test_migration_inserts_a_new_engine_first_when_its_anchor_is_absent(tmp_path):
     path = tmp_path / "config.toml"
     _write(path, """
 version = 1
@@ -70,7 +88,7 @@ order = ['openrgb']
 """)
 
     cfg = config_mod.load(path)
-    assert cfg.engine.order == ["ghub", "openrgb"]
+    assert cfg.engine.order == ["ghub", "steelseries", "openrgb"]
 
 
 def test_already_migrated_config_is_left_alone(tmp_path):
@@ -90,9 +108,9 @@ order = ['chroma', 'openrgb']
     assert cfg.engine.order == ["chroma", "openrgb"]
 
 
-def test_fresh_default_config_already_includes_ghub():
+def test_fresh_default_config_already_includes_every_engine():
     cfg = Config()
-    assert cfg.engine.order == ["chroma", "ghub", "openrgb"]
+    assert cfg.engine.order == ["chroma", "ghub", "steelseries", "openrgb"]
 
 
 def test_disabling_an_agent_keeps_its_stored_settings(tmp_path):

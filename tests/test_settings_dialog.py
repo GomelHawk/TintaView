@@ -864,3 +864,61 @@ def test_the_tz_database_source_degrades_to_qts_own_lists(qapp, tmp_path):
         for cached in caches:
             cached.cache_clear()
         _zones_for.cache_clear()
+
+
+# --------------------------------------------------------------------------- Alerts tab
+
+
+def test_alerts_tab_writes_every_field_it_shows(qapp, tmp_path):
+    """The dialog is one of the two config UIs, so a control that edits nothing is the
+    failure mode this whole file exists to catch (see `Tray._apply_settings`'s mirror)."""
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+
+    dialog._escalate_check.setChecked(True)
+    dialog._escalate_spin.setValue(120)
+    dialog._escalate_command.setText("  ntfy publish phone 'agent waiting'  ")
+    dialog._usage_alert_check.setChecked(True)
+    dialog._usage_alert_spin.setValue(80)
+    dialog._trend_check.setChecked(False)
+
+    dialog._on_accept()
+
+    saved = dialog.result_cfg
+    assert saved.escalation.enabled is True
+    assert saved.escalation.after_seconds == 120
+    # Trimmed: a trailing space in a shell command is invisible and never intended.
+    assert saved.escalation.command == "ntfy publish phone 'agent waiting'"
+    assert saved.stats.alert_enabled is True
+    assert saved.stats.alert_threshold == 80
+    assert saved.stats.show_trend is False
+    # ...and on disk, not just in memory.
+    reloaded = config_mod.load(saved.path)
+    assert reloaded.escalation.after_seconds == 120
+    assert reloaded.stats.alert_threshold == 80
+
+
+def test_alerts_tab_never_clamps_a_hand_edited_value_on_open(qapp, tmp_path):
+    """Same rule as the poll interval on General: a floor applied at open would be
+    written back on accept, silently changing a setting the user never touched."""
+    cfg = make_cfg(tmp_path)
+    cfg.escalation.after_seconds = 5
+    cfg.stats.alert_threshold = 25
+
+    dialog = SettingsDialog(cfg)
+
+    assert dialog._escalate_spin.value() == 5
+    assert dialog._usage_alert_spin.value() == 25
+
+
+def test_the_escalation_controls_follow_their_tick_box(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.escalation.enabled = False
+    dialog = SettingsDialog(cfg)
+
+    assert dialog._escalate_spin.isEnabled() is False
+
+    dialog._escalate_check.setChecked(True)
+
+    assert dialog._escalate_spin.isEnabled() is True
+    assert dialog._escalate_command.isEnabled() is True

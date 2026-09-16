@@ -418,6 +418,7 @@ _ENGINE_DISPLAY = ENGINE_DISPLAY
 _ENGINE_NOT_RUNNING_HINT = {
     "chroma": "start Razer Synapse",
     "ghub": "start Logitech G HUB",
+    "steelseries": "start SteelSeries GG",
     "openrgb": "start OpenRGB and turn on its SDK server",
 }
 
@@ -450,13 +451,16 @@ def _step_engine(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
     print("\n=== Lighting ===")
     probes = dict(available_engines(cfg))
 
-    detected = [n for n in ("chroma", "ghub", "openrgb") if probes.get(n)]
+    # Every engine except the two pseudo-modes, in the order `available_engines` reports
+    # them — a hand-written tuple here is how `steelseries` ended up pickable below but
+    # missing from this line.
+    detected = [n for n in probes if n != "none" and probes.get(n)]
     if detected:
         print("  Detected: " + ", ".join(_ENGINE_DISPLAY.get(n, n) for n in detected))
     else:
         print("  No lighting software is answering right now (Razer Synapse for Chroma, "
-              "Logitech G HUB for G HUB, the OpenRGB app with its SDK server on for "
-              "OpenRGB).")
+              "Logitech G HUB for G HUB, SteelSeries GG for GameSense, the OpenRGB app "
+              "with its SDK server on for OpenRGB).")
 
     # "auto" first and default (see `ENGINE_MODES`). Pinning a single engine is what
     # turns "the app I picked isn't running" into "no lighting at all, silently" — auto

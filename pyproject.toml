@@ -21,7 +21,7 @@ dependencies = ["tomlkit>=0.12"]
 [project.optional-dependencies]
 ui = ["PySide6>=6.6"]
 openrgb = ["openrgb-python>=0.3.0"]
-dev = ["pytest>=8", "ruff>=0.6", "pillow>=10", "numpy>=1.26"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "pillow>=10", "numpy>=1.26"]
 
 [project.scripts]
 tintaview = "tintaview.cli:main"
@@ -54,3 +54,25 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning"]
+
+# Type-checked: `core/` and `engines/` only — the two stdlib-only packages, and the two
+# whose trickiest invariant a checker can actually hold. Every PySide6 and openrgb import
+# in them must stay *optional at runtime* (a headless install has neither), which is
+# exactly the kind of rule a refactor breaks by hoisting an import to module scope.
+# `ui/` is deliberately out of scope: it is Qt end to end, and PySide6's generated stubs
+# would make the run about Qt's typing rather than about TintaView's.
+[tool.mypy]
+python_version = "3.12"
+files = ["tintaview/core", "tintaview/engines"]
+# The bar is "no new untyped holes", not full strictness: this is a codebase with
+# deliberate `Any` at every vendor-SDK boundary (ctypes DLLs, an openrgb client that may
+# not be installed), and demanding annotations there would only produce noise.
+ignore_missing_imports = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# Optional at runtime and not installed in the lint job — the engine is skipped when the
+# import fails, which is the behaviour `engines/openrgb.py` is written around.
+[[tool.mypy.overrides]]
+module = ["openrgb.*"]
+ignore_missing_imports = true

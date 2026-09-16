@@ -11,14 +11,22 @@ a constraint, not a suggestion, and update this file if a decision genuinely cha
 ```sh
 python -m pip install -e ".[dev,ui]"
 ruff check .                           # line-length 100, E/F/W/I/UP/B/C4/SIM
+mypy                                   # core/ + engines/ only — see [tool.mypy]
 pytest -q                              # DeprecationWarning is an error
 python scripts/build_assets.py --check # generated assets must be committed and current (Linux only — see below)
 QT_QPA_PLATFORM=offscreen pytest -q    # required for the Qt tests without a display server
 ```
 
-CI (`ci.yml`) runs `pytest` on ubuntu / windows / macOS × Python 3.12, 3.13 and 3.14, and `ruff`
-plus the asset check once, in a separate ubuntu `lint` job (both are platform-independent — nine
-copies of them bought nothing). The asset check compares a fresh build byte-for-byte with the
+CI (`ci.yml`) runs `pytest` on ubuntu / windows / macOS × Python 3.12, 3.13 and 3.14, and `ruff`,
+`mypy` and the asset check once, in a separate ubuntu `lint` job (all three are
+platform-independent — nine copies of them bought nothing). `mypy` covers `core/` and `engines/`
+only: they are the stdlib-only packages, and their sharpest invariant — every PySide6/openrgb
+import staying optional at runtime — is exactly what a checker can hold and a refactor can break.
+Qt-typed `ui/` is deliberately out of scope. Two `smoke-install` jobs (ubuntu+macOS via
+`install.sh`, windows via `install.ps1` and a wheel built from the commit) run a real
+install end to end — install, `hooks install`, start the daemon, `doctor --json` (asserted
+by `scripts/check_doctor_report.py`), uninstall — because `tests/test_packaging.py` can
+only check what the installers *say*, and install is this project's biggest source of pain. The asset check compares a fresh build byte-for-byte with the
 committed files, which only holds on Linux: Pillow's PNG/ICO encoders and resampling do not
 reproduce the same bytes on Windows or macOS (both files came out STALE on those runners), so
 regenerate assets on Linux and expect `tests/test_assets.py`'s byte test to skip elsewhere. Pushes to `main` and pull requests trigger it, with in-progress
@@ -97,14 +105,16 @@ ask what it did *not* cover.
 ```
 tintaview/
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
-  engines/   base.py  chroma.py  ghub.py  ghub_env.py  openrgb.py  null.py  factory.py
+  engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
   agents/    base.py  claude.py  codex.py  cursor.py     # hook manifest + paths per agent
   stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py
              cache.py  model.py  service.py  format.py   # format.py = shared row wording
+             trend.py                                    # burn-rate samples + projection
   i18n/      __init__.py  locales/{en,es,it,de,pl,ru,be,uk}.json
-  ui/        tray.py  flyout.py  wizard.py  icons.py  settings_dialog.py
+  ui/        tray.py  workers.py  dialogs.py  flyout.py  badges.py  wizard.py  icons.py  settings_dialog.py
   install/   detect.py  hooks.py  hookscript.py  codex_flag.py  autostart.py  wsl.py
              components.py  doctor.py  update.py  restart.py
+             win_console.py  win_identity.py             # Windows-only tray startup bits
   hooks/     tv-hook.sh  tv-hook.cmd                     # shipped as package data
   assets/generated/  logo_full.png  tintaview.ico          # built by scripts/build_assets.py;
                                                          # exactly these two — the tray mark is drawn
@@ -122,10 +132,10 @@ optional at runtime.
 | Decision | Choice and why |
 | --- | --- |
 | Process model | **One process**: tray UI + status broker in-process (`tintaview run [--headless]`). A background service plus a separate tray process means two autostart entries, two logs and two update paths — the biggest source of install pain. |
-| Packaging | **A pure-Python wheel installed into a private venv, on every platform.** No compiled bundle, no `.exe` installer. This is a hard requirement of Windows Smart App Control, not a preference — see [Packaging](#packaging-no-compiled-bundle-ever). On Windows the tray launches as **`pythonw.exe -m tintaview`**. G HUB's LED SDK silently no-ops under pythonw (measured); `GHubEngine` then paints via a short-lived **`python.exe` sidecar** (`engines/ghub_sidecar.py`). Chroma/OpenRGB stay in-process. |
+| Packaging | **A pure-Python wheel installed into a private venv, on every platform.** No compiled bundle, no `.exe` installer. This is a hard requirement of Windows Smart App Control, not a preference — see [Packaging](#packaging-no-compiled-bundle-ever). On Windows the tray launches as **`pythonw.exe -m tintaview`**. G HUB's LED SDK silently no-ops under pythonw (measured); `GHubEngine` then paints via a short-lived **`python.exe` sidecar** (`engines/ghub_sidecar.py`). Chroma/GameSense/OpenRGB stay in-process. |
 | Autostart | **One per-user entry per platform, never a Scheduled Task**: HKCU `…\CurrentVersion\Run` value on Windows (*not* a Startup-folder shortcut — Windows 11 blocks those), a systemd `--user` unit plus an XDG autostart entry on Linux, a launchd agent on macOS. No admin rights, ever. |
 | Hook install | **Auto-merge with a per-agent before/after diff and explicit confirmation.** A copy-paste snippet stays available as a fallback for locked-down environments. |
-| Engines | **Chroma, G HUB and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → ghub → openrgb → status-only`. |
+| Engines | **Chroma, G HUB, SteelSeries GameSense and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → ghub → steelseries → openrgb → status-only`. GameSense is the only engine that works on macOS (plain local HTTP, no SDK), which is why it sits ahead of OpenRGB's catch-all. |
 | Tray icon | **A single whole-icon state.** No per-agent ray splitting or zone splitting: a user watches one agent at a time, and a gradient icon among solid ones reads as a different icon rather than a fourth state. |
 | Cursor stats | Local session token from `state.vscdb` → Cursor's own Connect RPC. No login UI of our own. |
 | Translations | **JSON catalogues read by a stdlib `t()`, not `QTranslator`, and only for the tray + usage panel.** See [Interface language](#interface-language-i18n). |

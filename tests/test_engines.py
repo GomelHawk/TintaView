@@ -20,12 +20,19 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from tintaview.core.config import ChromaConfig, Config, GHubConfig, OpenRGBConfig
+from tintaview.core.config import (
+    ChromaConfig,
+    Config,
+    GHubConfig,
+    OpenRGBConfig,
+    SteelSeriesConfig,
+)
 from tintaview.engines.chroma import ChromaEngine
 from tintaview.engines.factory import available_engines, make_engine
 from tintaview.engines.ghub import GHubEngine
 from tintaview.engines.null import NullEngine
 from tintaview.engines.openrgb import OpenRGBEngine
+from tintaview.engines.steelseries import SteelSeriesEngine
 
 # --------------------------------------------------------------------------- Chroma
 
@@ -998,11 +1005,13 @@ def test_factory_auto_survives_a_probe_that_raises(monkeypatch):
 def test_available_engines_reports_every_known_engine(monkeypatch):
     monkeypatch.setattr(ChromaEngine, "probe", lambda self: True)
     monkeypatch.setattr(GHubEngine, "probe", lambda self: False)
+    monkeypatch.setattr(SteelSeriesEngine, "probe", lambda self: False)
     monkeypatch.setattr(OpenRGBEngine, "probe", lambda self: False)
     cfg = Config()
 
     assert available_engines(cfg) == [
-        ("chroma", True), ("ghub", False), ("openrgb", False), ("none", True),
+        ("chroma", True), ("ghub", False), ("steelseries", False),
+        ("openrgb", False), ("none", True),
     ]
 
 
@@ -1016,3 +1025,134 @@ def test_available_engines_never_raises(monkeypatch):
     result = dict(available_engines(cfg))
     assert result["chroma"] is False
     assert result["none"] is True
+
+
+# --------------------------------------------------------------------------- SteelSeries
+
+
+class _GameSenseHandler(BaseHTTPRequestHandler):
+    """A stand-in for SteelSeries GG's local server: records every POST, and answers
+    whatever `post_status` says — so a test can make GG reject a call the way a restarted
+    one does."""
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length) if length else b""
+        body = json.loads(raw) if raw else None
+        self.server.requests.append((self.path, body))  # type: ignore[attr-defined]
+        status = getattr(self.server, "post_status", 200)
+        if status != 200:
+            self.send_error(status)
+            return
+        payload = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def gamesense(tmp_path):
+    """A fake GG plus the `coreProps.json` that points at it — which is the whole of
+    GameSense's discovery story, and therefore the whole of what has to be faked."""
+    server = HTTPServer(("127.0.0.1", 0), _GameSenseHandler)
+    server.requests = []  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    core_props = tmp_path / "coreProps.json"
+    core_props.write_text(
+        json.dumps({"address": f"127.0.0.1:{server.server_port}"}), encoding="utf-8"
+    )
+    try:
+        yield server, SteelSeriesConfig(core_props=str(core_props), device_types=["mouse"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def _paths(server) -> list[str]:
+    return [path for path, _body in server.requests]
+
+
+def test_steelseries_open_set_color_heartbeat_close(gamesense):
+    server, cfg = gamesense
+    engine = SteelSeriesEngine(cfg)
+
+    assert engine.open() is True
+    assert engine.active is True
+    assert _paths(server) == ["/game_metadata"]
+
+    engine.set_color(255, 0, 13)
+    # A colour lives in the *handler*, so painting is bind-then-fire, not one call.
+    assert _paths(server)[-2:] == ["/bind_game_event", "/game_event"]
+    binding = server.requests[-2][1]
+    assert binding["handlers"] == [
+        {"device-type": "mouse", "zone": "all",
+         "color": {"red": 255, "green": 0, "blue": 13}, "mode": "color"}
+    ]
+
+    engine.heartbeat()
+    assert _paths(server)[-1] == "/game_heartbeat"
+
+    engine.close()
+    assert engine.active is False
+    path, body = server.requests[-1]
+    assert (path, body) == ("/remove_game", {"game": "TINTAVIEW"})
+
+
+def test_steelseries_probe_registers_but_takes_no_control(gamesense):
+    """Unlike Chroma's, this probe needs no throwaway session: registering metadata
+    changes nothing on a device until an event is bound and fired."""
+    server, cfg = gamesense
+    engine = SteelSeriesEngine(cfg)
+
+    assert engine.probe() is True
+
+    assert _paths(server) == ["/game_metadata"]
+    assert engine.active is False
+
+
+def test_steelseries_without_gg_is_unavailable_not_an_error(tmp_path):
+    """The normal case on a machine that has never had SteelSeries software installed."""
+    engine = SteelSeriesEngine(SteelSeriesConfig(core_props=str(tmp_path / "nope.json")))
+
+    assert engine.probe() is False
+    assert engine.open() is False
+    assert engine.active is False
+    engine.set_color(255, 0, 0)  # must not raise
+    engine.close()  # nor this
+
+
+def test_steelseries_drops_the_session_once_gg_stops_answering(gamesense):
+    """Without this `active` stays True after GG quits, the controller never reopens,
+    and every later paint goes nowhere while /state still claims the lights are ours."""
+    server, cfg = gamesense
+    engine = SteelSeriesEngine(cfg)
+    assert engine.open() is True
+
+    server.post_status = 500  # type: ignore[attr-defined]
+    for _ in range(3):
+        engine.set_color(255, 0, 0)
+
+    assert engine.active is False
+
+    server.post_status = 200  # type: ignore[attr-defined]
+    assert engine.open() is True
+    assert engine.active is True
+
+
+def test_steelseries_survives_a_half_written_core_props(tmp_path):
+    """GG rewrites coreProps.json with a fresh port on every start; reading it mid-write
+    must degrade to "not available", not raise into the controller."""
+    path = tmp_path / "coreProps.json"
+    path.write_text("{ \"addre", encoding="utf-8")
+    engine = SteelSeriesEngine(SteelSeriesConfig(core_props=str(path)))
+
+    assert engine.probe() is False
+
+    path.write_text(json.dumps({"encrypted_address": "127.0.0.1:1"}), encoding="utf-8")
+    assert engine.probe() is False  # a file with no plain `address` is no address

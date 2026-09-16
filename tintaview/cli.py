@@ -160,7 +160,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from .install.doctor import run_doctor
 
-    return run_doctor(verbose=args.verbose, paint=args.paint)
+    return run_doctor(verbose=args.verbose, paint=args.paint, as_json=args.json)
 
 
 def _cmd_hooks(args: argparse.Namespace) -> int:
@@ -329,6 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--paint", action="store_true",
         help="cycle the lighting engine through red/yellow/green and ask if you saw it",
+    )
+    doctor.add_argument(
+        "--json",
+        action="store_true",
+        help="print one JSON report instead of the checklist (never prompts)",
     )
     doctor.set_defaults(func=_cmd_doctor)
 

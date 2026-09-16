@@ -906,3 +906,67 @@ def test_run_doctor_resolves_the_wsl_split_home_only_once(tmp_path, monkeypatch)
     D.run_doctor(verbose=False)
 
     assert len(calls) == 1, f"wsl.exe was consulted {len(calls)} times, not once"
+
+
+# --------------------------------------------------------------------------- --json
+
+
+def test_json_report_is_one_parseable_document_even_when_checks_fail(capsys):
+    """The point of the machine-readable form: a user pastes one file into an issue.
+
+    So it must be *only* the document — no checklist above it, no summary line below —
+    whatever the checks say, and it must carry the facts triage starts with (version,
+    platform, where the log is).
+    """
+    import json
+
+    _write_config(enabled_agents=[])  # guarantees failures: no hook script, no daemon
+
+    rc = D.run_doctor(verbose=False, as_json=True)
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    report = json.loads(out)  # the whole of stdout, not a fragment of it
+    assert report["report_version"] == D.JSON_REPORT_VERSION
+    assert report["ok"] is False
+    assert report["fails"] >= 1
+    assert report["tintaview_version"] and report["platform"] and report["log_path"]
+    assert "[FAIL]" not in out, "the checklist leaked into the JSON run"
+
+
+def test_json_report_carries_the_same_checks_as_the_printed_one(capsys):
+    """Same run, two renderings — a JSON mode that re-derived its own answers would be a
+    second diagnostic to keep in step with the first."""
+    import json
+
+    cfg = _write_config(enabled_agents=["claude"])
+    _write_hook_bin()
+    _write_hook_env(f"http://{cfg.server.host}:{cfg.server.port}")
+    _install_claude_hooks()
+
+    D.run_doctor(verbose=False)
+    printed = capsys.readouterr().out
+    report = json.loads(_json_run(capsys))
+
+    sections = {c["section"] for c in report["checks"]}
+    assert sections, "no checks recorded"
+    assert all(section in printed for section in sections)
+    for check in report["checks"]:
+        assert check["level"] in {"ok", "warn", "fail"}
+        assert check["message"] in printed
+
+
+def _json_run(capsys) -> str:
+    D.run_doctor(verbose=False, as_json=True)
+    return capsys.readouterr().out
+
+
+def test_json_never_prompts(monkeypatch, capsys):
+    """`--json` has nobody to answer the live-hook question, whatever stdin looks like."""
+    _write_config(enabled_agents=[])
+    monkeypatch.setattr(D, "_can_prompt", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input", lambda *a: pytest.fail("doctor --json prompted the user")
+    )
+
+    D.run_doctor(verbose=True, as_json=True)
