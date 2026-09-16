@@ -114,11 +114,6 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
-    env:
-      # Never the runner's real ~/.tintaview: the installer writes hook.env and the hook
-      # script there, and the uninstall deliberately leaves them behind.
-      TINTAVIEW_HOME: ${{ runner.temp }}/tvhome
-      TV_PREFIX: ${{ runner.temp }}/tvprefix
     steps:
       - uses: actions/checkout@v7
 
@@ -127,6 +122,15 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+
+      # Exported here rather than in a job-level `env:`, which cannot see the `runner`
+      # context — only the `RUNNER_TEMP` *variable*, inside a step, resolves. Never the
+      # runner's real ~/.tintaview: the installer writes hook.env and the hook script
+      # there, and the uninstall deliberately leaves them behind.
+      - name: Point the install at throwaway directories
+        run: |
+          echo "TINTAVIEW_HOME=$RUNNER_TEMP/tvhome" >> "$GITHUB_ENV"
+          echo "TV_PREFIX=$RUNNER_TEMP/tvprefix" >> "$GITHUB_ENV"
 
       - name: Install (headless, no autostart)
         run: |
@@ -173,9 +177,6 @@ jobs:
   smoke-install-windows:
     runs-on: windows-latest
     timeout-minutes: 20
-    env:
-      TV_PREFIX: ${{ runner.temp }}\tintaview
-      TINTAVIEW_HOME: ${{ runner.temp }}\tintaview
     steps:
       - uses: actions/checkout@v7
         with:
@@ -187,6 +188,14 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+
+      # Same reason as the job above: `runner.temp` is not resolvable in a job-level
+      # `env:`. On Windows the prefix *is* the config directory, so both point at one
+      # place — that is the layout `install.ps1` is written around.
+      - name: Point the install at a throwaway directory
+        run: |
+          "TV_PREFIX=$env:RUNNER_TEMP\tintaview" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TINTAVIEW_HOME=$env:RUNNER_TEMP\tintaview" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # `-WheelPath` is the installer's own "no download, no checksum" path, so this job
       # tests the commit in hand rather than whatever the latest release happens to be.
