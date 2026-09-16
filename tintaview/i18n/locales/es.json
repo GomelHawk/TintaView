@@ -28,6 +28,7 @@
   "tray.hooks.balloon_title": "Hooks de TintaView",
   "tray.hooks.balloon_body": "Faltan los hooks de {agents}. Abre Ajustes… → «Abrir el asistente de configuración completo» para reinstalarlos.",
   "tray.escalate.balloon_body": "{agents}: sigue esperando tu respuesta ({waited}).",
+  "tray.escalate.balloon_body_question": "{agents}: sigue esperando tu respuesta ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Un agente sigue esperando tu respuesta ({waited}).",
   "tray.usage_alert.balloon_body": "{agent}: {label} está al {pct} %.",
   "tray.engine.balloon_title": "Iluminación de TintaView",

@@ -2261,11 +2261,11 @@ def test_registering_the_windows_identity_names_the_rendered_icon(qapp, monkeypa
 # --------------------------------------------------------------------------- escalation
 
 
-def _confirm_payload() -> dict:
+def _confirm_payload(question: str = "") -> dict:
     return {
         "effective": "confirm",
-        "agents": {"claude": {"effective": "confirm", "count": 1},
-                   "codex": {"effective": "idle", "count": 1}},
+        "agents": {"claude": {"effective": "confirm", "count": 1, "question": question},
+                   "codex": {"effective": "idle", "count": 1, "question": ""}},
         "count": 2,
     }
 
@@ -2285,10 +2285,12 @@ def escalation_tray(tray, monkeypatch):
         QtWidgets.QSystemTrayIcon, "showMessage",
         lambda self, title, message, *a, **k: balloons.append((title, message)),
     )
-    commands: list[str] = []
+    commands: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         tray_mod.TrayApp, "_run_escalation_command",
-        lambda self, waiting: commands.append(", ".join(waiting)),
+        lambda self, waiting, question="", message="": commands.append(
+            (", ".join(waiting), question, message)
+        ),
     )
     return app_instance, server, clock, chimes, balloons, commands
 
@@ -2337,6 +2339,50 @@ def test_a_short_interval_is_reported_in_seconds(escalation_tray):
     ]
 
 
+def test_the_balloon_quotes_the_question_when_the_agent_sent_one(escalation_tray):
+    """Claude's Notification hook carries a sentence; Codex sends a tool name; Cursor
+    sends nothing. All three end up here, and only the first two have anything to quote.
+    """
+    app_instance, server, clock, _chimes, balloons, commands = escalation_tray
+    server.set(_confirm_payload("Claude needs your permission to use Bash"))
+    app_instance._poll_state()
+
+    clock["now"] += 61
+    app_instance._poll_state()
+
+    assert balloons[0][1] == (
+        "Claude Code — still waiting for your answer (1 min): "
+        "Claude needs your permission to use Bash"
+    )
+
+
+def test_without_a_question_the_balloon_is_exactly_what_it_was(escalation_tray):
+    """The no-question path is every Cursor confirm and any agent whose hook sent
+    nothing — it must read as a finished sentence, not as one with a dangling colon."""
+    app_instance, server, clock, _chimes, balloons, _commands = escalation_tray
+    server.set(_confirm_payload())
+    app_instance._poll_state()
+
+    clock["now"] += 61
+    app_instance._poll_state()
+
+    assert balloons[0][1] == "Claude Code — still waiting for your answer (1 min)."
+
+
+def test_the_command_is_handed_the_question_and_the_finished_sentence(escalation_tray):
+    app_instance, server, clock, _chimes, _balloons, commands = escalation_tray
+    server.set(_confirm_payload("Claude needs your permission to use Bash"))
+    app_instance._poll_state()
+
+    clock["now"] += 61
+    app_instance._poll_state()
+
+    agents, question, message = commands[0]
+    assert agents == "Claude Code"
+    assert question == "Claude needs your permission to use Bash"
+    assert message.endswith("Claude needs your permission to use Bash")
+
+
 def test_the_escalation_command_runs_once_per_confirm(escalation_tray):
     """A command that pushes to a phone must not push once a minute for an hour."""
     app_instance, server, clock, _chimes, _balloons, commands = escalation_tray
@@ -2347,7 +2393,7 @@ def test_the_escalation_command_runs_once_per_confirm(escalation_tray):
         clock["now"] += 60
         app_instance._poll_state()
 
-    assert commands == ["Claude Code"]
+    assert [agents for agents, _q, _m in commands] == ["Claude Code"]
 
 
 def test_answering_the_confirm_stops_the_nagging_and_rearms_it(escalation_tray):
@@ -2371,7 +2417,7 @@ def test_answering_the_confirm_stops_the_nagging_and_rearms_it(escalation_tray):
     clock["now"] += 61
     app_instance._poll_state()
     assert len(balloons) == 2
-    assert commands == ["Claude Code", "Claude Code"]
+    assert [agents for agents, _q, _m in commands] == ["Claude Code", "Claude Code"]
 
 
 def test_a_long_suspend_owes_exactly_one_escalation(escalation_tray):
@@ -2408,7 +2454,9 @@ def test_the_escalation_command_is_handed_the_state_in_its_environment(tray, mon
         lambda command, **kwargs: calls.append((command, kwargs)),
     )
 
-    app_instance._run_escalation_command(["Claude Code"])
+    app_instance._run_escalation_command(
+        ["Claude Code"], "permission to use Bash", "Claude Code — waiting: permission to use Bash"
+    )
 
     assert len(calls) == 1
     command, kwargs = calls[0]
@@ -2416,6 +2464,26 @@ def test_the_escalation_command_is_handed_the_state_in_its_environment(tray, mon
     assert kwargs["shell"] is True
     assert kwargs["env"]["TINTAVIEW_STATUS"] == "confirm"
     assert kwargs["env"]["TINTAVIEW_AGENTS"] == "Claude Code"
+    assert kwargs["env"]["TINTAVIEW_QUESTION"] == "permission to use Bash"
+    assert kwargs["env"]["TINTAVIEW_MESSAGE"].endswith("permission to use Bash")
+
+
+def test_every_command_variable_is_set_even_with_nothing_to_say(tray, monkeypatch):
+    """A command must never have to handle a missing variable — empty, never unset."""
+    app_instance, _server = tray
+    app_instance._cfg.escalation.command = "notify-send hi"
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        tray_mod.subprocess, "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    app_instance._run_escalation_command(["Cursor"])
+
+    env = calls[0][1]["env"]
+    assert env["TINTAVIEW_QUESTION"] == ""
+    assert env["TINTAVIEW_MESSAGE"] == ""
+    assert env["TINTAVIEW_AGENTS"] == "Cursor"
 
 
 def test_an_empty_escalation_command_spawns_nothing(tray, monkeypatch):

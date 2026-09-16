@@ -28,6 +28,7 @@
   "tray.hooks.balloon_title": "TintaView-Hooks",
   "tray.hooks.balloon_body": "Für {agents} fehlen die Hooks. Öffne Einstellungen… → „Vollständigen Einrichtungsassistenten öffnen“, um sie neu zu installieren.",
   "tray.escalate.balloon_body": "{agents} – wartet weiterhin auf deine Antwort ({waited}).",
+  "tray.escalate.balloon_body_question": "{agents} – wartet weiterhin auf deine Antwort ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Ein Agent wartet weiterhin auf deine Antwort ({waited}).",
   "tray.usage_alert.balloon_body": "{agent}: {label} liegt bei {pct} %.",
   "tray.engine.balloon_title": "TintaView-Beleuchtung",

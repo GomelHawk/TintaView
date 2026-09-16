@@ -38,6 +38,17 @@ else
     FIELD="session_id"
 fi
 
+# What the agent is *asking for*, read only on the confirm event (see QFIELD below).
+# Mirrors `AgentAdapter.question_field`; keep the two in step. Cursor is absent on
+# purpose — it has no confirm hook at all, so this script is never run with that pair.
+QFIELD=""
+if [ "$EVENT" = "confirm" ]; then
+    case "$AGENT" in
+        claude) QFIELD="message" ;;
+        codex) QFIELD="tool_name" ;;
+    esac
+fi
+
 # ONE sed, reading stdin directly, doing the extraction *and* the safe-character check in
 # the same expression and quitting at the first hit. The previous shape — `head -c` into
 # a shell variable, then `printf | sed | head -n 1`, then `printf | sed` again — forked
@@ -52,14 +63,41 @@ fi
 # Guarded on a tty because a manual `tv-hook.sh claude working` at an interactive terminal
 # must return instantly rather than block on a stdin read that will never come.
 SID=""
+QUESTION=""
 if [ ! -t 0 ]; then
-    SID=$(sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
+    if [ -n "$QFIELD" ]; then
+        # The confirm event only: two fields out of one payload means reading stdin into
+        # a variable first (a pipe can only be consumed once), which costs two extra
+        # processes. Affordable *here* and nowhere else — confirm fires once per prompt,
+        # while tool-start/tool-end fire on every single tool call and keep the
+        # single-sed path below untouched.
+        PAYLOAD=$(cat)
+        SID=$(printf '%s' "$PAYLOAD" | sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
+        # Unlike the session id this is free text, so it is *not* matched against a safe
+        # character set: `--data-urlencode` below hands it to curl to encode, and the
+        # daemon sanitises what it stores. `[^"]*` stops at the first quote, so an
+        # embedded escape truncates the sentence rather than corrupting the request.
+        QUESTION=$(printf '%s' "$PAYLOAD" | sed -n "/\"$QFIELD\"[[:space:]]*:/{s/.*\"$QFIELD\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p;q;}")
+    else
+        SID=$(sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
+    fi
 fi
 [ -n "$SID" ] || SID="default"
 
 # Fire and forget: short timeout, discard output, and always exit 0 — whatever
 # happens here (daemon down, curl missing, network namespace weirdness) must never
 # surface as a hook failure to the agent.
-"$TINTAVIEW_CURL" -s -m 1 "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&sid=$SID" >/dev/null 2>&1
+#
+# `-G --data-urlencode` rather than building the query by hand: curl does the percent
+# encoding, so an agent's sentence (spaces, quotes, `&`, a path) can never break the
+# request line. Only used when there is something to send, so the common path stays the
+# same single plain GET it has always been.
+if [ -n "$QUESTION" ]; then
+    "$TINTAVIEW_CURL" -s -m 1 -G \
+        --data-urlencode "question=$QUESTION" \
+        "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&sid=$SID" >/dev/null 2>&1
+else
+    "$TINTAVIEW_CURL" -s -m 1 "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&sid=$SID" >/dev/null 2>&1
+fi
 
 exit 0

@@ -40,6 +40,15 @@ REM Which field name to look for: cursor sends conversation_id, everyone else se
 set "FIELD=session_id"
 if /i "%AGENT%"=="cursor" set "FIELD=conversation_id"
 
+REM What the agent is *asking for*, scraped on the confirm event only — mirrors
+REM `AgentAdapter.question_field`, keep the two in step. Every other event leaves QFIELD
+REM empty and skips the whole second scrape below, so the per-tool-call path is unchanged.
+set "QFIELD="
+if /i "%EVENT%"=="confirm" (
+    if /i "%AGENT%"=="claude" set "QFIELD=message"
+    if /i "%AGENT%"=="codex" set "QFIELD=tool_name"
+)
+
 REM Grab one line of piped stdin, if any. `set /p` returns immediately (LINE stays
 REM undefined) when stdin is already at EOF, which is what an empty pipe looks like;
 REM it only blocks waiting for a line on a real interactive console with nothing
@@ -89,8 +98,36 @@ if defined TOKEN (
     if "!CHECK!"=="!TOKEN!" if not "!TOKEN!"=="" set "SID=!TOKEN!"
 )
 
+REM The question, scraped out of the same line with the same substring trick. Free text
+REM rather than an id, so it is *stripped* of what batch and curl cannot survive rather
+REM than rejected outright: a sentence containing `&` is still worth sending without it,
+REM whereas a session id with one is a sid we must not guess at. Percent-encoding is
+REM curl's job (--data-urlencode below), not ours.
+set "QUESTION="
+set "QAFTER="
+if defined QFIELD if defined LINE (
+    set "QAFTER=!LINE:*"%QFIELD%":"=!"
+    if not "!QAFTER!"=="!LINE!" (
+        for /f tokens^=1^ delims^=^" %%V in ("!QAFTER!") do set "QUESTION=%%V"
+    )
+)
+if defined QUESTION (
+    set "QUESTION=!QUESTION:&=!"
+    set "QUESTION=!QUESTION:%%=!"
+    set "QUESTION=!QUESTION:<=!"
+    set "QUESTION=!QUESTION:>=!"
+    set "QUESTION=!QUESTION:|=!"
+    set "QUESTION=!QUESTION:^=!"
+)
+
 REM Fire and forget: short timeout, discard output, always succeed regardless of what
-REM happened above — a hook must never fail the agent's turn.
-"%TINTAVIEW_CURL%" -s -m 1 "%TINTAVIEW_URL%/v1/event/%EVENT%?agent=%AGENT%&sid=%SID%" >nul 2>&1
+REM happened above — a hook must never fail the agent's turn. The `-G --data-urlencode`
+REM form is only used when there is a question to send, so the common path stays the
+REM single plain GET it has always been.
+if defined QUESTION (
+    "%TINTAVIEW_CURL%" -s -m 1 -G --data-urlencode "question=!QUESTION!" "%TINTAVIEW_URL%/v1/event/%EVENT%?agent=%AGENT%&sid=%SID%" >nul 2>&1
+) else (
+    "%TINTAVIEW_CURL%" -s -m 1 "%TINTAVIEW_URL%/v1/event/%EVENT%?agent=%AGENT%&sid=%SID%" >nul 2>&1
+)
 
 exit /b 0

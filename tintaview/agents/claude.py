@@ -18,6 +18,8 @@ class ClaudeAdapter(NestedHooksAdapter):
     key = "claude"
     display_name = "Claude Code"
     session_id_field = "session_id"
+    # The Notification payload's own sentence: "Claude needs your permission to use Bash".
+    question_field = "message"
     default_confirm_detection = "event"
 
     def default_home(self) -> Path:

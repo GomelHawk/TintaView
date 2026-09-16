@@ -329,6 +329,37 @@ Configured entirely in that dialog, or by hand — see `ui.clocks.*` and
 not cover clocks (it stays focused on hooks, engines and autostart), same as the chime
 and the local-estimate switch.
 
+## Reminders you can't miss
+
+A single chime is missed by anyone who stepped away, so a confirmation left unanswered for
+`escalation.after_seconds` (60 by default) re-chimes and re-notifies every interval until you
+deal with it — and can run **one command of your own**, once per confirmation. That is the
+extension point for everything TintaView deliberately doesn't do itself: a phone push, a
+webhook, a smart bulb, a message to another machine. Set it in **Settings… → Alerts**.
+
+Telegram, as a worked example:
+
+```
+curl -s -X POST "https://api.telegram.org/bot<TOKEN>/sendMessage" \
+  -d "chat_id=<CHAT_ID>" --data-urlencode "text=$TINTAVIEW_MESSAGE"
+```
+
+(on Windows, `curl.exe` and `%TINTAVIEW_MESSAGE%`.)
+
+**What the agent is asking** is included when the agent tells us. TintaView reads one field from
+the hook payload of the confirmation event — and only that event, never on the per-tool-call path:
+
+| Agent | `TINTAVIEW_QUESTION` |
+| --- | --- |
+| Claude Code | its own sentence: "Claude needs your permission to use Bash" |
+| Codex CLI | the tool it wants to run, e.g. `shell` — its payload carries no sentence |
+| Cursor | *(empty)* — it has no "waiting for approval" hook; TintaView infers that state itself |
+
+`TINTAVIEW_MESSAGE` is the whole sentence, already worded and translated, with the question
+appended only when there is one — so a command that just echoes it reads correctly for every
+agent. The question is held in memory only, replaced by the next prompt, and dropped the moment
+you answer.
+
 ## Configuration
 
 One file: `~/.tintaview/config.toml` (Windows: `%LOCALAPPDATA%\TintaView\config.toml`),
@@ -370,7 +401,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `ui.clocks.format` | `24h` | `24h` (20:42) or `12h` (8:42 PM). One setting for every clock, not per clock. |
 | `escalation.enabled` | `true` | Keep reminding you while an agent waits for confirmation: the chime repeats (if `ui.chime_on_confirm` is on) and a notification appears every `escalation.after_seconds`, until you answer. A single chime is missed by anyone who walked away. Also on the **Alerts** tab in **Settings…**. |
 | `escalation.after_seconds` | `60` | How long a confirmation must go unanswered before the first reminder, and the interval between reminders after that. |
-| `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. `TINTAVIEW_STATUS` and `TINTAVIEW_AGENTS` are set in its environment; its output and exit code are ignored, and a failure is logged rather than shown. |
+| `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. Four variables are set in its environment, always, even when empty: `TINTAVIEW_STATUS`, `TINTAVIEW_AGENTS` (who is waiting), `TINTAVIEW_QUESTION` (what they are asking — see [Reminders you can't miss](#reminders-you-cant-miss)) and `TINTAVIEW_MESSAGE` (the ready-made sentence the tray notification shows, which is what most commands want). Its output and exit code are ignored, and a failure is logged rather than shown. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |

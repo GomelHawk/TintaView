@@ -76,6 +76,31 @@ def _first(query: dict[str, list[str]], key: str, default: str) -> str:
     return values[0] if values else default
 
 
+#: Longest question kept. It is shown in a tray balloon and handed to a user command;
+#: a whole `tool_input` pasted into either is noise, and the sentence worth reading is
+#: always at the front.
+MAX_QUESTION_CHARS = 200
+
+
+def _clean_question(raw: str) -> str:
+    """The question text, made safe to show. Never raises.
+
+    It arrives from an agent's own hook payload through a `sed` in the shim, so it is
+    whatever that agent felt like writing: JSON escapes the shim did not unescape,
+    newlines, control characters, or a `tool_input` blob thousands of characters long.
+    This is the one place any of that is dealt with — the state store, the tray and the
+    escalation command all take what comes out of here as already-printable text.
+    """
+    if not raw:
+        return ""
+    text = raw.replace("\\n", " ").replace("\\t", " ").replace('\\"', '"').replace("\\\\", "\\")
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
+    text = " ".join(text.split())
+    if len(text) > MAX_QUESTION_CHARS:
+        text = text[: MAX_QUESTION_CHARS - 1].rstrip() + "…"
+    return text
+
+
 def _watchdog_poll_seconds(timeout: float) -> float:
     """How often the watchdog thread re-checks sessions against the clock.
 
@@ -160,8 +185,9 @@ class _Handler(BaseHTTPRequestHandler):
             agent = _first(query, "agent", DEFAULT_AGENT)
             sid = _first(query, "sid", DEFAULT_SID)
             tool = _first(query, "tool", "")
+            question = _clean_question(_first(query, "question", ""))
             self._write_ack()
-            status_server.handle_event(event, agent, sid, tool)
+            status_server.handle_event(event, agent, sid, tool, question)
             return
 
         legacy_event = path.lstrip("/")
@@ -450,7 +476,8 @@ class StatusServer:
 
     # --- event handling ------------------------------------------------------------
 
-    def handle_event(self, event: str, agent: str, sid: str, tool: str) -> None:
+    def handle_event(self, event: str, agent: str, sid: str, tool: str,
+                     question: str = "") -> None:
         """Update the state store (and the stall detector) for one hook event, then hand
         the new effective status to the applier — but only when it actually changed.
         `StateStore`'s mutators report that (and what it changed *to*, computed under the
@@ -487,7 +514,10 @@ class StatusServer:
             elif event == IDLE:
                 effective = self.state.set(agent, sid, STATUS_IDLE)
             elif event == CONFIRM:
-                effective = self.state.set(agent, sid, STATUS_CONFIRM)
+                # The question rides along for display only, exactly like `tool` — it
+                # never influences the status or the lights, and an agent whose hook
+                # sends none is unchanged (see `_clean_question`).
+                effective = self.state.set(agent, sid, STATUS_CONFIRM, question=question)
             elif event == TOOL_START:
                 stall_seconds = self._stall_seconds_for(agent)
                 if stall_seconds is not None:

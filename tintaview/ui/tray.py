@@ -917,22 +917,45 @@ class TrayApp(QtCore.QObject):
             for key, value in sorted(agents_payload.items())
             if value.get("effective") == "confirm"
         ]
+        # The agent's own words for what it is asking, when its hook sends any — see
+        # `core/state.py`. Only ever from a session that is waiting *now*, and only the
+        # first: two agents asking at once is a balloon, not a transcript.
+        question = next(
+            (
+                str(value.get("question") or "")
+                for _key, value in sorted(agents_payload.items())
+                if value.get("effective") == "confirm" and value.get("question")
+            ),
+            "",
+        )
+        message = self._escalation_message(waited, waiting, question)
         self.tray.showMessage(
-            "TintaView",
-            # `duration_text`, not a minutes count of our own: an interval set to 15 s
-            # made the first three reminders all claim "1 min".
-            t("tray.escalate.balloon_body", waited=fmt.duration_text(waited),
-              agents=", ".join(waiting))
-            if waiting
-            else t("tray.escalate.balloon_body_unknown", waited=fmt.duration_text(waited)),
-            QtWidgets.QSystemTrayIcon.Warning,
-            10000,
+            "TintaView", message, QtWidgets.QSystemTrayIcon.Warning, 10000,
         )
         if not self._escalation_command_ran:
             self._escalation_command_ran = True
-            self._run_escalation_command(waiting)
+            self._run_escalation_command(waiting, question, message)
 
-    def _run_escalation_command(self, waiting: list[str]) -> None:
+    def _escalation_message(self, waited: float, waiting: list[str], question: str) -> str:
+        """The one sentence both the balloon and the command's `TINTAVIEW_MESSAGE` use.
+
+        Worded once, here, so a user command that just echoes `TINTAVIEW_MESSAGE` says
+        exactly what the balloon says — including when there is no question to quote,
+        which is every Cursor confirm and any agent whose hook sent nothing.
+        `duration_text`, not a minutes count of our own: an interval set to 15 s made the
+        first three reminders all claim "1 min".
+        """
+        waited_text = fmt.duration_text(waited)
+        agents = ", ".join(waiting)
+        if not waiting:
+            return t("tray.escalate.balloon_body_unknown", waited=waited_text)
+        if question:
+            return t("tray.escalate.balloon_body_question",
+                     waited=waited_text, agents=agents, question=question)
+        return t("tray.escalate.balloon_body", waited=waited_text, agents=agents)
+
+    def _run_escalation_command(self, waiting: list[str], question: str = "",
+                                message: str = "") -> None:
         """Fire the configured command and forget about it.
 
         Through the shell, because the whole point is that the user writes whatever their
@@ -942,6 +965,11 @@ class TrayApp(QtCore.QObject):
         TintaView's own state is handed over in the environment rather than interpolated
         into the string — a quoting bug in `TINTAVIEW_AGENTS` must not be able to change
         what the command does.
+
+        Three variables, all always set so a command never has to handle a missing one:
+        `TINTAVIEW_AGENTS` (who is waiting), `TINTAVIEW_QUESTION` (what they are asking,
+        empty when the agent sent nothing) and `TINTAVIEW_MESSAGE` (the ready-made
+        sentence, which is the one most commands want).
         """
         command = self._cfg.escalation.command.strip()
         if not command:
@@ -949,6 +977,8 @@ class TrayApp(QtCore.QObject):
         env = dict(os.environ)
         env["TINTAVIEW_STATUS"] = "confirm"
         env["TINTAVIEW_AGENTS"] = ", ".join(waiting)
+        env["TINTAVIEW_QUESTION"] = question
+        env["TINTAVIEW_MESSAGE"] = message
         try:
             kwargs: dict[str, Any] = {}
             if sys.platform == "win32":

@@ -29,6 +29,7 @@
   "tray.hooks.balloon_title": "Hooki TintaView",
   "tray.hooks.balloon_body": "Brakuje hooków dla {agents}. Otwórz Ustawienia… → „Otwórz pełny kreator konfiguracji”, aby je ponownie zainstalować.",
   "tray.escalate.balloon_body": "{agents} — wciąż czeka na twoją odpowiedź ({waited}).",
+  "tray.escalate.balloon_body_question": "{agents} — wciąż czeka na twoją odpowiedź ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Agent wciąż czeka na twoją odpowiedź ({waited}).",
   "tray.usage_alert.balloon_body": "{agent}: {label} wynosi {pct}%.",
   "tray.engine.balloon_title": "Podświetlenie TintaView",

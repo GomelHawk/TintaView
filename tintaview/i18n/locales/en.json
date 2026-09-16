@@ -28,6 +28,7 @@
   "tray.hooks.balloon_title": "TintaView hooks",
   "tray.hooks.balloon_body": "Hooks are missing for {agents}. Open Settings… → “Open Full Setup Wizard” to reinstall them.",
   "tray.escalate.balloon_body": "{agents} — still waiting for your answer ({waited}).",
+  "tray.escalate.balloon_body_question": "{agents} — still waiting for your answer ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "An agent is still waiting for your answer ({waited}).",
   "tray.usage_alert.balloon_body": "{agent}: {label} is at {pct}%.",
   "tray.engine.balloon_title": "TintaView lighting",

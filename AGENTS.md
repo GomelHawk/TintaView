@@ -381,6 +381,27 @@ id pulled out by `sed`, **no Python startup**, `curl -s -m 1`, output discarded,
 `TINTAVIEW_URL` / `TINTAVIEW_CURL` come from `~/.tintaview/hook.env`, written at install time.
 `tv-hook.cmd` is the Windows-native twin.
 
+**The one exception to "session id only": the confirm event.** It fires once per prompt rather
+than once per tool call, so it can afford to read a second field — what the agent is *asking* for
+— and send it as `?question=`. Which field that is comes from `AgentAdapter.question_field`
+(Claude: `message`, "Claude needs your permission to use Bash"; Codex: `tool_name`, since its
+`permission-request.command.input` schema carries no sentence; Cursor: none, it has no confirm
+hook at all), and the shims hardcode the same table — keep them in step. Rules that keep this
+from becoming the next hot-path regression:
+
+- **Only on `confirm`.** Every other event takes the untouched single-`sed` path. The two extra
+  processes (`cat` into a variable, because a pipe is consumed once) are the price of reading two
+  fields, and they are never paid on a tool call.
+- **Never hand-built into the query.** `curl -G --data-urlencode` does the percent encoding, so an
+  agent's sentence cannot break the request line. `tv-hook.cmd` strips what `cmd` cannot survive
+  (`& %% < > | ^`) instead, since batch has no equivalent.
+- **The daemon sanitises, not the shim** (`server._clean_question`): unescapes, collapses
+  whitespace, drops non-printables, caps at `MAX_QUESTION_CHARS`. Everything downstream treats it
+  as already-printable text.
+- **It lives only as long as the question does.** `StateStore.set` keeps it only while the status
+  is `confirm` and clears it on anything else, so the tray can never quote a prompt that was
+  already answered. It is display-only: it never touches the effective status or the lights.
+
 **Hook merge** (`install/hooks.py`) rewrites the user's real config files, so its rules are strict:
 
 1. Read JSON, or TOML via `tomlkit` so comments and formatting survive.

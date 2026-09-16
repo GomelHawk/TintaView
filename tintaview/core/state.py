@@ -39,6 +39,12 @@ class _Session:
     #: descriptive — it never affects the effective status or the lighting, it just
     #: lets the flyout say *what* an agent is busy with rather than only that it is.
     tool: str = ""
+    #: What this session is *asking* for, when it is waiting on a confirmation — the
+    #: agent's own wording ("Claude needs your permission to use Bash"), or the tool
+    #: name for an agent that sends no sentence. Only ever set by a confirm event and
+    #: cleared by every other status, so it can never describe a question that has
+    #: already been answered. Descriptive only, like `tool`.
+    question: str = ""
     seen: float = field(default_factory=time.monotonic)
 
 
@@ -70,12 +76,18 @@ class StateStore:
             self._touch()
             return self._changed_locked(before)
 
-    def set(self, agent: str, sid: str, status: str, tool: str | None = None) -> str | None:
+    def set(self, agent: str, sid: str, status: str, tool: str | None = None,
+            question: str = "") -> str | None:
         """Set a session's status, and optionally the tool it's running.
 
         ``tool=None`` means "unchanged" and ``tool=""`` means "no longer running a named
         tool" — a tool-end has to be able to clear the name it set, but a plain
         ``working`` ping in between must not.
+
+        ``question`` is only kept while the new status is ``confirm``; anything else
+        clears it. That asymmetry with `tool` is deliberate: a leftover tool name is
+        harmless trivia, while a leftover question would have the tray (and someone's
+        phone) quoting a prompt that was answered ten minutes ago.
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status {status!r}")
@@ -89,6 +101,7 @@ class StateStore:
                 session.status = status
             if tool is not None:
                 session.tool = tool
+            session.question = question if status == STATUS_CONFIRM else ""
             session.seen = time.monotonic()
             self._touch()
             return self._changed_locked(before)
@@ -192,12 +205,16 @@ class StateStore:
         with self._lock:
             per_agent: dict[str, dict] = {}
             for (agent, sid), session in self._sessions.items():
-                entry = per_agent.setdefault(agent, {"sessions": {}, "tools": {}})
+                entry = per_agent.setdefault(
+                    agent, {"sessions": {}, "tools": {}, "questions": {}}
+                )
                 # `sessions` stays a plain {sid: status} map: `doctor`'s live hook test
                 # and the flyout both read it, and neither needs the rest.
                 entry["sessions"][sid] = session.status
                 if session.tool:
                     entry["tools"][sid] = session.tool
+                if session.question:
+                    entry["questions"][sid] = session.question
             for entry in per_agent.values():
                 present = set(entry["sessions"].values())
                 effective = STATUS_IDLE
@@ -213,11 +230,33 @@ class StateStore:
                 entry["tool"] = (
                     self._headline_tool(entry) if effective == STATUS_WORKING else ""
                 )
+                # Same "only while it is true" rule as `tool`: a question belongs to a
+                # session that is waiting *now*. With two sessions open, the one that is
+                # actually asking is the one worth quoting.
+                entry["question"] = (
+                    self._headline_question(entry) if effective == STATUS_CONFIRM else ""
+                )
             return {
                 "effective": self.effective(),
                 "agents": per_agent,
                 "count": len(self._sessions),
             }
+
+    @staticmethod
+    def _headline_question(entry: dict) -> str:
+        """The question to show for an agent with more than one session waiting.
+
+        Sorted by sid, like `_headline_tool`, so the choice is stable across polls
+        rather than flickering between two waiting sessions on dict order.
+        """
+        waiting = sorted(
+            sid for sid, status in entry["sessions"].items() if status == STATUS_CONFIRM
+        )
+        for sid in waiting:
+            question = entry["questions"].get(sid)
+            if question:
+                return question
+        return ""
 
     @staticmethod
     def _headline_tool(entry: dict) -> str:

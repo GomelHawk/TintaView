@@ -29,6 +29,7 @@
   "tray.hooks.balloon_title": "Хуки TintaView",
   "tray.hooks.balloon_body": "Відсутні хуки для {agents}. Відкрийте Налаштування… → «Відкрити повний майстер налаштування», щоб перевстановити їх.",
   "tray.escalate.balloon_body": "{agents} — досі чекає на вашу відповідь ({waited}).",
+  "tray.escalate.balloon_body_question": "{agents} — досі чекає на вашу відповідь ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Агент досі чекає на вашу відповідь ({waited}).",
   "tray.usage_alert.balloon_body": "{agent}: {label} — {pct}%.",
   "tray.engine.balloon_title": "Підсвітка TintaView",

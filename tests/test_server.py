@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
 
@@ -1115,3 +1116,77 @@ def test_quit_survives_a_raising_callback(server_engine):
     assert _get_quit(server)["ok"] is True
     assert server.request_quit() is False
     assert _get_state(server)["effective"] == "none"  # still serving
+
+
+# --------------------------------------------------------------------------- questions
+
+
+def _confirm_with_question(server: StatusServer, agent: str, sid: str, question: str) -> None:
+    url = (f"{server.url}/v1/event/confirm?agent={agent}&sid={sid}"
+           f"&question={urllib.parse.quote(question)}")
+    with urllib.request.urlopen(url, timeout=2) as resp:
+        assert resp.status == 200
+
+
+def test_a_confirm_carries_the_agents_question_into_state(server_engine):
+    """What the escalation balloon and the user's command quote — see `ui/tray.py`."""
+    server, _engine = server_engine
+    _event(server, "session-start", "claude", "s1")
+
+    _confirm_with_question(server, "claude", "s1", "Claude needs your permission to use Bash")
+
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["question"])
+    assert (_get_state(server)["agents"]["claude"]["question"]
+            == "Claude needs your permission to use Bash")
+
+
+def test_answering_clears_the_question(server_engine):
+    """A leftover question would have the tray quoting a prompt answered ten minutes ago."""
+    server, _engine = server_engine
+    _event(server, "session-start", "claude", "s1")
+    _confirm_with_question(server, "claude", "s1", "permission to use Bash")
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["question"])
+
+    _event(server, "working", "claude", "s1")
+
+    assert _wait_until(lambda: not _get_state(server)["agents"]["claude"]["question"])
+
+
+def test_a_confirm_without_a_question_is_unchanged(server_engine):
+    """Cursor sends none at all, and an old hook script sends no parameter."""
+    server, _engine = server_engine
+    _event(server, "session-start", "cursor", "c1")
+
+    _event(server, "confirm", "cursor", "c1")
+
+    assert _wait_until(lambda: _get_state(server)["agents"]["cursor"]["effective"] == "confirm")
+    assert _get_state(server)["agents"]["cursor"]["question"] == ""
+
+
+def test_an_oversized_or_messy_question_is_cleaned_up(server_engine):
+    """It arrives from an agent's payload through a `sed`, so it is whatever that agent
+    wrote: escapes the shim didn't unescape, newlines, or a whole `tool_input` blob."""
+    server, _engine = server_engine
+    _event(server, "session-start", "claude", "s1")
+
+    _confirm_with_question(server, "claude", "s1", "run\\nthis " + "x" * 400)
+
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["question"])
+    question = _get_state(server)["agents"]["claude"]["question"]
+    assert question.startswith("run this ")
+    assert len(question) <= 200 and question.endswith("…")
+
+
+def test_the_headline_question_comes_from_a_session_that_is_waiting(server_engine):
+    """With two sessions open, the idle one's leftover must not be what is quoted."""
+    server, _engine = server_engine
+    _event(server, "session-start", "claude", "s1")
+    _event(server, "session-start", "claude", "s2")
+    _confirm_with_question(server, "claude", "s1", "first question")
+    assert _wait_until(lambda: _get_state(server)["agents"]["claude"]["question"])
+    _event(server, "working", "claude", "s1")
+    _confirm_with_question(server, "claude", "s2", "second question")
+
+    assert _wait_until(
+        lambda: _get_state(server)["agents"]["claude"]["question"] == "second question"
+    )
