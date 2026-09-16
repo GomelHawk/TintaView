@@ -934,9 +934,36 @@ def test_json_report_is_one_parseable_document_even_when_checks_fail(capsys):
     assert "[FAIL]" not in out, "the checklist leaked into the JSON run"
 
 
-def test_json_report_carries_the_same_checks_as_the_printed_one(capsys):
+def test_the_json_document_is_built_from_the_lines_the_report_prints(capsys):
     """Same run, two renderings — a JSON mode that re-derived its own answers would be a
-    second diagnostic to keep in step with the first."""
+    second diagnostic to keep in step with the first.
+
+    Asserted on the reporter rather than by diffing two `run_doctor` calls: those are two
+    separate runs, and some lines legitimately differ between them (the DAEMON check
+    quotes an ephemeral port and the OS's own connection-error text, which is exactly
+    what failed on a Windows runner). The invariant that actually matters is local — one
+    `_emit` both prints the line and records it.
+    """
+    reporter = D._Reporter(verbose=False)
+
+    reporter.ok("CONFIG", "3 agents enabled")
+    reporter.warn("ENGINE", "no usable lighting engine", "start Razer Synapse")
+    reporter.fail("DAEMON", "nothing is answering", "start TintaView")
+    printed = capsys.readouterr().out
+    report = D._json_report(reporter)
+
+    assert [(c["section"], c["level"]) for c in report["checks"]] == [
+        ("CONFIG", "ok"), ("ENGINE", "warn"), ("DAEMON", "fail"),
+    ]
+    for check in report["checks"]:
+        assert check["message"] in printed
+        assert not check["fix"] or check["fix"] in printed
+    assert (report["fails"], report["warns"], report["ok"]) == (1, 1, False)
+
+
+def test_the_json_run_reports_on_the_same_sections_as_the_printed_one(capsys):
+    """The cross-run half of the above, limited to what is stable between two runs:
+    which checks ran at all."""
     import json
 
     cfg = _write_config(enabled_agents=["claude"])
@@ -951,9 +978,19 @@ def test_json_report_carries_the_same_checks_as_the_printed_one(capsys):
     sections = {c["section"] for c in report["checks"]}
     assert sections, "no checks recorded"
     assert all(section in printed for section in sections)
-    for check in report["checks"]:
-        assert check["level"] in {"ok", "warn", "fail"}
-        assert check["message"] in printed
+    assert all(c["level"] in {"ok", "warn", "fail"} for c in report["checks"])
+
+
+def test_a_quiet_reporter_prints_nothing_and_still_keeps_score(capsys):
+    """What `--json` relies on: suppressing the checklist must not suppress the checks."""
+    reporter = D._Reporter(verbose=False, quiet=True)
+
+    reporter.ok("CONFIG", "fine")
+    reporter.fail("DAEMON", "nothing is answering", "start TintaView")
+
+    assert capsys.readouterr().out == ""
+    assert [c["section"] for c in reporter.records] == ["CONFIG", "DAEMON"]
+    assert reporter.fails == 1
 
 
 def _json_run(capsys) -> str:
