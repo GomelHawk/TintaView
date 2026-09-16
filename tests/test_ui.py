@@ -1476,6 +1476,59 @@ def test_manual_update_install_never_runs_on_the_calling_thread(qapp, monkeypatc
     assert codes == [0]
 
 
+def test_a_user_asked_update_check_never_balloons(tray, monkeypatch):
+    """One click, one notification — the dialog. See the balloon rule in `tray`'s docstring.
+
+    The menu item used to toast "Checking for updates…" on the click, so an instant check
+    put a toast and its own answer on screen at once (on Windows in that order: toasts
+    are queued, dialogs are not).
+    """
+    app_instance, _server = tray
+    fake = _RecordingUpdateModule({"tag_name": "v9.9.9"})
+    _install_fake_update_module(monkeypatch, fake)
+    balloons = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage",
+        lambda self, title, message, *a, **k: balloons.append((title, message)),
+    )
+    dialogs = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "question",
+        staticmethod(lambda *a, **k: (dialogs.append(a), QtWidgets.QMessageBox.No)[1]),
+    )
+
+    app_instance._check_updates()
+    _drain(app_instance._manual_update_worker)
+    QtWidgets.QApplication.instance().processEvents()
+
+    assert balloons == []
+    assert dialogs, "the check answered nowhere at all"
+
+
+def test_unattended_and_long_running_update_news_does_balloon(tray, monkeypatch):
+    """The other half of the rule: nobody asked for these, or asked minutes ago."""
+    app_instance, _server = tray
+    balloons = []
+    monkeypatch.setattr(
+        QtWidgets.QSystemTrayIcon, "showMessage",
+        lambda self, title, message, *a, **k: balloons.append((title, message)),
+    )
+    boxes = []
+    for name in ("information", "warning", "question"):
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox, name,
+            staticmethod(lambda *a, **k: boxes.append(a)),
+        )
+
+    app_instance._on_update_available("9.9.9", "1.0.0")  # startup check, unattended
+    app_instance._on_update_installed(0)  # an install that ended minutes later
+    app_instance._on_update_installed(1)  # ...and one that failed just as late
+
+    assert len(balloons) == 3
+    assert all(title == "TintaView" for title, _ in balloons)
+    assert boxes == [], "a modal dialog stole focus for news the user wasn't waiting for"
+
+
 def test_check_updates_menu_item_touches_no_network_on_the_gui_thread(tray, monkeypatch):
     """The menu item itself must return immediately — the whole reason this moved."""
     app_instance, _server = tray
@@ -2091,3 +2144,27 @@ def test_the_server_gets_a_quit_hook(tray, monkeypatch):
     QtWidgets.QApplication.instance().processEvents()
 
     assert quits == [1]
+
+
+# --------------------------------------------------------------------------- windows identity
+
+
+def test_brand_png_is_written_for_the_shell(qapp, tmp_path):
+    """Windows wants a *file* to put beside a notification; the mark is drawn, not
+    bundled, so one has to be rendered. See `tray._register_windows_identity`."""
+    path = icons.write_brand_png(tmp_path / "sub" / "notification-icon.png")
+
+    assert path is not None and path.exists()
+    image = QtGui.QImage(str(path))
+    assert not image.isNull()
+    assert image.size() == QtCore.QSize(256, 256)
+
+
+def test_registering_the_windows_identity_is_a_no_op_elsewhere(qapp, monkeypatch):
+    """It must not touch the config directory (or raise) on Linux/macOS."""
+    written: list = []
+    monkeypatch.setattr(icons, "write_brand_png", lambda *a, **k: written.append(a))
+
+    tray_mod._register_windows_identity()
+
+    assert written == []

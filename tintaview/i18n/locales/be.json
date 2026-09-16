@@ -25,7 +25,6 @@
   "tray.wizard.terminal_hint": "Каб змяніць налады, выканайце ў тэрмінале:\n\n    tintaview setup",
   "tray.wizard.open_failed": "Не ўдалося адкрыць чараўнік наладкі. Выканайце `tintaview setup` у тэрмінале; падрабязнасці — у журнале.",
 
-  "tray.update.balloon_title": "Даступнае абнаўленне TintaView",
   "tray.update.balloon_body": "Даступная версія {latest} — у вас {current}. Каб яе ўстанавіць, выберыце «Праверыць абнаўленні» ў меню трэя.",
   "tray.hooks.balloon_title": "Хукі TintaView",
   "tray.hooks.balloon_body": "Адсутнічаюць хукі для {agents}. Адкрыйце Налады… → «Адкрыць поўны майстар налады», каб пераўсталяваць іх.",
@@ -35,7 +34,6 @@
   "tray.update.up_to_date": "У вас найноўшая версія ({version}).",
   "tray.update.confirm": "Даступная версія {latest} — у вас {current}.{notes}\n\nАбнаўленне ніколі не змяняе ні вашы налады, ні канфігурацыю хукаў вашых агентаў.\n\nУстанавіць зараз?",
   "tray.update.failed": "Абнаўленне не завяршылася. Выканайце `tintaview update` у тэрмінале, каб убачыць прычыну.",
-  "tray.update.checking": "Праверка абнаўленняў…",
   "tray.update.installing": "Усталяванне абнаўлення — гэта можа заняць некалькі хвілін.",
   "tray.update.installed": "Абнаўленне ўсталявана. Перазапусціце TintaView, каб выкарыстоўваць новую версію.",
   "tray.diagnostics.title": "Дыягностыка TintaView",

@@ -47,8 +47,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Optional: if someone launches the tray via python.exe, hide the console.
         # Autostart uses pythonw; G HUB painting goes through a python.exe sidecar.
         from .install.win_console import hide_console_if_python_exe
+        from .install.win_identity import set_app_user_model_id
 
         hide_console_if_python_exe()
+        # Before Qt exists, let alone a tray icon: the shell reads the AUMID when a
+        # window or a notification icon is created, and anything created first stays
+        # tagged as the interpreter ("Python"). The name and icon behind the AUMID are
+        # registered in `run_tray`, which can render one.
+        set_app_user_model_id()
 
     from .core.server import StatusServer
 

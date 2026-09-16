@@ -24,7 +24,6 @@
   "tray.wizard.terminal_hint": "Run this in a terminal to change settings:\n\n    tintaview setup",
   "tray.wizard.open_failed": "Could not open the setup wizard. Run `tintaview setup` in a terminal instead; see the log for details.",
 
-  "tray.update.balloon_title": "TintaView update available",
   "tray.update.balloon_body": "Version {latest} is available — you have {current}. Use \"Check for updates\" in the tray menu to install it.",
   "tray.hooks.balloon_title": "TintaView hooks",
   "tray.hooks.balloon_body": "Hooks are missing for {agents}. Open Settings… → “Open Full Setup Wizard” to reinstall them.",
@@ -34,7 +33,6 @@
   "tray.update.up_to_date": "You're up to date (version {version}).",
   "tray.update.confirm": "Version {latest} is available — you have {current}.{notes}\n\nYour settings and your agents' hook configuration are never changed by an update.\n\nInstall it now?",
   "tray.update.failed": "The update didn't complete. Run `tintaview update` from a terminal to see why.",
-  "tray.update.checking": "Checking for updates…",
   "tray.update.installing": "Installing the update — this can take a few minutes.",
   "tray.update.installed": "The update is installed. Restart TintaView to run the new version.",
   "tray.diagnostics.title": "TintaView diagnostics",

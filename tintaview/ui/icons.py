@@ -279,3 +279,25 @@ def brand_icon(size: int = 128) -> QtGui.QIcon:
         icon.addPixmap(_draw_mark(None, px, colors=MARK_BRAND_COLORS, dot_color=MARK_BRAND_DOT))
     _brand_icon = icon
     return icon
+
+
+def write_brand_png(path: Path, size: int = 256) -> Path | None:
+    """Write the brand mark to `path` as a PNG, and return it (None if it couldn't be).
+
+    Exists for the one consumer that cannot be handed a `QIcon`: the Windows shell, which
+    wants a *file* to show beside a notification (see `install/win_identity.py`). The mark
+    is drawn, not bundled, so there is no artwork on disk to point at — one gets rendered
+    into the config directory instead.
+
+    Rewritten on every call rather than cached on disk: it is a single 256px render, and
+    the alternative is a stale icon surviving a change to MARK_BRAND_COLORS forever.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not _draw_mark(None, size, colors=MARK_BRAND_COLORS, dot_color=MARK_BRAND_DOT).save(
+            str(path), "PNG"
+        ):
+            return None
+    except Exception:
+        return None
+    return path

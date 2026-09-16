@@ -25,7 +25,6 @@
   "tray.wizard.terminal_hint": "Чтобы изменить настройки, выполните в терминале:\n\n    tintaview setup",
   "tray.wizard.open_failed": "Не удалось открыть мастер настройки. Запустите `tintaview setup` в терминале; подробности — в журнале.",
 
-  "tray.update.balloon_title": "Доступно обновление TintaView",
   "tray.update.balloon_body": "Доступна версия {latest} — у вас {current}. Чтобы установить её, выберите «Проверить обновления» в меню трея.",
   "tray.hooks.balloon_title": "Хуки TintaView",
   "tray.hooks.balloon_body": "Отсутствуют хуки для {agents}. Откройте Настройки… → «Открыть полный мастер настройки», чтобы установить их заново.",
@@ -35,7 +34,6 @@
   "tray.update.up_to_date": "У вас последняя версия ({version}).",
   "tray.update.confirm": "Доступна версия {latest} — у вас {current}.{notes}\n\nОбновление никогда не меняет ни ваши настройки, ни конфигурацию хуков ваших агентов.\n\nУстановить сейчас?",
   "tray.update.failed": "Обновление не завершилось. Запустите `tintaview update` в терминале, чтобы увидеть причину.",
-  "tray.update.checking": "Проверка обновлений…",
   "tray.update.installing": "Установка обновления — это может занять несколько минут.",
   "tray.update.installed": "Обновление установлено. Перезапустите TintaView, чтобы использовать новую версию.",
   "tray.diagnostics.title": "Диагностика TintaView",

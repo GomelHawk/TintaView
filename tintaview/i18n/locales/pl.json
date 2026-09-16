@@ -25,7 +25,6 @@
   "tray.wizard.terminal_hint": "Uruchom to w terminalu, aby zmienić ustawienia:\n\n    tintaview setup",
   "tray.wizard.open_failed": "Nie udało się otworzyć kreatora konfiguracji. Uruchom `tintaview setup` w terminalu; szczegóły znajdziesz w logu.",
 
-  "tray.update.balloon_title": "Dostępna aktualizacja TintaView",
   "tray.update.balloon_body": "Wersja {latest} jest już dostępna — masz {current}. Użyj „Sprawdź aktualizacje” w menu zasobnika, aby ją zainstalować.",
   "tray.hooks.balloon_title": "Hooki TintaView",
   "tray.hooks.balloon_body": "Brakuje hooków dla {agents}. Otwórz Ustawienia… → „Otwórz pełny kreator konfiguracji”, aby je ponownie zainstalować.",
@@ -35,7 +34,6 @@
   "tray.update.up_to_date": "Masz najnowszą wersję ({version}).",
   "tray.update.confirm": "Wersja {latest} jest już dostępna — masz {current}.{notes}\n\nAktualizacja nigdy nie zmienia Twoich ustawień ani konfiguracji hooków Twoich agentów.\n\nZainstalować teraz?",
   "tray.update.failed": "Aktualizacja nie została ukończona. Uruchom `tintaview update` w terminalu, aby sprawdzić dlaczego.",
-  "tray.update.checking": "Sprawdzanie aktualizacji…",
   "tray.update.installing": "Instalowanie aktualizacji — może to potrwać kilka minut.",
   "tray.update.installed": "Aktualizacja została zainstalowana. Uruchom ponownie TintaView, aby użyć nowej wersji.",
   "tray.diagnostics.title": "Diagnostyka TintaView",

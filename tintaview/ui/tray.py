@@ -6,6 +6,18 @@ The broker runs in this same process (one process, per AGENTS.md) rather than be
 port of its own, so `TrayApp` reads `server.state_payload()` directly — a plain
 in-process dict build under a lock, not I/O — and only falls back to HTTP if that
 method isn't there at all (e.g. some other object standing in for a real server).
+
+**Balloon vs dialog.** A tray balloon is for something the user did *not* ask for and is
+not watching for: the startup update check finding a release, the startup hook check
+finding an agent with no hooks, the lighting engine refusing a command mid-session — and
+the progress of a long job already under way (installing an update, which returns minutes
+later, after the user has moved on). Anything the user just clicked answers in a dialog,
+where they are already looking, and does **not** also balloon: two notifications for one
+click is noise, and on Windows toasts are queued while dialogs are not, so the toast
+routinely arrives after the answer it was meant to precede. The update balloons are all
+titled "TintaView": one title covering "a release exists", "installing" and "installed"
+cannot say more than the app's name without being wrong about two of the three. The hook
+and engine balloons say one thing each, so they keep a title that says what it is.
 """
 
 from __future__ import annotations
@@ -918,8 +930,12 @@ class TrayApp(QtCore.QObject):
         than a modal dialog: this fires unattended on every launch, so it must never
         interrupt whatever the user is doing. "Check for updates" in the menu (below)
         is where the actual install prompt lives."""
+        # Not translated, and deliberately just the app's name: every update balloon
+        # shares this title, so anything more specific ends up wrong on three of the
+        # four (it used to read "TintaView update available" above "Checking for
+        # updates…"). The dialogs in this file are titled the same way.
         self.tray.showMessage(
-            t("tray.update.balloon_title"),
+            "TintaView",
             t("tray.update.balloon_body", latest=tag, current=current),
             QtWidgets.QSystemTrayIcon.Information,
             8000,
@@ -936,14 +952,12 @@ class TrayApp(QtCore.QObject):
         `ManualUpdateWorker`; everything below reports through dialogs and balloons, since
         a windowed build has no console for `run_update`'s own progress output.
         """
-        if not self._manual_update_worker.check():
-            return  # a check or an install is already running
-        self.tray.showMessage(
-            t("tray.update.balloon_title"),
-            t("tray.update.checking"),
-            QtWidgets.QSystemTrayIcon.Information,
-            4000,
-        )
+        # No balloon here, by the rule in this module's docstring: the user just asked
+        # for this and `_on_manual_check` answers in a dialog, so a "Checking for
+        # updates…" toast is a second notification saying less than the first — and on
+        # Windows toasts are queued, so it arrived *after* the answer it was meant to
+        # precede.
+        self._manual_update_worker.check()  # False = a check or install is already running
 
     def _on_manual_check(self, outcome: str, tag: str, notes: str) -> None:
         """The manual check came back — on the GUI thread, via a queued signal."""
@@ -978,7 +992,7 @@ class TrayApp(QtCore.QObject):
         if not self._manual_update_worker.install():
             return
         self.tray.showMessage(
-            t("tray.update.balloon_title"),
+            "TintaView",
             t("tray.update.installing"),
             QtWidgets.QSystemTrayIcon.Information,
             15000,
@@ -990,14 +1004,17 @@ class TrayApp(QtCore.QObject):
         Success is worth saying out loud rather than staying silent like the startup
         check does: this process is still running the *old* code out of a venv the
         installer has just replaced, so "it worked" is only half the message.
+
+        Both outcomes balloon. The install takes minutes on Linux/macOS and the user is
+        long gone by the time it lands, so the failure is no more "an answer they are
+        waiting for" than the success is — a modal warning stealing focus that late is
+        the interruption the docstring's rule exists to prevent. The wording carries the
+        next step (`tintaview update` in a terminal) either way.
         """
-        if code != 0:
-            QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.update.failed"))
-            return
         self.tray.showMessage(
-            t("tray.update.balloon_title"),
-            t("tray.update.installed"),
-            QtWidgets.QSystemTrayIcon.Information,
+            "TintaView",
+            t("tray.update.installed") if code == 0 else t("tray.update.failed"),
+            QtWidgets.QSystemTrayIcon.Information if code == 0 else QtWidgets.QSystemTrayIcon.Warning,
             15000,
         )
 
@@ -1224,6 +1241,26 @@ class TrayApp(QtCore.QObject):
         self.flyout.show_near(QtGui.QCursor.pos())
 
 
+def _register_windows_identity() -> None:
+    """Name the process to the Windows shell, so its balloons are headed "TintaView".
+
+    Without it they are headed "Python", with the Python logo: the tray is a bare
+    `pythonw.exe` with no shortcut of its own, so that is all Windows has to go on. Runs
+    here rather than beside `set_app_user_model_id()` in `cli.py` because the icon the
+    registration points at has to be *rendered* first, and drawing needs a QApplication.
+    No-op off Windows, and never fatal — the tray works unnamed.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        from tintaview.core.config import config_dir
+        from tintaview.install.win_identity import register_app_identity
+
+        register_app_identity(icons.write_brand_png(config_dir() / "notification-icon.png"))
+    except Exception:
+        log.debug("could not register the Windows app identity", exc_info=True)
+
+
 def run_tray(cfg: Config, server: Any) -> int:
     """Build the QApplication, the tray icon and the flyout, and run the event
     loop. Signature matches what `cli.py`'s `_cmd_run` calls: `run_tray(cfg, server)`
@@ -1231,6 +1268,7 @@ def run_tray(cfg: Config, server: Any) -> int:
     """
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # closing the flyout must not quit the tray
+    _register_windows_identity()
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
         print(t("tray.no_system_tray"), file=sys.stderr)
         return 1
