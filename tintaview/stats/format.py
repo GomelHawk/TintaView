@@ -118,8 +118,12 @@ def reset_in_days_text(dt: datetime) -> str:
     return t("usage.reset.in_days", days=math.ceil(seconds / 86400))
 
 
-def cache_age_text(age_s: float) -> str:
+def cache_age_text(age_s: float, signed_out: bool = False) -> str:
     """"Couldn't refresh — usage from 6 hr ago", for rows served out of the cache.
+
+    `signed_out` words it for an auth failure instead ("Signed out — usage from 6d
+    ago. Sign in again to refresh."): those rows stand in for as long as their window
+    runs, and the remedy has to be on screen since no poll will refresh them.
 
     Coarse on purpose, and abbreviated in the same style as the reset phrases above:
     the point is "these numbers are old and roughly how old", not a precise duration.
@@ -127,16 +131,21 @@ def cache_age_text(age_s: float) -> str:
     that recent is not shown at all (see `StatsService._staleness_notice`), so a zero
     here could only ever be a rounding artefact.
     """
-    # Hours all the way to two days, not one. `StatsService.MAX_CACHE_GRACE_S` is 48 h,
-    # so a 24-hour boundary would make "1d ago" the only thing the days form could ever
-    # say, and it would say it for everything from 24 to 48 hours old — collapsing the
-    # distinction precisely where the reader is deciding whether to trust the number.
-    # The days form is kept for a clock that jumped, or a wider ceiling later.
+    # Hours all the way to two days, not one: a 24-hour boundary would say "1d ago" for
+    # everything from 24 to 48 hours old, collapsing the distinction precisely where the
+    # reader is deciding whether to trust the number. Past two days only rows still
+    # inside their own window reach here (`StatsService._cached_rows_may_stand_in`).
     if age_s >= 2 * 86400:
-        return t("usage.cache.stale_days", days=int(age_s // 86400))
+        days = int(age_s // 86400)
+        return (t("usage.cache.signed_out_days", days=days) if signed_out
+                else t("usage.cache.stale_days", days=days))
     if age_s >= 3600:
-        return t("usage.cache.stale_hours", hours=int(age_s // 3600))
-    return t("usage.cache.stale_minutes", minutes=max(1, int(age_s // 60)))
+        hours = int(age_s // 3600)
+        return (t("usage.cache.signed_out_hours", hours=hours) if signed_out
+                else t("usage.cache.stale_hours", hours=hours))
+    minutes = max(1, int(age_s // 60))
+    return (t("usage.cache.signed_out_minutes", minutes=minutes) if signed_out
+            else t("usage.cache.stale_minutes", minutes=minutes))
 
 
 def reset_row_text(reset_at: float, style: str = RESET_RELATIVE) -> str:

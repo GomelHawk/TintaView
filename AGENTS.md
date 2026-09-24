@@ -536,17 +536,21 @@ days earlier. Both halves have to hold:
 
 #### How long cached rows may stand in
 
-`MAX_CACHE_GRACE_S` (48 h) is the ceiling for **both** kinds of failure. Before it, only the
-auth path had any age limit: a transient failure served cached rows forever, so a provider
-erroring for a week showed week-old numbers indefinitely.
+The **rows decide**, not a per-provider constant, because the windows differ by three orders
+of magnitude — Claude's 5-hour row against Cursor's monthly billing cycle (`RESET_DATE` off
+`billingCycleEnd`). `_has_closed_window` disqualifies a result the moment any dated row's
+`reset_at` has passed: a Claude result holds a 5-hour row and a weekly row together and is
+drawn as one section, so a still-valid weekly figure must not license a 5-hour figure from a
+window that ended. A result where `_has_open_window` holds — at least one row dating itself
+into the future — stands in for **either** kind of failure until a window closes, at any age,
+under a staleness notice (for an auth failure: "Signed out — usage from 6d ago. Sign in again
+to refresh it."). That is Cursor left closed for a week: its token expires *because* nobody
+runs it, which is also why the month's figures haven't moved, and a 48 h cap here left the
+card saying only "Not signed in" with twelve days of the cycle to go.
 
-Under that ceiling the **rows decide**, not a per-provider constant, because the windows differ
-by three orders of magnitude — Claude's 5-hour row against Cursor's monthly billing cycle
-(`RESET_DATE` off `billingCycleEnd`). `_has_closed_window` disqualifies a result the moment any
-dated row's `reset_at` has passed: a Claude result holds a 5-hour row and a weekly row together
-and is drawn as one section, so a still-valid weekly figure must not license a 5-hour figure
-from a window that ended. An auth failure additionally needs `_has_open_window` — at least one
-row dating itself into the future.
+`MAX_CACHE_GRACE_S` (48 h) is the ceiling for rows that **don't** date themselves, on a
+transient failure; against an auth failure such rows get only the short grace. Before the
+ceiling a transient failure served undated cached rows forever.
 
 **`_has_open_window` is deliberately not the negation of `_has_closed_window`.** Rows carrying
 no `reset_at` at all say nothing about their own shelf life, and the rows from the original

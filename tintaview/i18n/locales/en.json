@@ -154,6 +154,9 @@
   "usage.cache.stale_minutes": "Couldn't refresh — usage from {minutes} min ago.",
   "usage.cache.stale_hours": "Couldn't refresh — usage from {hours} hr ago.",
   "usage.cache.stale_days": "Couldn't refresh — usage from {days}d ago.",
+  "usage.cache.signed_out_minutes": "Signed out — usage from {minutes} min ago. Sign in again to refresh it.",
+  "usage.cache.signed_out_hours": "Signed out — usage from {hours} hr ago. Sign in again to refresh it.",
+  "usage.cache.signed_out_days": "Signed out — usage from {days}d ago. Sign in again to refresh it.",
 
   "usage.claude.header": "Your usage limits",
   "usage.claude.header_tier": "Your usage limits · {tier}",

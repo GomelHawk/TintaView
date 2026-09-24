@@ -155,6 +155,9 @@
   "usage.cache.stale_minutes": "Не ўдалося абнавіць — даныя {minutes} хв. таму.",
   "usage.cache.stale_hours": "Не ўдалося абнавіць — даныя {hours} гадз. таму.",
   "usage.cache.stale_days": "Не ўдалося абнавіць — даныя {days} дз. таму.",
+  "usage.cache.signed_out_minutes": "Вы выйшлі — даныя {minutes} хв. таму. Увайдзіце зноў, каб абнавіць.",
+  "usage.cache.signed_out_hours": "Вы выйшлі — даныя {hours} гадз. таму. Увайдзіце зноў, каб абнавіць.",
+  "usage.cache.signed_out_days": "Вы выйшлі — даныя {days} дз. таму. Увайдзіце зноў, каб абнавіць.",
 
   "usage.claude.header": "Вашы ліміты выдатку",
   "usage.claude.header_tier": "Вашы ліміты выдатку · {tier}",

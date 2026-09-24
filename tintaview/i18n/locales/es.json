@@ -154,6 +154,9 @@
   "usage.cache.stale_minutes": "No se pudo actualizar: uso de hace {minutes} min.",
   "usage.cache.stale_hours": "No se pudo actualizar: uso de hace {hours} h.",
   "usage.cache.stale_days": "No se pudo actualizar: uso de hace {days} d.",
+  "usage.cache.signed_out_minutes": "Sesión cerrada: uso de hace {minutes} min. Inicia sesión de nuevo para actualizarlo.",
+  "usage.cache.signed_out_hours": "Sesión cerrada: uso de hace {hours} h. Inicia sesión de nuevo para actualizarlo.",
+  "usage.cache.signed_out_days": "Sesión cerrada: uso de hace {days} d. Inicia sesión de nuevo para actualizarlo.",
 
   "usage.claude.header": "Tus límites de uso",
   "usage.claude.header_tier": "Tus límites de uso · {tier}",

@@ -27,7 +27,7 @@ from tintaview.core.config import Config  # noqa: E402
 from tintaview.install import win_identity  # noqa: E402
 from tintaview.stats.model import UsageResult, UsageRow  # noqa: E402
 from tintaview.ui import icons  # noqa: E402
-from tintaview.ui.flyout import Flyout  # noqa: E402
+from tintaview.ui.flyout import HEADER_H, Flyout  # noqa: E402
 from tintaview.ui.tray import TrayApp  # noqa: E402
 
 
@@ -246,10 +246,9 @@ def test_flyout_shows_an_error_and_the_estimate_at_once(qapp):
     assert not pixmap.isNull()
 
 
-def test_collapsing_hides_the_estimate_but_keeps_the_failure_reason(qapp):
-    """Hiding an agent's numbers is what the chevron is for. Hiding "sign in again"
-    behind it would let the one message the user has to act on vanish into a section
-    that then just looks empty."""
+def test_collapsing_leaves_only_the_header(qapp):
+    """Collapsed is the compact line — the failure reason folds away with the rows, as
+    the user asked, so every collapsed card in the panel looks the same."""
     flyout = Flyout()
     flyout.set_results({"claude": UsageResult(
         agent="claude", error="Not signed in.", error_kind="auth",
@@ -261,8 +260,26 @@ def test_collapsing_hides_the_estimate_but_keeps_the_failure_reason(qapp):
     sections, _ = flyout._layout()
 
     assert sections[0].collapsed
-    assert sections[0].reason_lines, "the reason survives collapsing"
-    assert flyout.height() < expanded, "the estimate rows do not"
+    assert sections[0].reason_lines == []
+    assert sections[0].height == HEADER_H
+    assert flyout.height() < expanded
+
+
+def test_an_error_only_section_can_be_collapsed(qapp):
+    """The reported case: a Cursor section holding nothing but "Not signed in" had no
+    chevron, so it was the one card that could not be folded to its header."""
+    flyout = Flyout()
+    flyout.set_results({"cursor": UsageResult(
+        agent="cursor", error="Not signed in to Cursor.", error_kind="auth")})
+    sections, _ = flyout._layout()
+    assert sections[0].collapsible
+    assert sections[0].reason_lines
+
+    flyout._toggle("cursor")
+    sections, _ = flyout._layout()
+
+    assert sections[0].collapsed
+    assert sections[0].height == HEADER_H
 
 
 def test_an_estimate_only_section_needs_no_error_line(qapp):
@@ -307,15 +324,12 @@ def test_flyout_draws_a_staleness_notice_above_cached_rows(qapp):
 def test_collapsing_hides_a_staleness_notice_with_its_rows(qapp):
     """A notice qualifies the rows underneath it. Collapsed, those rows are gone and it
     qualifies nothing — and a collapsed section still trailing a line of text looks
-    broken beside its collapsed neighbours. A failure reason is the opposite case and
-    does survive (see the test above)."""
+    broken beside its collapsed neighbours."""
     flyout = Flyout()
     flyout.set_results({"cursor": UsageResult(
         agent="cursor",
         rows=[UsageRow(label="Cursor Models", pct=62.0, kind="limit")],
         source="cache", notice="Couldn't refresh — usage from 23 hr ago.")})
-
-    from tintaview.ui.flyout import HEADER_H
 
     flyout._toggle("cursor")
     sections, _ = flyout._layout()
@@ -387,7 +401,7 @@ def test_every_locale_auth_message_renders_complete(qapp):
     section was sized for exactly the lines it took.
     """
     from tintaview import i18n
-    from tintaview.ui.flyout import HEADER_H, REASON_LINE_H, REASON_MAX_CHARS
+    from tintaview.ui.flyout import REASON_LINE_H, REASON_MAX_CHARS
 
     keys = ("usage.claude.error.login_expired", "usage.cursor.error.not_signed_in")
     flyout = Flyout()
@@ -557,7 +571,7 @@ def test_flyout_repositions_immediately_after_collapsing_a_section(qapp):
     flyout.show_near(anchor)
     height_before = flyout.height()
 
-    flyout._toggle("claude")  # claude has rows and is collapsible; cursor errored, is not
+    flyout._toggle("claude")
 
     assert flyout.height() < height_before
     assert flyout.pos().y() == anchor.y() - flyout.height() - 12

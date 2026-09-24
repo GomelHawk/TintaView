@@ -1936,7 +1936,46 @@ class TestAuthErrorCachePolicy:
 
         result = service.fetch_all()["claude"]
 
-        assert result.notice == "Couldn't refresh — usage from 30 hr ago."
+        assert result.notice == (
+            "Signed out — usage from 30 hr ago. Sign in again to refresh it.")
+
+    def test_a_transient_substitution_is_worded_as_a_failed_refresh(self, tmp_path):
+        """Only an auth failure says "signed out": nobody has to do anything about a
+        rate limit, so its notice is the plain "couldn't refresh"."""
+        failure = UsageResult(agent="claude", error="rate limited")
+        service = self._service_with_cached_rows(tmp_path, age_s=30 * 3600, failure=failure)
+
+        assert service.fetch_all()["claude"].notice == (
+            "Couldn't refresh — usage from 30 hr ago.")
+
+    def test_an_open_window_outlives_the_ceiling_against_a_dead_login(self, tmp_path):
+        """The reported case: Cursor unused for six days, so its session token expired
+        — and, for the same reason, the month's figures didn't move. The billing cycle
+        still has 12 days to run, so those rows stay true; `MAX_CACHE_GRACE_S` threw
+        them away and the card said only "Not signed in"."""
+        cache = UsageCache(path=tmp_path / "cache.json")
+        cache.update(UsageResult(
+            agent="cursor",
+            rows=[UsageRow(label="Cursor Models", pct=2.74,
+                            reset_at=time.time() + 12 * 86400, reset_style=fmt.RESET_DATE),
+                  UsageRow(label="Other Models", pct=0.0, right="$12.33 included")],
+            source="official",
+            fetched_at=time.time() - 6 * 86400,
+        ))
+        cfg = self._cfg()
+        cfg.enabled_agents = ["cursor"]
+        service = StatsService(cfg, cache=cache, providers={
+            "cursor": _FakeProvider("cursor", lambda cfg, timeout: UsageResult(
+                agent="cursor", error="not signed in", error_kind="auth"))},
+        )
+
+        result = service.fetch_all()["cursor"]
+
+        assert result.ok
+        assert result.source == "cache"
+        assert result.rows[0].pct == 2.74
+        assert result.notice == (
+            "Signed out — usage from 6d ago. Sign in again to refresh it.")
 
     def test_a_fresh_substitution_stays_silent(self, tmp_path):
         """A five-minute-old substitution during a network blip is the cache doing its
@@ -2036,8 +2075,13 @@ class TestAuthErrorCachePolicy:
         friday = service.fetch_all()["claude"]
         assert friday.ok and friday.source == "official"
 
-        # Three days pass and the access token expires.
-        stale = replace(cache.get("claude"), fetched_at=time.time() - 3 * 86400)
+        # Three days pass and the access token expires. The fixture dates its windows
+        # in 2099, so move them back with the clock: Friday's 5-hour window closed three
+        # hours after that poll, which is what makes Friday's rows wrong on Monday.
+        friday_at = time.time() - 3 * 86400
+        cached = cache.get("claude")
+        rows = [replace(cached.rows[0], reset_at=friday_at + 3 * 3600), *cached.rows[1:]]
+        stale = replace(cached, rows=rows, fetched_at=friday_at)
         cache.update(stale)
         monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: (_ for _ in ()).throw(
             _http_error(401)

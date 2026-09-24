@@ -155,6 +155,9 @@
   "usage.cache.stale_minutes": "Не удалось обновить — данные {minutes} мин. назад.",
   "usage.cache.stale_hours": "Не удалось обновить — данные {hours} ч. назад.",
   "usage.cache.stale_days": "Не удалось обновить — данные {days} дн. назад.",
+  "usage.cache.signed_out_minutes": "Вы вышли — данные {minutes} мин. назад. Войдите снова, чтобы обновить.",
+  "usage.cache.signed_out_hours": "Вы вышли — данные {hours} ч. назад. Войдите снова, чтобы обновить.",
+  "usage.cache.signed_out_days": "Вы вышли — данные {days} дн. назад. Войдите снова, чтобы обновить.",
 
   "usage.claude.header": "Ваши лимиты расхода",
   "usage.claude.header_tier": "Ваши лимиты расхода · {tier}",

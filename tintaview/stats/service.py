@@ -232,46 +232,51 @@ class StatsService:
             )
             return result
         return replace(cached, source="cache", estimate=result.estimate,
-                        notice=self._staleness_notice(cached))
+                        notice=self._staleness_notice(cached, result.error_kind))
 
     def _cached_rows_may_stand_in(self, cached: UsageResult, error_kind: str) -> bool:
         """May `cached` be shown in place of a failed poll?
 
-        Three allowances, narrowest first:
+        No row's window may have closed, whatever the failure. Past that:
 
-        - An **auth** failure inside `AUTH_CACHE_GRACE_POLLS` — a token that died
-          seconds after a good poll has not made those rows wrong yet.
-        - Any failure, while no row's window has closed and the whole result is under
-          `MAX_CACHE_GRACE_S` old. A transient failure needs nothing more than that.
-        - An **auth** failure additionally needs the rows to vouch for themselves — at
-          least one carries a `reset_at` that is still in the future. This is what lets
-          Cursor's monthly figures survive a dead session for a day or two while
-          Claude's 5-hour row gives way within hours, with no per-provider constant to
-          keep in step; and it is what stops rows that carry no reset instant at all
-          from inheriting that licence.
+        - Rows that vouch for themselves — at least one carries a `reset_at` still in
+          the future — stand in for either kind of failure until a window closes, with
+          no age ceiling. This is what lets Cursor's monthly figures survive a session
+          token that expired while nobody ran Cursor, while Claude's 5-hour row gives
+          way within hours, with no per-provider constant to keep in step.
+        - Otherwise a transient failure is bounded by `MAX_CACHE_GRACE_S`, and an
+          **auth** failure by `AUTH_CACHE_GRACE_POLLS` — rows carrying no reset
+          instant at all say nothing about their own shelf life against a dead login.
         - An unknown age keeps the split it has always had — never trusted against a
           dead login, still better than a blank flyout for a transient blip.
         """
         if cached.fetched_at <= 0:
             return error_kind != "auth"
         now = time.time()
-        if (now - cached.fetched_at) > MAX_CACHE_GRACE_S:
-            return False
         if _has_closed_window(cached, now):
             # Wrong at any age and for either kind of failure: the window these numbers
             # describe has ended, so they are last window's numbers whatever stopped the
             # refresh.
             return False
+        if _has_open_window(cached, now):
+            # The rows date themselves and their window is still running, so they stay
+            # true until it closes — at any age, and against a dead login too. This is
+            # Cursor left closed for a week: its session token expires with nobody
+            # running it, and nobody running it is also why the month's figures haven't
+            # moved. `_staleness_notice` says how old they are and, for an auth
+            # failure, that signing in again is what refreshes them.
+            return True
+        if (now - cached.fetched_at) > MAX_CACHE_GRACE_S:
+            return False
         if error_kind != "auth":
             # Nobody is signed out; the next poll will probably work. The ceiling above
             # is the only limit — before it existed this path had none at all.
             return True
-        # An auth failure has to be earned past the short grace: either the rows are so
-        # recent that a token dying seconds after a good poll cannot have made them
-        # wrong, or they date themselves and their window is still running.
-        return self._cache_is_still_fresh(cached) or _has_open_window(cached, now)
+        # Rows with no reset instant can't vouch for themselves against a dead login;
+        # only the short grace — a token dying seconds after a good poll — covers them.
+        return self._cache_is_still_fresh(cached)
 
-    def _staleness_notice(self, cached: UsageResult) -> str | None:
+    def _staleness_notice(self, cached: UsageResult, error_kind: str) -> str | None:
         """The muted line drawn above substituted rows, once they are old enough to
         mislead without it.
 
@@ -284,7 +289,8 @@ class StatsService:
         """
         if cached.fetched_at <= 0 or self._cache_is_still_fresh(cached):
             return None
-        return fmt.cache_age_text(time.time() - cached.fetched_at)
+        return fmt.cache_age_text(time.time() - cached.fetched_at,
+                                  signed_out=error_kind == "auth")
 
     def _cache_is_still_fresh(self, cached: UsageResult) -> bool:
         """Are `cached`'s rows recent enough to survive an auth failure?

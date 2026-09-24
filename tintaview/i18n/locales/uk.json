@@ -155,6 +155,9 @@
   "usage.cache.stale_minutes": "Не вдалося оновити — дані {minutes} хв. тому.",
   "usage.cache.stale_hours": "Не вдалося оновити — дані {hours} год. тому.",
   "usage.cache.stale_days": "Не вдалося оновити — дані {days} дн. тому.",
+  "usage.cache.signed_out_minutes": "Ви вийшли — дані {minutes} хв. тому. Увійдіть знову, щоб оновити.",
+  "usage.cache.signed_out_hours": "Ви вийшли — дані {hours} год. тому. Увійдіть знову, щоб оновити.",
+  "usage.cache.signed_out_days": "Ви вийшли — дані {days} дн. тому. Увійдіть знову, щоб оновити.",
 
   "usage.claude.header": "Ваші ліміти витрат",
   "usage.claude.header_tier": "Ваші ліміти витрат · {tier}",

@@ -154,6 +154,9 @@
   "usage.cache.stale_minutes": "Aggiornamento non riuscito: utilizzo di {minutes} min fa.",
   "usage.cache.stale_hours": "Aggiornamento non riuscito: utilizzo di {hours} h fa.",
   "usage.cache.stale_days": "Aggiornamento non riuscito: utilizzo di {days} g fa.",
+  "usage.cache.signed_out_minutes": "Disconnesso: utilizzo di {minutes} min fa. Accedi di nuovo per aggiornarlo.",
+  "usage.cache.signed_out_hours": "Disconnesso: utilizzo di {hours} h fa. Accedi di nuovo per aggiornarlo.",
+  "usage.cache.signed_out_days": "Disconnesso: utilizzo di {days} g fa. Accedi di nuovo per aggiornarlo.",
 
   "usage.claude.header": "I tuoi limiti di utilizzo",
   "usage.claude.header_tier": "I tuoi limiti di utilizzo · {tier}",

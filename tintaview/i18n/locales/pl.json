@@ -155,6 +155,9 @@
   "usage.cache.stale_minutes": "Nie udało się odświeżyć — zużycie sprzed {minutes} min.",
   "usage.cache.stale_hours": "Nie udało się odświeżyć — zużycie sprzed {hours} godz.",
   "usage.cache.stale_days": "Nie udało się odświeżyć — zużycie sprzed {days} dn.",
+  "usage.cache.signed_out_minutes": "Wylogowano — zużycie sprzed {minutes} min. Zaloguj się ponownie, aby odświeżyć.",
+  "usage.cache.signed_out_hours": "Wylogowano — zużycie sprzed {hours} godz. Zaloguj się ponownie, aby odświeżyć.",
+  "usage.cache.signed_out_days": "Wylogowano — zużycie sprzed {days} dn. Zaloguj się ponownie, aby odświeżyć.",
 
   "usage.claude.header": "Twoje limity zużycia",
   "usage.claude.header_tier": "Twoje limity zużycia · {tier}",

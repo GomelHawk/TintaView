@@ -520,7 +520,7 @@ class _SectionLayout:
     result: UsageResult
     header_rect: QRectF  # the clickable/hoverable badge+title band
     rows_top: float  # y where this section's body starts (the error line, if any)
-    collapsible: bool  # False for a section with no body to hide
+    collapsible: bool  # every section today; kept so hit-testing and painting read one flag
     collapsed: bool
     height: float  # total section height, header included
     #: The failure sentence, pre-wrapped by `_wrap_reason`; empty when the provider
@@ -725,42 +725,32 @@ class Flyout(QtWidgets.QWidget):
             if i:
                 y += SECTION_GAP
             header_rect = QRectF(x, y, w, HEADER_H)
-            # The estimate counts as body: a Codex account on API-key auth has no
-            # official percentages at all and is nothing *but* an estimate block, and
-            # an expired Claude login now has an error line with one underneath. Both
-            # are sections worth collapsing, and neither had rows to make them
-            # collapsible before.
+            # Every section collapses, and a collapsed one is its header alone — the
+            # same compact line whatever is under it. An error-only section used to get
+            # no chevron (a failure reason was kept visible on purpose), which left the
+            # one card in the panel that could not be folded away: a Cursor nobody runs
+            # any more said "Not signed in" permanently.
             has_body = bool(result.rows or result.estimate)
-            collapsible = has_body
-            collapsed = collapsible and result.agent in self._collapsed
+            collapsible = True
+            collapsed = result.agent in self._collapsed
             rows_top = y + HEADER_H
             reason_lines: list[str] = []
-            if result.error:
+            if collapsed:
+                pass
+            elif result.error:
                 # `result.error` is already localised by the provider that built it (or
                 # quotes an API's own text verbatim); `flyout.no_usage_data` is only the
                 # nothing-at-all case — a provider that returned neither rows, nor an
                 # estimate, nor a reason.
                 reason_lines = _wrap_reason(result.error, reason_metrics, w)
-            elif result.notice and not collapsed:
+            elif result.notice:
                 # Not a failure — cached rows old enough that their age is part of what
                 # they say. Same muted slot as a reason, because it answers the same
                 # question ("why don't these look right?") before the rows are read.
-                #
-                # Unlike a reason it does NOT survive collapsing. A notice qualifies the
-                # rows underneath it; with those hidden it qualifies nothing, and a
-                # collapsed section that still trails a line of text just looks broken
-                # next to its collapsed neighbours. An `error` is the opposite case —
-                # there are no trustworthy rows at all and it tells the user what to do
-                # about that — so it stays visible either way.
                 reason_lines = _wrap_reason(result.notice, reason_metrics, w)
             elif not has_body:
                 reason_lines = _wrap_reason(t("flyout.no_usage_data"), reason_metrics, w)
 
-            # A failure reason survives collapsing; rows, the estimate and a staleness
-            # notice don't. Hiding an agent's numbers is what the chevron is for, but
-            # hiding "sign in again" behind it would let the one message the user has to
-            # act on disappear into a section that then looks merely empty. A notice is
-            # not that: it only exists to qualify the rows below it.
             body_h = len(reason_lines) * REASON_LINE_H
             rows_at = estimate_at = rows_top + body_h
             if not collapsed:

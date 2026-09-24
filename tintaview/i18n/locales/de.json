@@ -154,6 +154,9 @@
   "usage.cache.stale_minutes": "Aktualisierung fehlgeschlagen — Verbrauch von vor {minutes} Min.",
   "usage.cache.stale_hours": "Aktualisierung fehlgeschlagen — Verbrauch von vor {hours} Std.",
   "usage.cache.stale_days": "Aktualisierung fehlgeschlagen — Verbrauch von vor {days} T.",
+  "usage.cache.signed_out_minutes": "Abgemeldet — Verbrauch von vor {minutes} Min. Erneut anmelden zum Aktualisieren.",
+  "usage.cache.signed_out_hours": "Abgemeldet — Verbrauch von vor {hours} Std. Erneut anmelden zum Aktualisieren.",
+  "usage.cache.signed_out_days": "Abgemeldet — Verbrauch von vor {days} T. Erneut anmelden zum Aktualisieren.",
 
   "usage.claude.header": "Deine Verbrauchsgrenzen",
   "usage.claude.header_tier": "Deine Verbrauchsgrenzen · {tier}",
