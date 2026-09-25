@@ -949,20 +949,27 @@ class TrayApp(QtCore.QObject):
             {},
         )
         question = str(asking.get("question") or "")
-        message = self._escalation_message(waited, waiting, question)
+        # The popup only says *that* someone is waiting — never what they ask. A command
+        # or a list of options in a desktop notification is noise to anyone at the desk,
+        # and Windows cuts it off mid-sentence anyway; the whole request is what the
+        # user's own command is for. `TINTAVIEW_MESSAGE` keeps the question: 0.6.1 told
+        # people a phone-push one-liner could send just that variable.
         self.tray.showMessage(
-            "TintaView", message, QtWidgets.QSystemTrayIcon.Warning, 10000,
+            "TintaView", self._escalation_message(waited, waiting, ""),
+            QtWidgets.QSystemTrayIcon.Warning, 10000,
         )
+        message = self._escalation_message(waited, waiting, question)
         if not self._escalation_command_ran:
             self._escalation_command_ran = True
             self._run_escalation_command(waiting, question, message, asking)
 
     def _escalation_message(self, waited: float, waiting: list[str], question: str) -> str:
-        """The one sentence both the balloon and the command's `TINTAVIEW_MESSAGE` use.
+        """The sentence the balloon shows (no `question`) and, with the question
+        appended, the command's `TINTAVIEW_MESSAGE`.
 
-        Worded once, here, so a user command that just echoes `TINTAVIEW_MESSAGE` says
-        exactly what the balloon says — including when there is no question to quote,
-        which is every Cursor confirm and any agent whose hook sent nothing.
+        Worded once, here, so both read the same up to the question — including when
+        there is no question to quote, which is every Cursor confirm and any agent whose
+        hook sent nothing.
         `duration_text`, not a minutes count of our own: an interval set to 15 s made the
         first three reminders all claim "1 min".
         """

@@ -1322,3 +1322,45 @@ def test_the_old_get_confirm_keeps_working(server_engine):
 
     assert _wait_until(lambda: _get_state(server)["agents"]["codex"]["question"] == "Bash")
     assert _get_state(server)["agents"]["codex"]["detail"] == ""
+
+
+def test_a_message_typed_while_the_question_is_open_does_not_lose_it(server_engine):
+    """Measured on 2026-09-25: a chat message sent while Claude's question was open fired
+    a plain `working` between the `PermissionRequest` and the 6-second `Notification`,
+    and the reminder then read only "Claude needs your permission". The request must
+    come back with that Notification."""
+    server, _engine = server_engine
+    permission = (HOOK_FIXTURES / "claude_permission_request_bash.json").read_bytes()
+    notification = (HOOK_FIXTURES / "claude_notification_permission_prompt.json").read_bytes()
+    sid = json.loads(permission)["session_id"]
+    _post_confirm(server, "claude", permission)
+    assert _wait_until(lambda: _claude(server).get("detail"))
+    detail = _claude(server)["detail"]
+
+    _event(server, "working", "claude", sid)  # the message typed mid-question
+    assert _wait_until(lambda: _claude(server)["effective"] == "working")
+    assert _claude(server)["detail"] == "", "never quoted while not waiting"
+
+    _post_confirm(server, "claude", notification)
+
+    assert _wait_until(lambda: _claude(server)["effective"] == "confirm")
+    assert _claude(server)["detail"] == detail
+
+
+def test_a_tool_starting_drops_the_request_for_good(server_engine):
+    """Unlike a plain `working`, a tool start means the question was dealt with, so a
+    later confirm without a detail must not bring the old request back."""
+    server, _engine = server_engine
+    permission = (HOOK_FIXTURES / "claude_permission_request_bash.json").read_bytes()
+    notification = (HOOK_FIXTURES / "claude_notification_permission_prompt.json").read_bytes()
+    sid = json.loads(permission)["session_id"]
+    _post_confirm(server, "claude", permission)
+    assert _wait_until(lambda: _claude(server).get("detail"))
+
+    _event(server, "tool-start", "claude", sid, tool="Bash")
+    assert _wait_until(lambda: _claude(server)["effective"] == "working")
+    _post_confirm(server, "claude", notification)
+
+    assert _wait_until(lambda: _claude(server)["effective"] == "confirm")
+    assert _claude(server)["detail"] == ""
+    assert _claude(server)["question"] == "Claude needs your permission"

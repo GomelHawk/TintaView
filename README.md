@@ -354,9 +354,9 @@ is always set, empty when there is nothing to say:
 
 | Variable | Holds |
 | --- | --- |
-| `TINTAVIEW_MESSAGE` | The finished sentence the notification shows, translated: "Claude Code — still waiting for your answer (1 min): …". What most commands want. |
+| `TINTAVIEW_MESSAGE` | A finished, translated sentence with the request's start: "Claude Code — still waiting for your answer (1 min): …". What most commands want. (The tray's own popup shows only the part before the colon — it never quotes the request.) |
 | `TINTAVIEW_DETAIL` | The whole request **on one line**: the command with the agent's description of it, the file, the URL, or every question with its options. Lines are joined with ` ⏎ `, capped at 3500 characters so it fits a Telegram message beside `TINTAVIEW_MESSAGE`. |
-| `TINTAVIEW_QUESTION` | The same, cut short (200 characters) — what the notification quotes. |
+| `TINTAVIEW_QUESTION` | The request, cut short (200 characters) — the part `TINTAVIEW_MESSAGE` quotes. |
 | `TINTAVIEW_TOOL` | The tool asking: `Bash`, `Edit`, `AskUserQuestion`, … |
 | `TINTAVIEW_CWD` | The agent's working directory, i.e. which project is asking. |
 | `TINTAVIEW_AGENTS` | Who is waiting: "Claude Code". |
@@ -435,7 +435,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `ui.clocks.format` | `24h` | `24h` (20:42) or `12h` (8:42 PM). One setting for every clock, not per clock. |
 | `escalation.enabled` | `true` | Keep reminding you while an agent waits for confirmation: the chime repeats (if `ui.chime_on_confirm` is on) and a notification appears every `escalation.after_seconds`, until you answer. A single chime is missed by anyone who walked away. Also on the **Alerts** tab in **Settings…**. |
 | `escalation.after_seconds` | `60` | How long a confirmation must go unanswered before the first reminder, and the interval between reminders after that. |
-| `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. Its environment always has `TINTAVIEW_STATUS`, `TINTAVIEW_AGENTS`, `TINTAVIEW_MESSAGE` (the sentence the tray notification shows), `TINTAVIEW_QUESTION`, `TINTAVIEW_DETAIL` (the whole request — command, file or every question — on one line), `TINTAVIEW_TOOL` and `TINTAVIEW_CWD`, even when empty; see [Reminders you can't miss](#reminders-you-cant-miss), including what that means for secrets. Its output and exit code are ignored, and a failure is logged rather than shown. |
+| `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. Its environment always has `TINTAVIEW_STATUS`, `TINTAVIEW_AGENTS`, `TINTAVIEW_MESSAGE` (a finished sentence with the start of the request), `TINTAVIEW_QUESTION`, `TINTAVIEW_DETAIL` (the whole request — command, file or every question — on one line), `TINTAVIEW_TOOL` and `TINTAVIEW_CWD`, even when empty; see [Reminders you can't miss](#reminders-you-cant-miss), including what that means for secrets. Its output and exit code are ignored, and a failure is logged rather than shown. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |

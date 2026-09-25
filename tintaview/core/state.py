@@ -99,11 +99,14 @@ class StateStore:
         harmless trivia, while a leftover question would have the tray (and someone's
         phone) quoting a prompt that was answered ten minutes ago.
 
-        ``detail``, ``request_tool`` and ``cwd`` follow ``question``, with one addition: a
-        confirm that carries no ``detail`` does not wipe the ones a session already
-        waiting holds. Claude sends two confirms for one command prompt — the full
-        `PermissionRequest`, then a `Notification` six seconds later reading only "Claude
-        needs your permission" — and the second must not overwrite the first.
+        ``detail``, ``request_tool`` and ``cwd`` follow ``question``, with two additions.
+        A confirm that carries no ``detail`` does not replace a stored one: Claude sends
+        two confirms for one prompt — the full `PermissionRequest`, then a `Notification`
+        six seconds later reading only "Claude needs your permission". And a plain
+        ``working`` ping (``tool=None``) keeps the stored request instead of clearing it,
+        so that pair survives a message typed while the question is open. A tool starting
+        or ending, idle, or the session ending all clear it — those only happen once the
+        question has been answered or dropped.
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status {status!r}")
@@ -113,14 +116,20 @@ class StateStore:
             if session is None:
                 session = _Session(status=status)
                 self._sessions[(agent, sid)] = session
-            confirming = status == STATUS_CONFIRM
-            already_described = (confirming and session.status == STATUS_CONFIRM
-                                 and session.detail and not detail)
-            if not already_described:
-                session.question = question if confirming else ""
-                session.detail = detail if confirming else ""
-                session.request_tool = request_tool if confirming else ""
-                session.cwd = cwd if confirming else ""
+            if status == STATUS_CONFIRM:
+                if detail or not session.detail:
+                    session.question, session.detail = question, detail
+                    session.request_tool, session.cwd = request_tool, cwd
+                # else: a confirm with no detail keeps the request already stored.
+            elif status == STATUS_WORKING and tool is None:
+                # A plain `working` ping keeps the stored request (hidden — /state only
+                # quotes a session that is waiting). Claude sends one when a message is
+                # typed *while a question is still open*: it fired between the
+                # PermissionRequest and the 6-second Notification, and the reminder then
+                # said only "Claude needs your permission" (measured, 2026-09-25).
+                pass
+            else:
+                session.question = session.detail = session.request_tool = session.cwd = ""
             session.status = status
             if tool is not None:
                 session.tool = tool

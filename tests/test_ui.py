@@ -2353,21 +2353,22 @@ def test_a_short_interval_is_reported_in_seconds(escalation_tray):
     ]
 
 
-def test_the_balloon_quotes_the_question_when_the_agent_sent_one(escalation_tray):
-    """Claude's Notification hook carries a sentence; Codex sends a tool name; Cursor
-    sends nothing. All three end up here, and only the first two have anything to quote.
-    """
+def test_the_balloon_never_quotes_the_question(escalation_tray):
+    """The popup says only *that* someone is waiting; the question — a whole command,
+    or every option of four questions — goes to the user's command, not onto the
+    desktop."""
     app_instance, server, clock, _chimes, balloons, commands = escalation_tray
-    server.set(_confirm_payload("Claude needs your permission to use Bash"))
+    server.set(_confirm_payload("Clean build — $ rm -rf build/"))
     app_instance._poll_state()
 
     clock["now"] += 61
     app_instance._poll_state()
 
-    assert balloons[0][1] == (
-        "Claude Code — still waiting for your answer (1 min): "
-        "Claude needs your permission to use Bash"
-    )
+    assert balloons[0][1] == "Claude Code — still waiting for your answer (1 min)."
+    _agents, question, message = commands[0]
+    assert question == "Clean build — $ rm -rf build/"
+    assert message == ("Claude Code — still waiting for your answer (1 min): "
+                       "Clean build — $ rm -rf build/")
 
 
 def test_without_a_question_the_balloon_is_exactly_what_it_was(escalation_tray):

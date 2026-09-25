@@ -397,7 +397,10 @@ id pulled out by `sed`, **no Python startup**, `curl -s -m 1`, output discarded,
 than once per tool call, and it is the one payload with something a person has to read — the
 exact command, file or URL, or every question and option of a multiple-choice prompt. So the
 shim **posts the whole stdin** (`curl --data-binary @-`) and the daemon reads it with a real JSON
-parser (`core/request.py`) into a short `question` (the balloon) and a one-line `detail` (the
+parser (`core/request.py`) into a short `question` (`TINTAVIEW_QUESTION`, and the tail of
+`TINTAVIEW_MESSAGE` — **never the tray balloon**, which only says that someone is waiting: a
+command or four questions' options on the desktop is noise, and the maintainer asked for it
+short) and a one-line `detail` (the
 escalation command's `TINTAVIEW_DETAIL`), plus the tool and the working directory. Rules that
 keep this from becoming the next hot-path regression, or a hole:
 

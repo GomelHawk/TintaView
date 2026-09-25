@@ -4,6 +4,15 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.7.1 — 2026-09-25
+
+- The tray popup is short again: it only says that an agent is waiting for your answer. The
+  full question still goes to your reminder command (`TINTAVIEW_DETAIL`, `TINTAVIEW_MESSAGE`).
+- Fixed: sending a chat message while Claude's question was open made the reminder say only
+  "Claude needs your permission" instead of the question.
+
+Nothing to reconfigure, and no hook reinstall needed.
+
 ## 0.7.0 — 2026-09-25
 
 - **Reminders now quote exactly what the agent is asking** — the command itself, or every
