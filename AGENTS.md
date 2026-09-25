@@ -1,8 +1,9 @@
 # AGENTS.md — working on TintaView
 
 Technical notes for anyone (human or agent) changing this repo. [README.md](README.md) is the
-user-facing documentation and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) the user-facing
-diagnostics; neither is a substitute for the constraints below. Everything here is a decision
+user-facing documentation, [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) the user-facing
+diagnostics and [CHANGELOG.md](CHANGELOG.md) the per-release notes (see
+[CI and release](#ci-and-release)); neither is a substitute for the constraints below. Everything here is a decision
 that has already been made and paid for — some of it measured on real hardware — so treat it as
 a constraint, not a suggestion, and update this file if a decision genuinely changes.
 
@@ -929,6 +930,20 @@ attribution, anything a user cannot see or act on. Read those commits — that i
 subject understates a user-visible change — then leave them out. Findings the maintainer needs
 before tagging (a red suite, an unverified platform, an upgrade risk) belong in a **separate note
 to them, outside the notes themselves**, alongside the usual verified/not-verified line.
+
+**Put the notes in `CHANGELOG.md` too, every time a new version is prepared** — asked for a
+release, release notes, or a version bump. The file is newest-first, and the release's notes go
+in as a section at the top headed with **the version itself**:
+`## <version> — <YYYY-MM-DD>` (e.g. `## 0.7.0 — 2026-09-28`, today's date). There is **no
+`## Unreleased` section, ever** — the maintainer commits the file and creates the matching tag
+by hand, so what they commit has to already say which version it is. Take the version from the
+suggested number above; if the maintainer names a different one, theirs wins, and the heading
+must match the tag they will create (`v0.7.0` ↔ `## 0.7.0`). The section is the same text
+as the GitHub Release body, word for word — one document, two places — so the format and
+content rules above apply to it unchanged. If the range turns out to include commits already
+described in an existing section (stale tags; see above), fix the section, don't add a
+duplicate. This rule is about releases only: an ordinary change does **not** add a changelog
+line as it is made, the notes are still derived from the commits when a version is cut.
 
 Then stop. **Do not tag, do not push, do not create or edit the GitHub Release** — the tag *is*
 the version (setuptools-scm reads it, `build.yml` fires on it), so tagging ships a release, and
