@@ -30,6 +30,7 @@
   "tray.escalate.balloon_body": "{agents} — still waiting for your answer ({waited}).",
   "tray.escalate.balloon_body_question": "{agents} — still waiting for your answer ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "An agent is still waiting for your answer ({waited}).",
+  "request.pick_any": "(pick any)",
   "tray.usage_alert.balloon_body": "{agent}: {label} is at {pct}%.",
   "tray.engine.balloon_title": "TintaView lighting",
   "tray.update.unsupported": "Update checking isn't available in this build.",

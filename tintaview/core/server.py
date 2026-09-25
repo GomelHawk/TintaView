@@ -45,6 +45,8 @@ from .events import (
     TOOL_START,
     WORKING,
 )
+from .request import MAX_BODY_BYTES, MAX_QUESTION_CHARS, HookRequest
+from .request import parse as parse_request
 from .stalldetect import StallDetector
 from .state import StateStore
 
@@ -76,20 +78,15 @@ def _first(query: dict[str, list[str]], key: str, default: str) -> str:
     return values[0] if values else default
 
 
-#: Longest question kept. It is shown in a tray balloon and handed to a user command;
-#: a whole `tool_input` pasted into either is noise, and the sentence worth reading is
-#: always at the front.
-MAX_QUESTION_CHARS = 200
-
-
 def _clean_question(raw: str) -> str:
-    """The question text, made safe to show. Never raises.
+    """The `?question=` text of a GET confirm, made safe to show. Never raises.
 
-    It arrives from an agent's own hook payload through a `sed` in the shim, so it is
-    whatever that agent felt like writing: JSON escapes the shim did not unescape,
-    newlines, control characters, or a `tool_input` blob thousands of characters long.
-    This is the one place any of that is dealt with — the state store, the tray and the
-    escalation command all take what comes out of here as already-printable text.
+    Only a hook shim from before the POST path sends one (current shims post the whole
+    payload, read by `core/request.py`). It came out of the agent's payload through a
+    `sed`, so it is whatever that agent felt like writing: JSON escapes the shim did not
+    unescape, newlines, control characters, or a blob thousands of characters long. The
+    state store, the tray and the escalation command all take what comes out of here, or
+    out of `core/request.py`, as already-printable text.
     """
     if not raw:
         return ""
@@ -141,6 +138,58 @@ class _Handler(BaseHTTPRequestHandler):
             self._route()
         except Exception:
             log.exception("unhandled error handling %s", self.path)
+
+    def do_POST(self) -> None:  # noqa: N802 (http.server's naming convention)
+        """Hook ingress with the agent's whole payload as the body.
+
+        Only the confirm event is ever posted (see `hooks/tv-hook.sh`): it is the one
+        payload with something in it a person has to read, and it fires once per prompt
+        rather than once per tool call. Any event is *accepted* this way, though, so a
+        hook script never has to know which ones the daemon will read a body for.
+        """
+        try:
+            self._route_post()
+        except Exception:
+            log.exception("unhandled error handling POST %s", self.path)
+
+    def _read_body(self) -> bytes:
+        """At most `MAX_BODY_BYTES` of the request body; the rest is never read.
+
+        Leaving the tail unread is fine: the ack below closes the exchange, and a hook's
+        curl discards whatever the server says. What must not happen is one `Write`
+        carrying a multi-megabyte file holding an HTTP worker while it is read in full.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return b""
+        return self.rfile.read(min(length, MAX_BODY_BYTES))
+
+    def _route_post(self) -> None:
+        status_server: StatusServer = self.server.status_server  # type: ignore[attr-defined]
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith(_V1_PREFIX):
+            self._send_json({"error": "not found"}, status=404)
+            return
+        event = parsed.path[len(_V1_PREFIX) :]
+        if event not in EVENTS:
+            self._send_json({"error": f"unknown event {event!r}"}, status=404)
+            return
+        query = parse_qs(parsed.query)
+        body = self._read_body()
+        # Acknowledge before parsing, exactly like the GET path acks before any lighting
+        # I/O: nothing the payload contains may stand between the agent and its prompt.
+        # (Claude runs this hook just before it draws the permission dialog.)
+        self._write_ack()
+        request = parse_request(body)
+        agent = _first(query, "agent", DEFAULT_AGENT)
+        # The payload's own session id — no `sed` scrape on this path at all. A query
+        # `sid` is honoured as a fallback for a caller that knows it and posts no JSON.
+        sid = request.sid or _first(query, "sid", DEFAULT_SID)
+        status_server.handle_event(event, agent, sid, _first(query, "tool", ""),
+                                   request.question, request=request)
 
     def _route(self) -> None:
         status_server: StatusServer = self.server.status_server  # type: ignore[attr-defined]
@@ -477,7 +526,7 @@ class StatusServer:
     # --- event handling ------------------------------------------------------------
 
     def handle_event(self, event: str, agent: str, sid: str, tool: str,
-                     question: str = "") -> None:
+                     question: str = "", request: HookRequest | None = None) -> None:
         """Update the state store (and the stall detector) for one hook event, then hand
         the new effective status to the applier — but only when it actually changed.
         `StateStore`'s mutators report that (and what it changed *to*, computed under the
@@ -514,10 +563,15 @@ class StatusServer:
             elif event == IDLE:
                 effective = self.state.set(agent, sid, STATUS_IDLE)
             elif event == CONFIRM:
-                # The question rides along for display only, exactly like `tool` — it
-                # never influences the status or the lights, and an agent whose hook
-                # sends none is unchanged (see `_clean_question`).
-                effective = self.state.set(agent, sid, STATUS_CONFIRM, question=question)
+                # The question — and, from a posted payload, the whole request — ride
+                # along for display only, exactly like `tool`: they never influence the
+                # status or the lights, and an agent whose hook sends none is unchanged
+                # (see `_clean_question` and `core/request.py`).
+                request = request or HookRequest()
+                effective = self.state.set(
+                    agent, sid, STATUS_CONFIRM, question=question, detail=request.detail,
+                    request_tool=request.tool, cwd=request.cwd,
+                )
             elif event == TOOL_START:
                 stall_seconds = self._stall_seconds_for(agent)
                 if stall_seconds is not None:

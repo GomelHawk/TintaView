@@ -45,6 +45,15 @@ class _Session:
     #: cleared by every other status, so it can never describe a question that has
     #: already been answered. Descriptive only, like `tool`.
     question: str = ""
+    #: The whole request on one line — the command, the file, every question and option
+    #: — when the agent posted its confirm payload (see `core/request.py`). Same lifetime
+    #: as `question`, and like it never touches the status or the lights.
+    detail: str = ""
+    #: The tool the request is for (``Bash``, ``AskUserQuestion``) and the agent's working
+    #: directory, from the same payload. Not `tool`: that one is the flyout's "busy with"
+    #: label and is deliberately left alone by a confirm.
+    request_tool: str = ""
+    cwd: str = ""
     seen: float = field(default_factory=time.monotonic)
 
 
@@ -77,7 +86,8 @@ class StateStore:
             return self._changed_locked(before)
 
     def set(self, agent: str, sid: str, status: str, tool: str | None = None,
-            question: str = "") -> str | None:
+            question: str = "", detail: str = "", request_tool: str = "",
+            cwd: str = "") -> str | None:
         """Set a session's status, and optionally the tool it's running.
 
         ``tool=None`` means "unchanged" and ``tool=""`` means "no longer running a named
@@ -88,6 +98,12 @@ class StateStore:
         clears it. That asymmetry with `tool` is deliberate: a leftover tool name is
         harmless trivia, while a leftover question would have the tray (and someone's
         phone) quoting a prompt that was answered ten minutes ago.
+
+        ``detail``, ``request_tool`` and ``cwd`` follow ``question``, with one addition: a
+        confirm that carries no ``detail`` does not wipe the ones a session already
+        waiting holds. Claude sends two confirms for one command prompt — the full
+        `PermissionRequest`, then a `Notification` six seconds later reading only "Claude
+        needs your permission" — and the second must not overwrite the first.
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status {status!r}")
@@ -97,11 +113,17 @@ class StateStore:
             if session is None:
                 session = _Session(status=status)
                 self._sessions[(agent, sid)] = session
-            else:
-                session.status = status
+            confirming = status == STATUS_CONFIRM
+            already_described = (confirming and session.status == STATUS_CONFIRM
+                                 and session.detail and not detail)
+            if not already_described:
+                session.question = question if confirming else ""
+                session.detail = detail if confirming else ""
+                session.request_tool = request_tool if confirming else ""
+                session.cwd = cwd if confirming else ""
+            session.status = status
             if tool is not None:
                 session.tool = tool
-            session.question = question if status == STATUS_CONFIRM else ""
             session.seen = time.monotonic()
             self._touch()
             return self._changed_locked(before)
@@ -204,6 +226,7 @@ class StateStore:
         """
         with self._lock:
             per_agent: dict[str, dict] = {}
+            asking: dict[tuple[str, str], dict] = {}
             for (agent, sid), session in self._sessions.items():
                 entry = per_agent.setdefault(
                     agent, {"sessions": {}, "tools": {}, "questions": {}}
@@ -215,7 +238,12 @@ class StateStore:
                     entry["tools"][sid] = session.tool
                 if session.question:
                     entry["questions"][sid] = session.question
-            for entry in per_agent.values():
+                if session.question or session.detail:
+                    asking[(agent, sid)] = {
+                        "question": session.question, "detail": session.detail,
+                        "request_tool": session.request_tool, "cwd": session.cwd,
+                    }
+            for agent, entry in per_agent.items():
                 present = set(entry["sessions"].values())
                 effective = STATUS_IDLE
                 for status in STATUS_PRIORITY:
@@ -233,9 +261,12 @@ class StateStore:
                 # Same "only while it is true" rule as `tool`: a question belongs to a
                 # session that is waiting *now*. With two sessions open, the one that is
                 # actually asking is the one worth quoting.
-                entry["question"] = (
-                    self._headline_question(entry) if effective == STATUS_CONFIRM else ""
-                )
+                headline = (self._headline_request(agent, entry, asking)
+                            if effective == STATUS_CONFIRM else {})
+                entry["question"] = headline.get("question", "")
+                entry["detail"] = headline.get("detail", "")
+                entry["request_tool"] = headline.get("request_tool", "")
+                entry["cwd"] = headline.get("cwd", "")
             return {
                 "effective": self.effective(),
                 "agents": per_agent,
@@ -243,20 +274,22 @@ class StateStore:
             }
 
     @staticmethod
-    def _headline_question(entry: dict) -> str:
-        """The question to show for an agent with more than one session waiting.
+    def _headline_request(agent: str, entry: dict, asking: dict) -> dict:
+        """The request to show for an agent with more than one session waiting.
 
         Sorted by sid, like `_headline_tool`, so the choice is stable across polls
-        rather than flickering between two waiting sessions on dict order.
+        rather than flickering between two waiting sessions on dict order. Question,
+        detail, tool and cwd come from the **same** session, so a command never quotes
+        one session's sentence beside another's command.
         """
         waiting = sorted(
             sid for sid, status in entry["sessions"].items() if status == STATUS_CONFIRM
         )
         for sid in waiting:
-            question = entry["questions"].get(sid)
-            if question:
-                return question
-        return ""
+            request = asking.get((agent, sid))
+            if request:
+                return request
+        return {}
 
     @staticmethod
     def _headline_tool(entry: dict) -> str:

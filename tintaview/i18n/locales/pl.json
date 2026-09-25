@@ -31,6 +31,7 @@
   "tray.escalate.balloon_body": "{agents} — wciąż czeka na twoją odpowiedź ({waited}).",
   "tray.escalate.balloon_body_question": "{agents} — wciąż czeka na twoją odpowiedź ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Agent wciąż czeka na twoją odpowiedź ({waited}).",
+  "request.pick_any": "(można kilka)",
   "tray.usage_alert.balloon_body": "{agent}: {label} wynosi {pct}%.",
   "tray.engine.balloon_title": "Podświetlenie TintaView",
   "tray.update.unsupported": "Ta kompilacja nie potrafi sprawdzać aktualizacji.",

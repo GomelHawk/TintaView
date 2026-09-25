@@ -30,6 +30,7 @@
   "tray.escalate.balloon_body": "{agents}: sigue esperando tu respuesta ({waited}).",
   "tray.escalate.balloon_body_question": "{agents}: sigue esperando tu respuesta ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Un agente sigue esperando tu respuesta ({waited}).",
+  "request.pick_any": "(elige varias)",
   "tray.usage_alert.balloon_body": "{agent}: {label} está al {pct} %.",
   "tray.engine.balloon_title": "Iluminación de TintaView",
   "tray.update.unsupported": "Esta compilación no puede buscar actualizaciones.",

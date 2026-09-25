@@ -1,8 +1,15 @@
 """Claude Code adapter.
 
-Claude Code has a real "waiting for approval" signal (``Notification`` with matcher
-``permission_prompt``), so ``confirm_detection`` defaults to ``"event"`` — no stall
-heuristic needed here, unlike Cursor.
+Claude Code has real "waiting for you" signals, so ``confirm_detection`` defaults to
+``"event"`` — no stall heuristic needed here, unlike Cursor. Two of them, both bound:
+
+- ``PermissionRequest`` fires the moment a permission dialog opens, with the tool's
+  whole ``tool_input`` — and it is the **only** one that fires for ``AskUserQuestion``
+  (measured on 2.1.281: a question left open 17 s produced no ``Notification`` at all).
+- ``Notification`` with matcher ``permission_prompt`` fires from a 6-second timer, with
+  only "Claude needs your permission". Kept for builds that predate
+  ``PermissionRequest``; on current ones the state store keeps the earlier, fuller
+  request rather than letting this overwrite it.
 """
 
 from __future__ import annotations
@@ -18,8 +25,6 @@ class ClaudeAdapter(NestedHooksAdapter):
     key = "claude"
     display_name = "Claude Code"
     session_id_field = "session_id"
-    # The Notification payload's own sentence: "Claude needs your permission to use Bash".
-    question_field = "message"
     default_confirm_detection = "event"
 
     def default_home(self) -> Path:
@@ -33,6 +38,7 @@ class ClaudeAdapter(NestedHooksAdapter):
             HookBinding("UserPromptSubmit", events.WORKING),
             HookBinding("PreToolUse", events.TOOL_START, matcher="*"),
             HookBinding("PostToolUse", events.TOOL_END, matcher="*"),
+            HookBinding("PermissionRequest", events.CONFIRM, matcher="*"),
             HookBinding("Notification", events.CONFIRM, matcher="permission_prompt"),
             HookBinding("Notification", events.IDLE, matcher="idle_prompt"),
             HookBinding("Stop", events.IDLE),
@@ -46,8 +52,8 @@ class ClaudeAdapter(NestedHooksAdapter):
 
     def setup_notes(self) -> list[str]:
         return [
-            "Uses Claude Code's Notification hook (matcher permission_prompt) for confirm "
-            "and Stop for idle — both are already stable in released Claude Code builds.",
+            "Uses Claude Code's PermissionRequest hook (plus Notification, matcher "
+            "permission_prompt, for older builds) for confirm and Stop for idle.",
         ]
 
 

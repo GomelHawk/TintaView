@@ -22,8 +22,8 @@ up (see below), but their usage shows up alongside the others.
 
 | Agent | "Needs your approval" | Notes |
 | --- | --- | --- |
-| **Claude Code** | Real event (`Notification` / `permission_prompt`) | Works out of the box on every released build. |
-| **Codex CLI** | Real event (`PermissionRequest`) | Hooks are version-gated — see [Troubleshooting](docs/TROUBLESHOOTING.md#codex-hooks-not-firing). Windows-native Codex (not under WSL) falls back to the `notify` program, which only reports idle. |
+| **Claude Code** | Real events (`PermissionRequest`, plus `Notification` / `permission_prompt` on older builds) | Also covers Claude's multiple-choice questions (`AskUserQuestion`). After updating from a version without `PermissionRequest`, re-run `tintaview setup` to add the hook — the tray says so at startup. |
+| **Codex CLI** | Real event (`PermissionRequest`) | Commands only: Codex's Plan-mode multiple-choice questions fire no `PermissionRequest`, so they don't show as waiting. Hooks are version-gated — see [Troubleshooting](docs/TROUBLESHOOTING.md#codex-hooks-not-firing). Windows-native Codex (not under WSL) falls back to the `notify` program, which only reports idle. |
 | **Cursor** | **Heuristic, not a real event.** Cursor has no "waiting for approval" hook, so TintaView guesses: if a tool starts and nothing else happens for `stall_seconds` (default 8s), it's treated as a stall and turns the light red. This can occasionally be wrong in either direction — see [Troubleshooting](docs/TROUBLESHOOTING.md#cursor-never-goes-red). |
 
 **JetBrains AI Assistant** and **GitHub Copilot CLI** are not in that table — neither
@@ -341,24 +341,58 @@ Telegram, as a worked example:
 
 ```
 curl -s -X POST "https://api.telegram.org/bot<TOKEN>/sendMessage" \
-  -d "chat_id=<CHAT_ID>" --data-urlencode "text=$TINTAVIEW_MESSAGE"
+  -d "chat_id=<CHAT_ID>" --data-urlencode "text=$TINTAVIEW_MESSAGE
+$TINTAVIEW_DETAIL"
 ```
 
-(on Windows, `curl.exe` and `%TINTAVIEW_MESSAGE%`.)
+On Windows: `curl.exe`, and `"text=%TINTAVIEW_MESSAGE% %TINTAVIEW_DETAIL%"` on one line.
+**Keep each variable inside double quotes there** — see the note on Windows below.
 
-**What the agent is asking** is included when the agent tells us. TintaView reads one field from
-the hook payload of the confirmation event — and only that event, never on the per-tool-call path:
+**What the agent is asking** comes from the hook payload of the confirmation event, which
+TintaView reads in full — and only that event, never on the per-tool-call path. Every variable
+is always set, empty when there is nothing to say:
 
-| Agent | `TINTAVIEW_QUESTION` |
+| Variable | Holds |
 | --- | --- |
-| Claude Code | its own sentence: "Claude needs your permission to use Bash" |
-| Codex CLI | the tool it wants to run, e.g. `shell` — its payload carries no sentence |
-| Cursor | *(empty)* — it has no "waiting for approval" hook; TintaView infers that state itself |
+| `TINTAVIEW_MESSAGE` | The finished sentence the notification shows, translated: "Claude Code — still waiting for your answer (1 min): …". What most commands want. |
+| `TINTAVIEW_DETAIL` | The whole request **on one line**: the command with the agent's description of it, the file, the URL, or every question with its options. Lines are joined with ` ⏎ `, capped at 3500 characters so it fits a Telegram message beside `TINTAVIEW_MESSAGE`. |
+| `TINTAVIEW_QUESTION` | The same, cut short (200 characters) — what the notification quotes. |
+| `TINTAVIEW_TOOL` | The tool asking: `Bash`, `Edit`, `AskUserQuestion`, … |
+| `TINTAVIEW_CWD` | The agent's working directory, i.e. which project is asking. |
+| `TINTAVIEW_AGENTS` | Who is waiting: "Claude Code". |
+| `TINTAVIEW_STATUS` | Always `confirm`. |
 
-`TINTAVIEW_MESSAGE` is the whole sentence, already worded and translated, with the question
-appended only when there is one — so a command that just echoes it reads correctly for every
-agent. The question is held in memory only, replaced by the next prompt, and dropped the moment
-you answer.
+What `TINTAVIEW_DETAIL` looks like — a Claude command, a Codex command and a Claude question,
+from real prompts (paths and one long question shortened):
+
+```
+Print a timestamp from the project venv's Python — $ .venv/bin/python -c "import time; print(time.strftime('%T'))"
+Do you want to allow creating the requested empty file at /home/you/x outside the workspace? — $ touch /home/you/x
+1/2 How should I commit the Phase 2 (c) work? — Four commits, one per task / Two commits / One commit ⏎ 2/2 Include the dead-file deletions in the commit? — Yes — I'll run the git rm / No — commit code only
+```
+
+| Agent | What there is to quote |
+| --- | --- |
+| Claude Code | Everything above — commands, file edits, URLs, and multiple-choice questions with their options. |
+| Codex CLI | Commands, with Codex's own sentence for why it is asking. Its Plan-mode questions aren't detected at all yet. |
+| Cursor | *Nothing* — it has no "waiting for approval" hook; TintaView infers that state itself, and the variables are empty. |
+
+Updating from an older TintaView? The hook script only starts sending the full request once it
+is reinstalled: run `tintaview setup` (or `tintaview hooks install`). The tray reminds you at
+startup when Claude Code is set up, since Claude needs a new hook for this; with only Codex,
+nothing prompts you, and until you reinstall `TINTAVIEW_DETAIL` stays empty.
+
+**This sends the agent's command to wherever your command sends it.** A command line can hold a
+token (`curl -H "Authorization: …"`), a password or a private path. Nothing leaves your machine
+unless your own command uses these variables, and TintaView doesn't redact anything — pick what
+you pass along accordingly. The request is held in memory only, replaced by the next prompt,
+and dropped the moment you answer.
+
+**On Windows**, the command runs through `cmd`, which pastes `%VAR%` into the command line before
+reading it. So TintaView turns every `"` in these variables into `'` there: inside a quoted
+`"…%TINTAVIEW_DETAIL%…"`, characters like `&` or `|` from the agent's command then stay plain
+text instead of running as commands of their own. Unquoted, they would not. (PowerShell's
+`$env:TINTAVIEW_DETAIL` is safe either way.)
 
 ## Configuration
 
@@ -401,7 +435,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `ui.clocks.format` | `24h` | `24h` (20:42) or `12h` (8:42 PM). One setting for every clock, not per clock. |
 | `escalation.enabled` | `true` | Keep reminding you while an agent waits for confirmation: the chime repeats (if `ui.chime_on_confirm` is on) and a notification appears every `escalation.after_seconds`, until you answer. A single chime is missed by anyone who walked away. Also on the **Alerts** tab in **Settings…**. |
 | `escalation.after_seconds` | `60` | How long a confirmation must go unanswered before the first reminder, and the interval between reminders after that. |
-| `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. Four variables are set in its environment, always, even when empty: `TINTAVIEW_STATUS`, `TINTAVIEW_AGENTS` (who is waiting), `TINTAVIEW_QUESTION` (what they are asking — see [Reminders you can't miss](#reminders-you-cant-miss)) and `TINTAVIEW_MESSAGE` (the ready-made sentence the tray notification shows, which is what most commands want). Its output and exit code are ignored, and a failure is logged rather than shown. |
+| `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. Its environment always has `TINTAVIEW_STATUS`, `TINTAVIEW_AGENTS`, `TINTAVIEW_MESSAGE` (the sentence the tray notification shows), `TINTAVIEW_QUESTION`, `TINTAVIEW_DETAIL` (the whole request — command, file or every question — on one line), `TINTAVIEW_TOOL` and `TINTAVIEW_CWD`, even when empty; see [Reminders you can't miss](#reminders-you-cant-miss), including what that means for secrets. Its output and exit code are ignored, and a failure is logged rather than shown. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
@@ -430,6 +464,7 @@ Claude Code / Codex CLI / Cursor
         ▼
 tv-hook.sh / tv-hook.cmd         (~5 ms: sh/cmd + curl, no Python, always exits 0)
         │  GET /v1/event/<event>?agent=<agent>&sid=<session>
+        │  (the permission prompt only: POST, with the agent's whole payload as the body)
         ▼
 TintaView status broker (127.0.0.1:8777, in-process with the tray)
         │  tracks state per (agent, session); confirm > working > idle > none

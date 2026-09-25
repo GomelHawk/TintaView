@@ -1,0 +1,10 @@
+{
+  "session_id": "f491472d-003a-4efb-8f6b-672fa22034e4",
+  "transcript_path": "/home/user/.claude/projects/-home-user-project/f491472d-003a-4efb-8f6b-672fa22034e4.jsonl",
+  "cwd": "/home/user/TintaView",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-project/f491472d-003a-4efb-8f6b-672fa22034e4/scratchpad",
+  "prompt_id": "659a9299-3895-4bfb-a868-2f30d5a6661b",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission",
+  "notification_type": "permission_prompt"
+}

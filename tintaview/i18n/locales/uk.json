@@ -31,6 +31,7 @@
   "tray.escalate.balloon_body": "{agents} — досі чекає на вашу відповідь ({waited}).",
   "tray.escalate.balloon_body_question": "{agents} — досі чекає на вашу відповідь ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Агент досі чекає на вашу відповідь ({waited}).",
+  "request.pick_any": "(можна кілька)",
   "tray.usage_alert.balloon_body": "{agent}: {label} — {pct}%.",
   "tray.engine.balloon_title": "Підсвітка TintaView",
   "tray.update.unsupported": "Ця збірка не вміє перевіряти оновлення.",

@@ -21,12 +21,12 @@ class CodexAdapter(NestedHooksAdapter):
     key = "codex"
     display_name = "Codex CLI"
     session_id_field = "session_id"
-    # Codex's PermissionRequest payload carries no sentence — its schema (embedded in the
-    # binary as `permission-request.command.input`) is cwd/model/permission_mode/
-    # session_id/tool_input/tool_name/transcript_path/turn_id. `tool_name` is the only
-    # flat field worth quoting; `tool_input` holds the actual command but is nested JSON,
-    # which a `sed` in the hook shim has no business parsing.
-    question_field = "tool_name"
+    # Codex's PermissionRequest payload (measured on 0.147.0) is cwd/model/
+    # permission_mode/session_id/tool_input/tool_name/transcript_path/turn_id, with the
+    # command and Codex's own justification sentence in `tool_input` — read by the daemon
+    # from the posted body (`core/request.py`), not by the shim. Its multiple-choice
+    # `request_user_input` tool fires no PermissionRequest at all, only PreToolUse, so
+    # those questions are not detected yet.
     default_confirm_detection = "event"
 
     def default_home(self) -> Path:

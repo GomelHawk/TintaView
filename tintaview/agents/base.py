@@ -38,12 +38,6 @@ class AgentAdapter(abc.ABC):
     display_name: str = "Agent"
     #: stdin field carrying the session id. Cursor uses conversation_id, not session_id.
     session_id_field: str = "session_id"
-    #: stdin field carrying *what the agent is asking for*, read by the hook shim on the
-    #: confirm event only and shown in the escalation balloon/command. Empty for an agent
-    #: that sends nothing usable — Cursor has no confirm hook at all (its confirm comes
-    #: from the stall detector), so there is no payload to read. Must name a **flat
-    #: string** field: the shim is a `sed`, not a JSON parser.
-    question_field: str = ""
     #: How this agent signals "waiting for the user": a real event, or the stall
     #: heuristic. Overridable per install via config.
     default_confirm_detection: str = "event"

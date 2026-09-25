@@ -38,15 +38,27 @@ else
     FIELD="session_id"
 fi
 
-# What the agent is *asking for*, read only on the confirm event (see QFIELD below).
-# Mirrors `AgentAdapter.question_field`; keep the two in step. Cursor is absent on
-# purpose — it has no confirm hook at all, so this script is never run with that pair.
-QFIELD=""
-if [ "$EVENT" = "confirm" ]; then
-    case "$AGENT" in
-        claude) QFIELD="message" ;;
-        codex) QFIELD="tool_name" ;;
-    esac
+# The confirm event posts the agent's WHOLE payload instead, and is done: the daemon
+# reads the session id, the command, the file or every question and option out of it
+# with a real JSON parser (`tintaview/core/request.py`). That is one process — no `sed`,
+# no `cat` — and it only ever runs once per prompt, never on a tool call, so the per-call
+# path below stays exactly as it was.
+#
+#   --data-binary @-  hands stdin over untouched; curl reads it, so no shell variable ever
+#                     holds an agent's command and nothing here has to quote it.
+#   -H "Expect:"      curl otherwise sends `Expect: 100-continue` on a larger body and
+#                     waits up to a second for a `100 Continue` the daemon (HTTP/1.0)
+#                     never sends — the whole -m 1 budget, spent before the body leaves.
+#
+# Claude runs its PermissionRequest hook just before drawing the dialog, so the 1 s cap
+# is what bounds how long this can ever delay a prompt. Output is discarded: a
+# PermissionRequest hook that printed a decision would answer the prompt for the user.
+# Guarded on a tty, like the read below: a manual run at a terminal falls through to a
+# plain GET instead of waiting for input that never comes.
+if [ "$EVENT" = "confirm" ] && [ ! -t 0 ]; then
+    "$TINTAVIEW_CURL" -s -m 1 -H "Expect:" -H "Content-Type: application/json" \
+        --data-binary @- "$TINTAVIEW_URL/v1/event/confirm?agent=$AGENT" >/dev/null 2>&1
+    exit 0
 fi
 
 # ONE sed, reading stdin directly, doing the extraction *and* the safe-character check in
@@ -63,41 +75,14 @@ fi
 # Guarded on a tty because a manual `tv-hook.sh claude working` at an interactive terminal
 # must return instantly rather than block on a stdin read that will never come.
 SID=""
-QUESTION=""
 if [ ! -t 0 ]; then
-    if [ -n "$QFIELD" ]; then
-        # The confirm event only: two fields out of one payload means reading stdin into
-        # a variable first (a pipe can only be consumed once), which costs two extra
-        # processes. Affordable *here* and nowhere else — confirm fires once per prompt,
-        # while tool-start/tool-end fire on every single tool call and keep the
-        # single-sed path below untouched.
-        PAYLOAD=$(cat)
-        SID=$(printf '%s' "$PAYLOAD" | sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
-        # Unlike the session id this is free text, so it is *not* matched against a safe
-        # character set: `--data-urlencode` below hands it to curl to encode, and the
-        # daemon sanitises what it stores. `[^"]*` stops at the first quote, so an
-        # embedded escape truncates the sentence rather than corrupting the request.
-        QUESTION=$(printf '%s' "$PAYLOAD" | sed -n "/\"$QFIELD\"[[:space:]]*:/{s/.*\"$QFIELD\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p;q;}")
-    else
-        SID=$(sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
-    fi
+    SID=$(sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
 fi
 [ -n "$SID" ] || SID="default"
 
 # Fire and forget: short timeout, discard output, and always exit 0 — whatever
 # happens here (daemon down, curl missing, network namespace weirdness) must never
 # surface as a hook failure to the agent.
-#
-# `-G --data-urlencode` rather than building the query by hand: curl does the percent
-# encoding, so an agent's sentence (spaces, quotes, `&`, a path) can never break the
-# request line. Only used when there is something to send, so the common path stays the
-# same single plain GET it has always been.
-if [ -n "$QUESTION" ]; then
-    "$TINTAVIEW_CURL" -s -m 1 -G \
-        --data-urlencode "question=$QUESTION" \
-        "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&sid=$SID" >/dev/null 2>&1
-else
-    "$TINTAVIEW_CURL" -s -m 1 "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&sid=$SID" >/dev/null 2>&1
-fi
+"$TINTAVIEW_CURL" -s -m 1 "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&sid=$SID" >/dev/null 2>&1
 
 exit 0

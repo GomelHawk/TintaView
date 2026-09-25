@@ -126,7 +126,7 @@ WSL instead.
 ## Cursor never goes red
 
 This is expected in one specific way: **Cursor has no native "waiting for your
-approval" hook event at all.** Unlike Claude Code (`Notification`/`permission_prompt`)
+approval" hook event at all.** Unlike Claude Code (`PermissionRequest`)
 and Codex (`PermissionRequest`), Cursor's hook payloads never tell you it's sitting on a
 permission prompt.
 

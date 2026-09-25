@@ -31,6 +31,7 @@
   "tray.escalate.balloon_body": "{agents} — всё ещё ждёт вашего ответа ({waited}).",
   "tray.escalate.balloon_body_question": "{agents} — всё ещё ждёт вашего ответа ({waited}): {question}",
   "tray.escalate.balloon_body_unknown": "Агент всё ещё ждёт вашего ответа ({waited}).",
+  "request.pick_any": "(можно несколько)",
   "tray.usage_alert.balloon_body": "{agent}: {label} — {pct}%.",
   "tray.engine.balloon_title": "Подсветка TintaView",
   "tray.update.unsupported": "Эта сборка не умеет проверять обновления.",

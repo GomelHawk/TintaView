@@ -1,0 +1,59 @@
+{
+  "session_id": "f491472d-003a-4efb-8f6b-672fa22034e4",
+  "transcript_path": "/home/user/.claude/projects/-home-user-project/f491472d-003a-4efb-8f6b-672fa22034e4.jsonl",
+  "cwd": "/home/user/TintaView",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-project/f491472d-003a-4efb-8f6b-672fa22034e4/scratchpad",
+  "prompt_id": "d4b69d20-fd79-4157-80a1-1db0d5e057b7",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Capture test 1/2 — which single-line separator should TINTAVIEW_DETAIL use between questions?",
+        "header": "Separator",
+        "options": [
+          {
+            "label": "⏎ (Recommended)",
+            "description": "1/2 Question — A / B ⏎ 2/2 Question — C / D"
+          },
+          {
+            "label": "|",
+            "description": "1/2 Question — A / B | 2/2 Question — C / D"
+          },
+          {
+            "label": "; ",
+            "description": "1/2 Question — A / B; 2/2 Question — C / D"
+          }
+        ],
+        "multiSelect": false
+      },
+      {
+        "question": "Capture test 2/2 — which parts of a question should the detail include?",
+        "header": "Contents",
+        "options": [
+          {
+            "label": "Question text",
+            "description": "The full question sentence"
+          },
+          {
+            "label": "Option labels",
+            "description": "A / B / C"
+          },
+          {
+            "label": "Option descriptions",
+            "description": "The explanation under each option — roughly doubles the length"
+          },
+          {
+            "label": "Pick-any marker",
+            "description": "\"(pick any)\" on multi-select questions"
+          }
+        ],
+        "multiSelect": true
+      }
+    ]
+  }
+}

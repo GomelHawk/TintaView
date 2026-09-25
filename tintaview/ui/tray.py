@@ -75,6 +75,23 @@ def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]
 
 
 
+def _cmd_safe(value: str, windows: bool | None = None) -> str:
+    """An agent-derived value made safe to expand inside ``"…%VAR%…"`` under ``cmd.exe``.
+
+    The escalation command runs through the shell, and on Windows that is ``cmd``, which
+    substitutes ``%VAR%`` into the command line **before** parsing it. With the agent's
+    own command now in `TINTAVIEW_DETAIL`, a ``"`` in it closes the user's quoted argument
+    and whatever follows (``& del …``) runs — measured through this exact `Popen` path:
+    ``grep "a" x.txt" & echo INJECTED & "`` executed the ``echo``. With every ``"``
+    turned into ``'``, the same value stayed one literal argument, ``& | < > ^ %``
+    included. POSIX shells never re-parse an expanded ``"$VAR"``, so the value is left
+    exactly as the agent wrote it there.
+    """
+    if windows is None:
+        windows = sys.platform == "win32"
+    return value.replace('"', "'") if windows else value
+
+
 def _agent_label(key: str) -> str:
     """Human name for an agent key, for the escalation balloon.
 
@@ -917,24 +934,28 @@ class TrayApp(QtCore.QObject):
             for key, value in sorted(agents_payload.items())
             if value.get("effective") == "confirm"
         ]
-        # The agent's own words for what it is asking, when its hook sends any — see
-        # `core/state.py`. Only ever from a session that is waiting *now*, and only the
-        # first: two agents asking at once is a balloon, not a transcript.
-        question = next(
+        # What the agent is asking for, when its hook sent anything — see
+        # `core/state.py`. Only ever from an agent that is waiting *now*, and only the
+        # first: two agents asking at once is a balloon, not a transcript. Question and
+        # detail come from the same agent entry, so the command never pairs one agent's
+        # sentence with another's command.
+        asking = next(
             (
-                str(value.get("question") or "")
+                value
                 for _key, value in sorted(agents_payload.items())
-                if value.get("effective") == "confirm" and value.get("question")
+                if value.get("effective") == "confirm"
+                and (value.get("question") or value.get("detail"))
             ),
-            "",
+            {},
         )
+        question = str(asking.get("question") or "")
         message = self._escalation_message(waited, waiting, question)
         self.tray.showMessage(
             "TintaView", message, QtWidgets.QSystemTrayIcon.Warning, 10000,
         )
         if not self._escalation_command_ran:
             self._escalation_command_ran = True
-            self._run_escalation_command(waiting, question, message)
+            self._run_escalation_command(waiting, question, message, asking)
 
     def _escalation_message(self, waited: float, waiting: list[str], question: str) -> str:
         """The one sentence both the balloon and the command's `TINTAVIEW_MESSAGE` use.
@@ -955,7 +976,7 @@ class TrayApp(QtCore.QObject):
         return t("tray.escalate.balloon_body", waited=waited_text, agents=agents)
 
     def _run_escalation_command(self, waiting: list[str], question: str = "",
-                                message: str = "") -> None:
+                                message: str = "", asking: dict | None = None) -> None:
         """Fire the configured command and forget about it.
 
         Through the shell, because the whole point is that the user writes whatever their
@@ -966,10 +987,13 @@ class TrayApp(QtCore.QObject):
         into the string — a quoting bug in `TINTAVIEW_AGENTS` must not be able to change
         what the command does.
 
-        Three variables, all always set so a command never has to handle a missing one:
+        Every variable is always set, so a command never has to handle a missing one:
         `TINTAVIEW_AGENTS` (who is waiting), `TINTAVIEW_QUESTION` (what they are asking,
-        empty when the agent sent nothing) and `TINTAVIEW_MESSAGE` (the ready-made
-        sentence, which is the one most commands want).
+        short, empty when the agent sent nothing), `TINTAVIEW_MESSAGE` (the ready-made
+        sentence, which is the one most commands want), and from the agent's posted
+        payload `TINTAVIEW_DETAIL` (the whole request — command, file, every question
+        and option — on **one line**, since `cmd` truncates `%VAR%` at a newline),
+        `TINTAVIEW_TOOL` and `TINTAVIEW_CWD`.
         """
         command = self._cfg.escalation.command.strip()
         if not command:
@@ -977,8 +1001,13 @@ class TrayApp(QtCore.QObject):
         env = dict(os.environ)
         env["TINTAVIEW_STATUS"] = "confirm"
         env["TINTAVIEW_AGENTS"] = ", ".join(waiting)
-        env["TINTAVIEW_QUESTION"] = question
-        env["TINTAVIEW_MESSAGE"] = message
+        # Everything below comes, in the end, from what an agent wrote — see `_cmd_safe`.
+        asking = asking or {}
+        env["TINTAVIEW_QUESTION"] = _cmd_safe(question)
+        env["TINTAVIEW_MESSAGE"] = _cmd_safe(message)
+        env["TINTAVIEW_DETAIL"] = _cmd_safe(str(asking.get("detail") or ""))
+        env["TINTAVIEW_TOOL"] = _cmd_safe(str(asking.get("request_tool") or ""))
+        env["TINTAVIEW_CWD"] = _cmd_safe(str(asking.get("cwd") or ""))
         try:
             kwargs: dict[str, Any] = {}
             if sys.platform == "win32":

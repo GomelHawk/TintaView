@@ -1,0 +1,53 @@
+{
+  "session_id": "01a0d858-cd8b-7431-a675-7782985d2297",
+  "turn_id": "01a0d85b-a7b2-7361-a289-3d404cc8e7e0",
+  "transcript_path": "/home/user/.codex/sessions/2026/09/25/rollout-2026-09-25T14-34-53-01a0d858-cd8b-7431-a675-7782985d2297.jsonl",
+  "cwd": "/mnt/c/Users/user",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-terra",
+  "permission_mode": "default",
+  "tool_name": "request_user_input",
+  "tool_input": {
+    "questions": [
+      {
+        "id": "colour",
+        "header": "Colour",
+        "question": "Pick a colour.",
+        "options": [
+          {
+            "label": "Red (Recommended)",
+            "description": "Choose red."
+          },
+          {
+            "label": "Green",
+            "description": "Choose green."
+          },
+          {
+            "label": "Blue",
+            "description": "Choose blue."
+          }
+        ]
+      },
+      {
+        "id": "sizes",
+        "header": "Sizes",
+        "question": "Pick one or more sizes.",
+        "options": [
+          {
+            "label": "S (Recommended)",
+            "description": "Include small."
+          },
+          {
+            "label": "M",
+            "description": "Include medium."
+          },
+          {
+            "label": "L",
+            "description": "Include large."
+          }
+        ]
+      }
+    ]
+  },
+  "tool_use_id": "call_tWb1yrTXYLi5FR7smPXXvIdb"
+}

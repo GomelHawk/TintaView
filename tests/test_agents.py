@@ -120,6 +120,15 @@ def test_claude_render_hooks_native_shape():
     confirm_entry = next(e for e in notif if e["matcher"] == "permission_prompt")
     assert confirm_entry["hooks"][0]["command"] == f"{HOOK_COMMAND} confirm"
 
+    # PermissionRequest is the confirm that fires at once, carries the whole tool_input,
+    # and is the only one that fires for AskUserQuestion (measured on 2.1.281).
+    assert native["hooks"]["PermissionRequest"] == [
+        {
+            "matcher": "*",
+            "hooks": [{"type": "command", "command": f"{HOOK_COMMAND} confirm", "timeout": 5}],
+        }
+    ]
+
     # SessionStart etc. have no matcher key at all.
     session_start = native["hooks"]["SessionStart"]
     assert session_start == [

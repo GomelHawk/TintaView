@@ -1,0 +1,14 @@
+{
+  "session_id": "01a0d858-cd8b-7431-a675-7782985d2297",
+  "turn_id": "01a0d85a-085c-7fe3-9466-68b5acf63ee4",
+  "transcript_path": "/home/user/.codex/sessions/2026/09/25/rollout-2026-09-25T14-34-53-01a0d858-cd8b-7431-a675-7782985d2297.jsonl",
+  "cwd": "/mnt/c/Users/user",
+  "hook_event_name": "PermissionRequest",
+  "model": "gpt-5.6-terra",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "touch /home/user/tv-capture-codex-test",
+    "description": "Do you want to allow creating the requested empty file at /home/user/tv-capture-codex-test outside the workspace?"
+  }
+}

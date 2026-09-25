@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -1190,3 +1191,134 @@ def test_the_headline_question_comes_from_a_session_that_is_waiting(server_engin
     assert _wait_until(
         lambda: _get_state(server)["agents"]["claude"]["question"] == "second question"
     )
+
+
+# ---------------------------------------------------------------- posted confirm payloads
+
+HOOK_FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
+
+
+def _post_confirm(server: StatusServer, agent: str, body: bytes, query: str = "") -> None:
+    req = urllib.request.Request(
+        f"{server.url}/v1/event/confirm?agent={agent}{query}", data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=2) as resp:
+        assert resp.status == 200
+
+
+def _claude(server: StatusServer) -> dict:
+    return _get_state(server)["agents"].get("claude", {})
+
+
+def test_a_posted_permission_request_reaches_state_whole(server_engine):
+    """The real captured payload, through the real handler: the session id comes from
+    the body (the shim no longer scrapes one), and the command from `tool_input`."""
+    server, _engine = server_engine
+    body = (HOOK_FIXTURES / "claude_permission_request_bash.json").read_bytes()
+    sid = json.loads(body)["session_id"]
+    _event(server, "session-start", "claude", sid)
+
+    _post_confirm(server, "claude", body)
+
+    assert _wait_until(lambda: _claude(server).get("effective") == "confirm")
+    entry = _claude(server)
+    assert list(entry["sessions"]) == [sid], "a second, 'default' session appeared"
+    assert entry["request_tool"] == "Bash"
+    assert entry["cwd"] == "/home/user/TintaView"
+    assert "$ /home/user/TintaView/.venv/bin/python -c" in entry["detail"]
+    assert entry["question"] == entry["detail"]  # short enough that the balloon quotes it all
+
+
+def test_the_later_notification_does_not_overwrite_the_permission_request(server_engine):
+    """Claude sends both for one command prompt: `PermissionRequest` at once, then a
+    `Notification` six seconds later reading only "Claude needs your permission"
+    (measured on 2.1.281). The first is the one worth quoting."""
+    server, _engine = server_engine
+    permission = json.loads((HOOK_FIXTURES / "claude_permission_request_bash.json").read_text())
+    notification = json.loads(
+        (HOOK_FIXTURES / "claude_notification_permission_prompt.json").read_text())
+    assert permission["session_id"] == notification["session_id"]  # one prompt, as captured
+    _post_confirm(server, "claude", json.dumps(permission).encode())
+    assert _wait_until(lambda: _claude(server).get("detail"))
+    before = _claude(server)
+
+    _post_confirm(server, "claude", json.dumps(notification).encode())
+    time.sleep(0.05)
+
+    after = _claude(server)
+    assert (after["question"], after["detail"]) == (before["question"], before["detail"])
+
+
+def test_a_notification_alone_still_quotes_its_sentence(server_engine):
+    """A Claude build without `PermissionRequest` sends only the Notification."""
+    server, _engine = server_engine
+    body = (HOOK_FIXTURES / "claude_notification_permission_prompt.json").read_bytes()
+
+    _post_confirm(server, "claude", body)
+
+    assert _wait_until(lambda: _claude(server).get("question") == "Claude needs your permission")
+    assert _claude(server)["detail"] == ""
+
+
+def test_answering_clears_the_whole_request(server_engine):
+    server, _engine = server_engine
+    body = (HOOK_FIXTURES / "claude_permission_request_bash.json").read_bytes()
+    sid = json.loads(body)["session_id"]
+    _post_confirm(server, "claude", body)
+    assert _wait_until(lambda: _claude(server).get("detail"))
+
+    _event(server, "tool-end", "claude", sid)  # Claude's PostToolUse once it was allowed
+
+    assert _wait_until(lambda: _claude(server)["effective"] == "working")
+    entry = _claude(server)
+    assert (entry["question"], entry["detail"], entry["request_tool"], entry["cwd"]) == (
+        "", "", "", "")
+
+
+def test_a_body_over_the_cap_is_cut_and_still_confirms(server_engine):
+    """A `Write` of a big file: the server reads `MAX_BODY_BYTES` and no more, the JSON
+    no longer parses, and the flat fields in front of `tool_input` are salvaged."""
+    from tintaview.core.request import MAX_BODY_BYTES
+
+    server, _engine = server_engine
+    body = json.dumps({"session_id": "big-1", "cwd": "/srv", "tool_name": "Write",
+                       "tool_input": {"file_path": "/srv/x", "content": "y" * MAX_BODY_BYTES}})
+
+    _post_confirm(server, "claude", body.encode())
+
+    assert _wait_until(lambda: _claude(server).get("effective") == "confirm")
+    assert list(_claude(server)["sessions"]) == ["big-1"]
+    assert _claude(server)["request_tool"] == "Write"
+
+
+def test_an_empty_or_broken_body_still_confirms_under_the_query_sid(server_engine):
+    server, _engine = server_engine
+
+    _post_confirm(server, "claude", b"{not json", query="&sid=q-1")
+
+    assert _wait_until(lambda: _claude(server).get("effective") == "confirm")
+    assert list(_claude(server)["sessions"]) == ["q-1"]
+
+
+def test_a_post_to_anything_but_an_event_is_refused(server_engine):
+    server, _engine = server_engine
+    req = urllib.request.Request(f"{server.url}/state", data=b"{}", method="POST")
+
+    with pytest.raises(HTTPError) as excinfo:
+        urllib.request.urlopen(req, timeout=2)
+    assert excinfo.value.code == 404
+
+
+def test_the_old_get_confirm_keeps_working(server_engine):
+    """Hooks installed by an older TintaView keep sending `GET ...?question=` until
+    they are reinstalled; nothing about that path may change."""
+    server, _engine = server_engine
+    _event(server, "session-start", "codex", "c1")
+
+    url = f"{server.url}/v1/event/confirm?agent=codex&sid=c1&question=Bash"
+    with urllib.request.urlopen(url, timeout=2) as resp:
+        assert resp.status == 200
+
+    assert _wait_until(lambda: _get_state(server)["agents"]["codex"]["question"] == "Bash")
+    assert _get_state(server)["agents"]["codex"]["detail"] == ""

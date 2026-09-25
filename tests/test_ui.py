@@ -2302,7 +2302,7 @@ def escalation_tray(tray, monkeypatch):
     commands: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         tray_mod.TrayApp, "_run_escalation_command",
-        lambda self, waiting, question="", message="": commands.append(
+        lambda self, waiting, question="", message="", asking=None: commands.append(
             (", ".join(waiting), question, message)
         ),
     )
@@ -2397,6 +2397,29 @@ def test_the_command_is_handed_the_question_and_the_finished_sentence(escalation
     assert message.endswith("Claude needs your permission to use Bash")
 
 
+def test_the_command_is_handed_the_same_agents_whole_request(escalation_tray, monkeypatch):
+    """Detail, tool and cwd come from the agent entry the question was taken from, so a
+    command never pairs one agent's sentence with another agent's command."""
+    app_instance, server, clock, _chimes, _balloons, _commands = escalation_tray
+    handed: list[dict | None] = []
+    monkeypatch.setattr(
+        tray_mod.TrayApp, "_run_escalation_command",
+        lambda self, waiting, question="", message="", asking=None: handed.append(asking),
+    )
+    payload = _confirm_payload("Clean the build dir — $ rm -rf build/")
+    payload["agents"]["claude"].update(detail="Clean the build dir — $ rm -rf build/",
+                                       request_tool="Bash", cwd="/srv/app")
+    payload["agents"]["codex"].update(detail="not this one", request_tool="Edit", cwd="/x")
+    server.set(payload)
+    app_instance._poll_state()
+
+    clock["now"] += 61
+    app_instance._poll_state()
+
+    assert handed[0]["detail"] == "Clean the build dir — $ rm -rf build/"
+    assert (handed[0]["request_tool"], handed[0]["cwd"]) == ("Bash", "/srv/app")
+
+
 def test_the_escalation_command_runs_once_per_confirm(escalation_tray):
     """A command that pushes to a phone must not push once a minute for an hour."""
     app_instance, server, clock, _chimes, _balloons, commands = escalation_tray
@@ -2469,7 +2492,8 @@ def test_the_escalation_command_is_handed_the_state_in_its_environment(tray, mon
     )
 
     app_instance._run_escalation_command(
-        ["Claude Code"], "permission to use Bash", "Claude Code — waiting: permission to use Bash"
+        ["Claude Code"], "permission to use Bash", "Claude Code — waiting: permission to use Bash",
+        {"detail": "Clean up — $ rm -rf build/ ⏎ ls", "request_tool": "Bash", "cwd": "/srv/app"},
     )
 
     assert len(calls) == 1
@@ -2480,6 +2504,9 @@ def test_the_escalation_command_is_handed_the_state_in_its_environment(tray, mon
     assert kwargs["env"]["TINTAVIEW_AGENTS"] == "Claude Code"
     assert kwargs["env"]["TINTAVIEW_QUESTION"] == "permission to use Bash"
     assert kwargs["env"]["TINTAVIEW_MESSAGE"].endswith("permission to use Bash")
+    assert kwargs["env"]["TINTAVIEW_DETAIL"] == "Clean up — $ rm -rf build/ ⏎ ls"
+    assert kwargs["env"]["TINTAVIEW_TOOL"] == "Bash"
+    assert kwargs["env"]["TINTAVIEW_CWD"] == "/srv/app"
 
 
 def test_every_command_variable_is_set_even_with_nothing_to_say(tray, monkeypatch):
@@ -2495,8 +2522,9 @@ def test_every_command_variable_is_set_even_with_nothing_to_say(tray, monkeypatc
     app_instance._run_escalation_command(["Cursor"])
 
     env = calls[0][1]["env"]
-    assert env["TINTAVIEW_QUESTION"] == ""
-    assert env["TINTAVIEW_MESSAGE"] == ""
+    for name in ("TINTAVIEW_QUESTION", "TINTAVIEW_MESSAGE", "TINTAVIEW_DETAIL",
+                 "TINTAVIEW_TOOL", "TINTAVIEW_CWD"):
+        assert env[name] == "", name
     assert env["TINTAVIEW_AGENTS"] == "Cursor"
 
 
@@ -2592,3 +2620,22 @@ def test_only_real_limit_rows_can_raise_a_usage_alert(tray, monkeypatch):
     })
 
     assert balloons == []
+
+
+@pytest.mark.parametrize("value", [
+    'grep "a" x.txt" & echo INJECTED & "',   # measured: runs the echo under raw cmd.exe
+    'python -c "print(1)"',
+])
+def test_agent_text_cannot_break_out_of_a_quoted_cmd_argument(value):
+    """`cmd` expands `%TINTAVIEW_DETAIL%` before parsing the line, so a `"` in the
+    agent's command would end the user's quoted argument and run what follows."""
+    safe = tray_mod._cmd_safe(value, windows=True)
+
+    assert '"' not in safe
+    assert safe.replace("'", '"') == value, "nothing but the quotes may change"
+
+
+def test_posix_shells_get_the_agents_text_untouched():
+    value = 'grep "a" x.txt & echo hi'
+
+    assert tray_mod._cmd_safe(value, windows=False) == value

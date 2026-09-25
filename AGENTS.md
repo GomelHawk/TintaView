@@ -207,6 +207,7 @@ tool-start, tool-end`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/event/{event}?agent=&sid=&tool=` | Hook ingress |
+| `POST` | `/v1/event/{event}?agent=` | Hook ingress with the agent's whole payload as the body — what the shims send for `confirm` (see below). The session id comes from the body; a query `sid` is only a fallback |
 | `GET` | `/{session-start,session-end,working,idle,confirm}` | Agent-less aliases defaulting to `agent=claude`, so a hand-written one-line `curl` hook keeps working |
 | `GET` | `/state` | Read-only status for the tray and `doctor` |
 | `GET` | `/healthz` | Liveness for `doctor` |
@@ -350,7 +351,7 @@ OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in p
 
 | | Config TintaView writes | Session start/end | Working | "Waiting for you" |
 | --- | --- | --- | --- | --- |
-| Claude Code | `~/.claude/settings.json` | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `Notification` + matcher `permission_prompt` |
+| Claude Code | `~/.claude/settings.json` | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest`, plus `Notification` + matcher `permission_prompt` |
 | Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
 | Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`/`postToolUse`, `beforeShellExecution`/`afterShellExecution` | none → stall heuristic |
 
@@ -359,6 +360,16 @@ don't fit the columns. Cursor binds **both** the generic tool pair *and* the she
 to `tool-start`/`tool-end` — the shell one is what arms the stall detector for a command sitting on
 an approval prompt, which is the case the heuristic exists for. Claude binds `Notification` twice,
 on **two matchers**: `permission_prompt` → `confirm` and `idle_prompt` → `idle`.
+
+Claude's two confirm bindings are **not** redundant, and neither may go. Measured on 2.1.281:
+`PermissionRequest` fires the moment a dialog opens, with the whole `tool_input`, and is the
+**only** event for `AskUserQuestion` — a question left open 17 s produced no `Notification` at
+all. `Notification`/`permission_prompt` comes from a 6-second timer, reads only "Claude needs
+your permission", and is what an older build without `PermissionRequest` sends. Codex's
+`PermissionRequest` covers its commands (0.147.0: `tool_input.command` plus a `description`
+sentence), but its Plan-mode `request_user_input` fires **only** `PreToolUse`, so Codex
+questions are not detected — binding them needs a second `PreToolUse` entry with a matcher, which
+is unverified against Codex's `hooks.json`.
 
 JetBrains AI Assistant and GitHub Copilot CLI are deliberately absent from this table — see
 [Statistics](#statistics) for why each is stats-only with no `agents/` adapter.
@@ -382,25 +393,49 @@ id pulled out by `sed`, **no Python startup**, `curl -s -m 1`, output discarded,
 `tv-hook.cmd` is the Windows-native twin.
 
 **The one exception to "session id only": the confirm event.** It fires once per prompt rather
-than once per tool call, so it can afford to read a second field — what the agent is *asking* for
-— and send it as `?question=`. Which field that is comes from `AgentAdapter.question_field`
-(Claude: `message`, "Claude needs your permission to use Bash"; Codex: `tool_name`, since its
-`permission-request.command.input` schema carries no sentence; Cursor: none, it has no confirm
-hook at all), and the shims hardcode the same table — keep them in step. Rules that keep this
-from becoming the next hot-path regression:
+than once per tool call, and it is the one payload with something a person has to read — the
+exact command, file or URL, or every question and option of a multiple-choice prompt. So the
+shim **posts the whole stdin** (`curl --data-binary @-`) and the daemon reads it with a real JSON
+parser (`core/request.py`) into a short `question` (the balloon) and a one-line `detail` (the
+escalation command's `TINTAVIEW_DETAIL`), plus the tool and the working directory. Rules that
+keep this from becoming the next hot-path regression, or a hole:
 
-- **Only on `confirm`.** Every other event takes the untouched single-`sed` path. The two extra
-  processes (`cat` into a variable, because a pipe is consumed once) are the price of reading two
-  fields, and they are never paid on a tool call.
-- **Never hand-built into the query.** `curl -G --data-urlencode` does the percent encoding, so an
-  agent's sentence cannot break the request line. `tv-hook.cmd` strips what `cmd` cannot survive
-  (`& %% < > | ^`) instead, since batch has no equivalent.
-- **The daemon sanitises, not the shim** (`server._clean_question`): unescapes, collapses
-  whitespace, drops non-printables, caps at `MAX_QUESTION_CHARS`. Everything downstream treats it
-  as already-printable text.
-- **It lives only as long as the question does.** `StateStore.set` keeps it only while the status
-  is `confirm` and clears it on anything else, so the tray can never quote a prompt that was
-  already answered. It is display-only: it never touches the effective status or the lights.
+- **Only on `confirm`.** Every other event takes the untouched single-`sed` GET. Posting is one
+  process — no `sed`, no `cat` — and it is never paid on a tool call.
+- **`-H "Expect:"` on that curl, always.** curl sends `Expect: 100-continue` on a body over 1 MB
+  (curl 8.x; older builds from 1 KB) and waits up to a second for a `100 Continue` the HTTP/1.0
+  daemon never sends — the whole `-m 1` budget. Measured: a 1.5 MB payload timed out at 1.06 s
+  without the header, 0.01 s with it. `tests/test_hookscript.py` pins it, and fails without it.
+- **Nothing printed, ever.** A `PermissionRequest` hook's stdout is a decision channel; a shim
+  that echoed the daemon's reply would answer the user's prompt for them.
+- **Acknowledge, then parse.** `_route_post` reads at most `MAX_BODY_BYTES` (1 MiB; a `Write`
+  carries the whole file) and acks before parsing, because Claude runs this hook just before it
+  draws the dialog. A body cut at the cap no longer parses; `request._salvage` keeps the flat
+  fields every agent writes before `tool_input` (session id, tool name).
+- **The payload's session id, checked like the shim's.** `[A-Za-z0-9._-]`, or it isn't used —
+  the query `sid`, then `default`, instead. Never a *different* valid id.
+- **`detail` is one line.** `cmd` truncates `%VAR%` at a newline, silently. Lines join on
+  ` ⏎ `; capped at `MAX_DETAIL_CHARS` (3500) so it fits a Telegram message beside the sentence.
+- **On Windows every agent-derived variable has `"` turned into `'`** (`tray._cmd_safe`). The
+  escalation command runs through `cmd`, which pastes `%VAR%` into the line *before* parsing it,
+  so a `"` in the agent's command closes the user's quoted argument and what follows runs —
+  measured through the tray's own `Popen(shell=True)`: `grep "a" x.txt" & echo INJECTED & "`
+  executed the `echo`; with the swap it stayed one literal argument. POSIX shells never re-parse
+  `"$VAR"`, so the text is untouched there.
+- **It lives only as long as the question does.** `StateStore.set` keeps question, detail, tool
+  and cwd only while the status is `confirm`, and clears them on anything else. One addition: a
+  confirm with **no** detail doesn't wipe a waiting session's detail — Claude's `Notification`
+  arrives six seconds after `PermissionRequest` for the same prompt and must not replace the
+  command with "Claude needs your permission". All of it is display-only.
+
+A shim installed before the POST path still sends `GET …/confirm?question=`, read by
+`server._clean_question` exactly as before; it gets a question and no detail until
+`tintaview setup` reinstalls the hooks. The added Claude binding makes the startup hook check
+report `partial` and say so — verified against a real pre-change `settings.json` — and the
+reinstall copies the one shared `tv-hook` script every agent calls. Codex's bindings did not
+change, so a Codex-only install reports `installed` and is **not** prompted: nothing refreshes
+the script on its own (`install_hook_script` runs only from `setup` / `hooks install`). Cursor has no confirm event, so none of this reaches it: its stall
+detector confirms with nothing to quote.
 
 **Hook merge** (`install/hooks.py`) rewrites the user's real config files, so its rules are strict:
 
