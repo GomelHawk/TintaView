@@ -4,6 +4,27 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.8.0 — 2026-09-29
+
+- **"Notify me when it's done."** Start a long task in Claude Code, Codex or Cursor and add
+  *"notify me via phone when it's done"*. The agent calls TintaView's new `notify_user` tool
+  when it finishes, with its own one-line summary, and the tray shows it as a notification.
+  To get it on your phone, set a command under **Settings… → Alerts → When an agent notifies
+  me**. The Telegram example from the README works as is, with `TINTAVIEW_STATUS=notify`
+  and the agent's text in `TINTAVIEW_MESSAGE`. Your token stays in TintaView's settings; the
+  agent only sends the text.
+- **After updating, run the setup wizard once to switch it on**: tray → **Settings…** →
+  **Open Full Setup Wizard (Terminal)…**. Its new **Notify tool** step shows what it adds to
+  each agent's config and asks first. That's `~/.claude.json` and `~/.claude/settings.json`
+  for Claude Code, `~/.codex/config.toml` for Codex, and `~/.cursor/mcp.json` for Cursor.
+  It also lets the tool run without asking for approval, since it is called when you may
+  not be there. Cursor may still ask the first time. Sessions already open don't see the
+  tool; start a new one.
+- `tintaview doctor` has a new **NOTIFY TOOL** section showing, per agent, whether the tool
+  is set up.
+- Uninstalling? Run `tintaview hooks uninstall --agent all` first. It now also removes the
+  notify tool, which agents otherwise report as broken once TintaView is gone.
+
 ## 0.7.2 — 2026-09-29
 
 - **A usage limit can now run your own command**, just like an unanswered question. Set it
