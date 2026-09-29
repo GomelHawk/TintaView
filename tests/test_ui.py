@@ -1001,6 +1001,7 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
             "stats.show_trend": False,
             "stats.alert_enabled": False,
             "stats.alert_threshold": 75,
+            "stats.alert_command": "notify-send limit",
             "escalation.enabled": False,
             "escalation.after_seconds": 120,
             "escalation.command": "notify-send hi",
@@ -1024,6 +1025,7 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     assert cfg.stats.show_trend is False
     assert cfg.stats.alert_enabled is False
     assert cfg.stats.alert_threshold == 75
+    assert cfg.stats.alert_command == "notify-send limit"
     assert cfg.escalation.enabled is False
     assert cfg.escalation.after_seconds == 120
     assert cfg.escalation.command == "notify-send hi"
@@ -1060,7 +1062,7 @@ def test_every_stats_field_is_accounted_for():
     # Written by SettingsDialog and mirrored in Tray._apply_settings — each is asserted
     # in test_apply_settings_mirrors_every_field_it_can_write above.
     dialog_writes = {"poll_seconds", "show_estimate", "show_trend",
-                     "alert_enabled", "alert_threshold"}
+                     "alert_enabled", "alert_threshold", "alert_command"}
     # Not reachable from the dialog at all (config-file only).
     config_file_only = {"enabled"}
 
@@ -2603,6 +2605,63 @@ def test_usage_alerts_respect_the_configured_threshold_and_switch(tray, monkeypa
     app_instance._cfg.stats.alert_enabled = False
     app_instance._apply_results({"codex": _usage_result("codex", 99)})
     assert len(balloons) == 1
+
+
+def _capture_popen(monkeypatch) -> list[tuple]:
+    calls: list[tuple] = []
+    monkeypatch.setattr(tray_mod.subprocess, "Popen",
+                        lambda command, **kwargs: calls.append((command, kwargs)))
+    monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage", lambda self, *a, **k: None)
+    return calls
+
+
+def test_a_usage_alert_runs_the_users_command_once_per_crossing(tray, monkeypatch):
+    app_instance, _server = tray
+    app_instance._cfg.stats.alert_command = "  notify-send limit  "
+    calls = _capture_popen(monkeypatch)
+
+    app_instance._apply_results({"claude": _usage_result("claude", 91)})
+    app_instance._apply_results({"claude": _usage_result("claude", 96)})  # still over
+
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == "notify-send limit"
+    assert kwargs["shell"] is True
+    env = kwargs["env"]
+    assert env["TINTAVIEW_STATUS"] == "limit"
+    assert env["TINTAVIEW_AGENTS"] == "Claude Code"
+    assert env["TINTAVIEW_LIMIT"] == "5-hour limit"
+    assert env["TINTAVIEW_PCT"] == "91"
+    assert env["TINTAVIEW_MESSAGE"] == "Claude Code: 5-hour limit is at 91%."
+    # One script can serve both commands: every confirm variable is there, and empty.
+    for name in ("TINTAVIEW_QUESTION", "TINTAVIEW_DETAIL", "TINTAVIEW_TOOL", "TINTAVIEW_CWD"):
+        assert env[name] == "", name
+
+    app_instance._apply_results({"claude": _usage_result("claude", 4)})
+    app_instance._apply_results({"claude": _usage_result("claude", 92)})
+    assert len(calls) == 2
+
+
+def test_the_usage_command_is_not_the_confirm_command(tray, monkeypatch):
+    """Upgrading must not start firing someone's question-only phone push for usage."""
+    app_instance, _server = tray
+    app_instance._cfg.escalation.command = "notify-send question"
+    calls = _capture_popen(monkeypatch)
+
+    app_instance._apply_results({"claude": _usage_result("claude", 95)})
+
+    assert calls == []
+
+
+def test_no_usage_command_runs_while_the_alert_is_off(tray, monkeypatch):
+    app_instance, _server = tray
+    app_instance._cfg.stats.alert_command = "notify-send limit"
+    app_instance._cfg.stats.alert_enabled = False
+    calls = _capture_popen(monkeypatch)
+
+    app_instance._apply_results({"claude": _usage_result("claude", 99)})
+
+    assert calls == []
 
 
 def test_only_real_limit_rows_can_raise_a_usage_alert(tray, monkeypatch):

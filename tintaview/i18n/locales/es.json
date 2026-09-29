@@ -74,6 +74,7 @@
   "settings.usage_alert": "Avisarme antes de agotar un límite de uso",
   "settings.usage_alert.hint": "Una notificación (y el sonido de confirmación, si está activo) la primera vez que una ventana supera el umbral de abajo. Vuelve a activarse cuando esa ventana baja del umbral.",
   "settings.usage_alert.threshold": "Avisar al",
+  "settings.usage_alert.command.hint": "Se ejecuta en el intérprete de comandos una vez por cada vez que se supera el umbral, junto con la notificación. TINTAVIEW_STATUS (limit), TINTAVIEW_AGENTS, TINTAVIEW_LIMIT, TINTAVIEW_PCT y TINTAVIEW_MESSAGE están en su entorno; su salida y su código de salida se ignoran.",
   "settings.update_check": "Buscar actualizaciones al iniciar",
   "settings.language": "Idioma de la interfaz:",
   "settings.language.hint": "El asistente de configuración se mantiene en inglés, y las cifras que informa la API de cada agente conservan su redacción original.",

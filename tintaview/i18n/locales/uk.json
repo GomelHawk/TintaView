@@ -75,6 +75,7 @@
   "settings.usage_alert": "Попереджати до вичерпання ліміту",
   "settings.usage_alert.hint": "Сповіщення (і звук підтвердження, якщо він увімкнений) під час першого перевищення порога нижче. Воно знову готове, коли вікно опуститься нижче порога.",
   "settings.usage_alert.threshold": "Поріг",
+  "settings.usage_alert.command.hint": "Виконується через оболонку один раз під час кожного перевищення порога, разом зі сповіщенням. У середовище передаються TINTAVIEW_STATUS (limit), TINTAVIEW_AGENTS, TINTAVIEW_LIMIT, TINTAVIEW_PCT і TINTAVIEW_MESSAGE; вивід і код виходу ігноруються.",
   "settings.update_check": "Перевіряти оновлення під час запуску",
   "settings.language": "Мова інтерфейсу:",
   "settings.language.hint": "Майстер налаштування залишається англійською, а дані, які повертає API самого агента, зберігають початкові формулювання.",

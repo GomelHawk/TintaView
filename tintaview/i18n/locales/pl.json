@@ -75,6 +75,7 @@
   "settings.usage_alert": "Ostrzegaj przed wyczerpaniem limitu użycia",
   "settings.usage_alert.hint": "Powiadomienie (i dźwięk potwierdzenia, jeśli jest włączony) przy pierwszym przekroczeniu progu poniżej. Uzbraja się ponownie, gdy okno spadnie poniżej progu.",
   "settings.usage_alert.threshold": "Ostrzegaj przy",
+  "settings.usage_alert.command.hint": "Uruchamiane przez powłokę raz przy każdym przekroczeniu progu, razem z powiadomieniem. W środowisku ustawiane są TINTAVIEW_STATUS (limit), TINTAVIEW_AGENTS, TINTAVIEW_LIMIT, TINTAVIEW_PCT i TINTAVIEW_MESSAGE; wyjście i kod zakończenia są ignorowane.",
   "settings.update_check": "Sprawdzaj aktualizacje przy uruchomieniu",
   "settings.language": "Język interfejsu:",
   "settings.language.hint": "Kreator konfiguracji pozostaje w języku angielskim, a dane zwracane przez API danego agenta zachowują oryginalne brzmienie.",

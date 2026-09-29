@@ -880,6 +880,7 @@ def test_alerts_tab_writes_every_field_it_shows(qapp, tmp_path):
     dialog._escalate_command.setText("  ntfy publish phone 'agent waiting'  ")
     dialog._usage_alert_check.setChecked(True)
     dialog._usage_alert_spin.setValue(80)
+    dialog._usage_alert_command.setText("  notify-send limit  ")
     dialog._trend_check.setChecked(False)
 
     dialog._on_accept()
@@ -891,11 +892,13 @@ def test_alerts_tab_writes_every_field_it_shows(qapp, tmp_path):
     assert saved.escalation.command == "ntfy publish phone 'agent waiting'"
     assert saved.stats.alert_enabled is True
     assert saved.stats.alert_threshold == 80
+    assert saved.stats.alert_command == "notify-send limit"
     assert saved.stats.show_trend is False
     # ...and on disk, not just in memory.
     reloaded = config_mod.load(saved.path)
     assert reloaded.escalation.after_seconds == 120
     assert reloaded.stats.alert_threshold == 80
+    assert reloaded.stats.alert_command == "notify-send limit"
 
 
 def test_alerts_tab_never_clamps_a_hand_edited_value_on_open(qapp, tmp_path):

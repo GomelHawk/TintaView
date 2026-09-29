@@ -394,6 +394,15 @@ reading it. So TintaView turns every `"` in these variables into `'` there: insi
 text instead of running as commands of their own. Unquoted, they would not. (PowerShell's
 `$env:TINTAVIEW_DETAIL` is safe either way.)
 
+**Usage limits can run a command too.** The usage alert — the notification the first time a
+window crosses `stats.alert_threshold` (90 % by default) — takes a command of its own, set on
+the same **Alerts** tab. It is a separate setting, so a command set up for questions doesn't
+start firing for usage. It runs once per crossing, with the same variables: `TINTAVIEW_STATUS`
+is `limit`, `TINTAVIEW_MESSAGE` is the notification's sentence ("Claude Code: 5-hour limit is
+at 91%."), `TINTAVIEW_AGENTS` names the agent, `TINTAVIEW_LIMIT` the window and `TINTAVIEW_PCT`
+its percentage as a whole number; the question variables are set and empty. So the Telegram
+example above works unchanged in both places.
+
 ## Configuration
 
 One file: `~/.tintaview/config.toml` (Windows: `%LOCALAPPDATA%\TintaView\config.toml`),
@@ -427,6 +436,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `stats.show_trend` | `true` | Show a burn-rate line under an agent's rows — "At this pace, 5-hour limit empties in ~40 min." Only appears while a window is actually climbing and would run out *before* it resets, and needs ~15 minutes of history first. Also a tick box in **Settings…**. |
 | `stats.alert_enabled` | `true` | Notify (and chime, if `ui.chime_on_confirm` is on) the first time a usage window crosses `stats.alert_threshold`. Re-arms when that window drops back under it. Also a tick box in **Settings…** → **Alerts**. |
 | `stats.alert_threshold` | `90` | Percent of a window that triggers the alert above. |
+| `stats.alert_command` | *(none)* | Shell command run once each time the alert above fires — see [Reminders you can't miss](#reminders-you-cant-miss). `TINTAVIEW_STATUS` is `limit`; `TINTAVIEW_AGENTS`, `TINTAVIEW_LIMIT`, `TINTAVIEW_PCT` and `TINTAVIEW_MESSAGE` say which window crossed, and the question variables are empty. Output and exit code ignored, a failure logged. Also on the **Alerts** tab in **Settings…**. |
 | `stats.show_estimate` | `true` | Show the local token/cost estimate under each agent's official rows. Also a tick box in **Settings…**. Off skips the transcript scan entirely, not just the rows. |
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |

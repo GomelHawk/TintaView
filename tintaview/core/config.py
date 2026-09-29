@@ -262,6 +262,12 @@ class StatsConfig:
     #: drops back under the threshold (a reset, or a new week), never on a poll-to-poll
     #: wobble above it.
     alert_threshold: int = 90
+    #: Shell command run once per crossing, beside that alert — the usage twin of
+    #: `escalation.command`, and deliberately a field of its own: a command someone set
+    #: up for unanswered questions (a phone push) must not start firing for usage just
+    #: because they upgraded. Same contract otherwise: detached, output ignored, a
+    #: failure logged, never shown. See `TrayApp._run_usage_alert_command`.
+    alert_command: str = ""
 
 
 #: How many world clocks the flyout band holds. Four is what fits across a 380px card

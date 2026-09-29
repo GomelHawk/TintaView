@@ -74,6 +74,7 @@
   "settings.usage_alert": "Warn me before a usage limit runs out",
   "settings.usage_alert.hint": "A notification (and the confirmation sound, if it is on) the first time a window crosses the threshold below. It arms again once that window drops back under it.",
   "settings.usage_alert.threshold": "Warn at",
+  "settings.usage_alert.command.hint": "Run through the shell once per crossing, with the notification. TINTAVIEW_STATUS (limit), TINTAVIEW_AGENTS, TINTAVIEW_LIMIT, TINTAVIEW_PCT and TINTAVIEW_MESSAGE are set in its environment; its output and exit code are ignored.",
   "settings.update_check": "Check for updates on startup",
   "settings.language": "Interface language:",
   "settings.language.hint": "The setup wizard stays in English, and figures an agent's own API reports keep their original wording.",

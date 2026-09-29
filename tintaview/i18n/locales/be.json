@@ -75,6 +75,7 @@
   "settings.usage_alert": "Папярэджваць да вычарпання ліміту",
   "settings.usage_alert.hint": "Апавяшчэнне (і гук пацвярджэння, калі ён уключаны) пры першым перавышэнні парога ніжэй. Яно зноў гатова, калі акно апусціцца ніжэй парога.",
   "settings.usage_alert.threshold": "Парог",
+  "settings.usage_alert.command.hint": "Выконваецца праз абалонку адзін раз пры кожным перавышэнні парога, разам з апавяшчэннем. У асяроддзе перадаюцца TINTAVIEW_STATUS (limit), TINTAVIEW_AGENTS, TINTAVIEW_LIMIT, TINTAVIEW_PCT і TINTAVIEW_MESSAGE; вывад і код выхаду ігнаруюцца.",
   "settings.update_check": "Правяраць абнаўленні пры запуску",
   "settings.language": "Мова інтэрфейсу:",
   "settings.language.hint": "Чараўнік наладкі застаецца па-англійску, а даныя, якія вяртае API самога агента, зберагаюць пачатковыя формулюроўкі.",

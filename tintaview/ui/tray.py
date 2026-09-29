@@ -512,6 +512,7 @@ class TrayApp(QtCore.QObject):
             self._usage_alerted.clear()
         self._cfg.stats.alert_enabled = new_cfg.stats.alert_enabled
         self._cfg.stats.alert_threshold = new_cfg.stats.alert_threshold
+        self._cfg.stats.alert_command = new_cfg.stats.alert_command
         # Escalation is read by `_track_confirm` off the state poll, so these take effect
         # on the next tick — including mid-confirm, which is the point: someone who opens
         # Settings *because* the nagging is too frequent must not have to wait for the
@@ -1005,16 +1006,25 @@ class TrayApp(QtCore.QObject):
         command = self._cfg.escalation.command.strip()
         if not command:
             return
-        env = dict(os.environ)
-        env["TINTAVIEW_STATUS"] = "confirm"
-        env["TINTAVIEW_AGENTS"] = ", ".join(waiting)
-        # Everything below comes, in the end, from what an agent wrote — see `_cmd_safe`.
+        # Everything but the first two comes, in the end, from what an agent wrote — see
+        # `_cmd_safe`.
         asking = asking or {}
-        env["TINTAVIEW_QUESTION"] = _cmd_safe(question)
-        env["TINTAVIEW_MESSAGE"] = _cmd_safe(message)
-        env["TINTAVIEW_DETAIL"] = _cmd_safe(str(asking.get("detail") or ""))
-        env["TINTAVIEW_TOOL"] = _cmd_safe(str(asking.get("request_tool") or ""))
-        env["TINTAVIEW_CWD"] = _cmd_safe(str(asking.get("cwd") or ""))
+        self._spawn_user_command(command, {
+            "TINTAVIEW_STATUS": "confirm",
+            "TINTAVIEW_AGENTS": ", ".join(waiting),
+            "TINTAVIEW_QUESTION": _cmd_safe(question),
+            "TINTAVIEW_MESSAGE": _cmd_safe(message),
+            "TINTAVIEW_DETAIL": _cmd_safe(str(asking.get("detail") or "")),
+            "TINTAVIEW_TOOL": _cmd_safe(str(asking.get("request_tool") or "")),
+            "TINTAVIEW_CWD": _cmd_safe(str(asking.get("cwd") or "")),
+        })
+
+    @staticmethod
+    def _spawn_user_command(command: str, variables: dict[str, str]) -> None:
+        """Start one of the user's own commands, detached, with ``variables`` added to
+        the environment, and never wait for it or report on it."""
+        env = dict(os.environ)
+        env.update(variables)
         try:
             kwargs: dict[str, Any] = {}
             if sys.platform == "win32":
@@ -1029,7 +1039,7 @@ class TrayApp(QtCore.QObject):
         except Exception:
             # A broken command is the user's to fix, and telling them about it in a
             # modal at 2am is worse than the log line they can find when they look.
-            log.exception("escalation command failed to start: %r", command)
+            log.exception("user command failed to start: %r", command)
 
     def _chime(self) -> None:
         if not self._cfg.ui.chime_on_confirm:
@@ -1087,13 +1097,37 @@ class TrayApp(QtCore.QObject):
                     continue
                 self._usage_alerted.add(latch)
                 self._chime()
+                message = t("tray.usage_alert.balloon_body",
+                            agent=_agent_label(key), label=row.label, pct=int(row.pct))
                 self.tray.showMessage(
-                    "TintaView",
-                    t("tray.usage_alert.balloon_body",
-                      agent=_agent_label(key), label=row.label, pct=int(row.pct)),
-                    QtWidgets.QSystemTrayIcon.Warning,
-                    10000,
+                    "TintaView", message, QtWidgets.QSystemTrayIcon.Warning, 10000,
                 )
+                self._run_usage_alert_command(_agent_label(key), row.label, int(row.pct),
+                                              message)
+
+    def _run_usage_alert_command(self, agent: str, label: str, pct: int,
+                                 message: str) -> None:
+        """`stats.alert_command`, once per crossing — the same latch as the balloon.
+
+        The same environment as the confirm command, so one script can serve both and
+        tell them apart by `TINTAVIEW_STATUS` (``limit`` here): every confirm-only
+        variable is present and empty, and `TINTAVIEW_LIMIT` (the row's label, as the
+        flyout shows it) and `TINTAVIEW_PCT` (a whole number) are added.
+        """
+        command = self._cfg.stats.alert_command.strip()
+        if not command:
+            return
+        self._spawn_user_command(command, {
+            "TINTAVIEW_STATUS": "limit",
+            "TINTAVIEW_AGENTS": agent,
+            "TINTAVIEW_MESSAGE": _cmd_safe(message),
+            "TINTAVIEW_LIMIT": _cmd_safe(label),
+            "TINTAVIEW_PCT": str(pct),
+            "TINTAVIEW_QUESTION": "",
+            "TINTAVIEW_DETAIL": "",
+            "TINTAVIEW_TOOL": "",
+            "TINTAVIEW_CWD": "",
+        })
 
     def _reorder_results(self) -> None:
         """Re-key `_usage_results` into `cfg.enabled_agents` order.

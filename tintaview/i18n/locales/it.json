@@ -74,6 +74,7 @@
   "settings.usage_alert": "Avvisami prima che un limite d'uso si esaurisca",
   "settings.usage_alert.hint": "Una notifica (e il suono di conferma, se attivo) la prima volta che una finestra supera la soglia sotto. Si riarma quando quella finestra torna sotto la soglia.",
   "settings.usage_alert.threshold": "Avvisa al",
+  "settings.usage_alert.command.hint": "Eseguito tramite shell una volta per ogni superamento, insieme alla notifica. TINTAVIEW_STATUS (limit), TINTAVIEW_AGENTS, TINTAVIEW_LIMIT, TINTAVIEW_PCT e TINTAVIEW_MESSAGE sono nel suo ambiente; output e codice di uscita vengono ignorati.",
   "settings.update_check": "Cerca aggiornamenti all'avvio",
   "settings.language": "Lingua dell'interfaccia:",
   "settings.language.hint": "La procedura di configurazione resta in inglese e i dati riportati dall'API di ogni agente conservano la formulazione originale.",
