@@ -36,7 +36,7 @@ import logging
 import threading
 from functools import cache, lru_cache
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..agents import base as agents_base
 from ..core import config as config_mod
@@ -67,12 +67,36 @@ _HINT_WIDTH = _MIN_WIDTH - 40
 _HOOK_CHECK_TIMEOUT_S = 5.0
 
 
+#: How far a hint's colour sits from the background towards the text colour.
+_HINT_TEXT_MIX = 0.6
+
+
+def _hint_color(palette: QtGui.QPalette) -> str:
+    """A muted text colour that is readable on the current theme, light or dark.
+
+    Not ``palette(mid)``: on Windows' dark theme `Mid` is ``#282828`` on a ``#1e1e1e``
+    window (measured), so every hint was effectively invisible. Blending the theme's own
+    text colour into its background gives a grey that keeps its distance on both.
+    """
+    fg = palette.color(QtGui.QPalette.ColorRole.WindowText)
+    bg = palette.color(QtGui.QPalette.ColorRole.Window)
+
+    def mix(a: int, b: int) -> int:
+        return round(b + (a - b) * _HINT_TEXT_MIX)
+
+    return QtGui.QColor(mix(fg.red(), bg.red()), mix(fg.green(), bg.green()),
+                        mix(fg.blue(), bg.blue())).name()
+
+
 def _hint(text: str) -> QtWidgets.QLabel:
-    """A small, greyed explanatory line, spanning the whole form width."""
+    """A small, muted explanatory line, spanning the whole form width."""
     label = QtWidgets.QLabel(text)
     label.setWordWrap(True)
-    label.setStyleSheet("color: palette(mid); font-size: 11px;")
-    label.setMinimumHeight(label.heightForWidth(_HINT_WIDTH))
+    label.setStyleSheet(f"color: {_hint_color(label.palette())}; font-size: 11px;")
+    # Exactly the height the text needs at the width it gets. A minimum alone let the
+    # layout hand it its (taller) size hint, computed for a narrower width, which left
+    # an empty band under every hint.
+    label.setFixedHeight(label.heightForWidth(_HINT_WIDTH))
     return label
 
 
@@ -582,13 +606,12 @@ class SettingsDialog(QtWidgets.QDialog):
         heading.setFont(font)
         heading.setWordWrap(True)
         outer.addWidget(heading)
-        outer.addWidget(_hint(t("settings.notify.hint")))
         notify_body = QtWidgets.QWidget()
         notify_form = QtWidgets.QFormLayout(notify_body)
         self._notify_command = QtWidgets.QLineEdit(self.result_cfg.notify.command)
         self._notify_command.setPlaceholderText(t("settings.escalate.command.placeholder"))
         notify_form.addRow(t("settings.escalate.command"), self._notify_command)
-        notify_form.addRow(_hint(t("settings.notify.command.hint")))
+        notify_form.addRow(_hint(t("settings.notify.hint")))
         outer.addWidget(notify_body)
 
         outer.addStretch(1)
