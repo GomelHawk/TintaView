@@ -199,6 +199,11 @@ class TrayApp(QtCore.QObject):
     #: QApplication from a non-GUI thread is not something Qt supports.
     quit_requested = QtCore.Signal()
 
+    #: Emitted from an HTTP worker thread with ``(agent, message, cwd)`` when an agent's
+    #: `notify_user` MCP call reaches `POST /v1/notify` (`StatusServer.on_notify`). A
+    #: signal for the same reason as the two above: a balloon is a GUI call.
+    notify_requested = QtCore.Signal(str, str, str)
+
     def __init__(self, cfg: Config, server: Any, app: QtWidgets.QApplication) -> None:
         super().__init__()
         self._cfg = cfg
@@ -274,6 +279,9 @@ class TrayApp(QtCore.QObject):
         self.quit_requested.connect(self._on_quit_requested)
         with contextlib.suppress(AttributeError):
             server.on_quit = self.quit_requested.emit
+        self.notify_requested.connect(self._on_notify_requested)
+        with contextlib.suppress(AttributeError):
+            server.on_notify = self.notify_requested.emit
 
         self.flyout = Flyout(
             collapsed=cfg.ui.collapsed_agents,
@@ -425,6 +433,31 @@ class TrayApp(QtCore.QObject):
             self.flyout.set_results(self._usage_results)
         self._show_flyout_near_cursor()
 
+    def _on_notify_requested(self, agent: str, message: str, cwd: str) -> None:
+        """An agent asked, through the MCP `notify_user` tool, to tell the user something.
+
+        A balloon titled with the agent's name, always — the user asked for this one, so
+        unlike a confirm it needs no reminder schedule and no chime — and
+        `notify.command`, once, for the channel the user actually wanted ("via phone").
+        """
+        label = _agent_label(agent)
+        self.tray.showMessage(label, message, QtWidgets.QSystemTrayIcon.Information, 10000)
+        command = self._cfg.notify.command.strip()
+        if not command:
+            return
+        # The same variables as the other two commands, so one script serves all three
+        # and tells them apart by `TINTAVIEW_STATUS` (``notify`` here). The message and
+        # the directory come from the agent — see `_cmd_safe`.
+        self._spawn_user_command(command, {
+            "TINTAVIEW_STATUS": "notify",
+            "TINTAVIEW_AGENTS": label,
+            "TINTAVIEW_MESSAGE": _cmd_safe(message),
+            "TINTAVIEW_CWD": _cmd_safe(cwd),
+            "TINTAVIEW_QUESTION": "",
+            "TINTAVIEW_DETAIL": "",
+            "TINTAVIEW_TOOL": "",
+        })
+
     def _set_sound(self, on: bool) -> None:
         self._cfg.ui.chime_on_confirm = on
         try:
@@ -520,6 +553,8 @@ class TrayApp(QtCore.QObject):
         self._cfg.escalation.enabled = new_cfg.escalation.enabled
         self._cfg.escalation.after_seconds = new_cfg.escalation.after_seconds
         self._cfg.escalation.command = new_cfg.escalation.command
+        # Read by `_on_notify_requested` when the next message arrives.
+        self._cfg.notify.command = new_cfg.notify.command
         self._cfg.update.check = new_cfg.update.check
         # The flyout holds this very `Config`, so the band picks these up on its next
         # paint — which the `set_results` call further down schedules, along with the

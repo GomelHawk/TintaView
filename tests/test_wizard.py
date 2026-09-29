@@ -17,6 +17,7 @@ touch a real `~/.claude`, `~/.codex` or `~/.cursor`.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -133,6 +134,7 @@ def test_writes_config_matching_answers(monkeypatch, _isolated):
         "",          # install path: accept default
         "n",         # autostart: no
         "y",         # hooks: apply the diff for claude
+        "y",         # notify tool: register it for claude
         "n",         # verify: skip the live check
     ])
 
@@ -149,14 +151,22 @@ def test_writes_config_matching_answers(monkeypatch, _isolated):
     assert hook_bin.exists()
     assert hook_bin.stat().st_mode & 0o111  # executable
 
+    # The notify step's "y": Claude's MCP server list and its permission allow-list.
+    from tintaview.install import mcp as mcp_install
+
+    state = json.loads((home / ".claude.json").read_text())
+    assert state["mcpServers"]["tintaview"]["args"] == ["-m", "tintaview.core.mcp", "claude"]
+    assert mcp_install.CLAUDE_ALLOW_RULE in json.loads(settings.read_text())["permissions"]["allow"]
+
 
 def test_rerun_keeps_current_engine_as_default(monkeypatch, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "", "openrgb", "", "n", "y", "n"])  # leading "" = keep English
+    _feed(monkeypatch, ["", "", "", "openrgb", "", "n", "y", "y", "n"])  # leading "" = keep English
     assert wizard.run_wizard() == 0
 
     # Reconfigure: blank answer on the engine question should keep "openrgb", not fall
-    # back to whatever auto-detection would otherwise suggest.
+    # back to whatever auto-detection would otherwise suggest. (No notify-tool answer:
+    # it is already registered, so that step asks nothing.)
     _feed(monkeypatch, ["", "", "", "", "", "n", "y", "n"])
     assert wizard.run_wizard() == 0
 
@@ -179,6 +189,7 @@ def test_agent_numbers_are_a_selection_not_a_toggle(monkeypatch, capsys, _isolat
         "",   # install path: accept default
         "n",  # autostart: no
         "y",  # hooks: apply
+        "y",  # notify tool: register
         "n",  # verify: skip
     ])
 
@@ -194,7 +205,7 @@ def test_language_step_writes_the_choice(monkeypatch, _isolated):
 
     home, tv_home = _isolated
     try:
-        _feed(monkeypatch, ["ru", "", "", "", "", "n", "y", "n"])  # answered by key
+        _feed(monkeypatch, ["ru", "", "", "", "", "n", "y", "y", "n"])  # answered by key
         assert wizard.run_wizard() == 0
         assert config_mod.load(tv_home / "config.toml").ui.language == "ru"
     finally:
@@ -209,7 +220,7 @@ def test_language_step_keeps_the_configured_language_on_enter(monkeypatch, _isol
     cfg.ui.language = "pl"
     config_mod.save(cfg, tv_home / "config.toml")
     try:
-        _feed(monkeypatch, ["", "", "", "", "", "n", "y", "n"])
+        _feed(monkeypatch, ["", "", "", "", "", "n", "y", "y", "n"])
         assert wizard.run_wizard() == 0
         assert config_mod.load(tv_home / "config.toml").ui.language == "pl"
     finally:
@@ -286,7 +297,8 @@ def test_choice_reprompts_on_an_out_of_range_number(monkeypatch, capsys):
 
 def test_hook_diff_shown_but_not_applied_when_declined(monkeypatch, capsys, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "", "", "", "n", "n", "n"])  # first "n" declines the hook diff
+    # Declines the hook diff, then the notify tool.
+    _feed(monkeypatch, ["", "", "", "", "", "n", "n", "n", "n"])
 
     assert wizard.run_wizard() == 0
 
@@ -294,11 +306,12 @@ def test_hook_diff_shown_but_not_applied_when_declined(monkeypatch, capsys, _iso
     assert HOOK_SENTINEL in out  # the diff was shown...
     assert "Skipped" in out
     assert not _claude_settings(home).exists()  # ...but never written
+    assert not (home / ".claude.json").exists()  # nor the notify tool, declined too
 
 
 def test_hook_diff_shown_and_applied_when_accepted(monkeypatch, capsys, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "", "", "", "n", "y", "n"])
+    _feed(monkeypatch, ["", "", "", "", "", "n", "y", "y", "n"])
 
     assert wizard.run_wizard() == 0
 
@@ -816,7 +829,7 @@ def test_ghub_ready_says_so_and_asks_nothing(monkeypatch, capsys):
 
 def test_engine_step_can_pick_ghub(monkeypatch, capsys, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "", "ghub", "", "n", "y", "n"])  # typed by key, not position
+    _feed(monkeypatch, ["", "", "", "ghub", "", "n", "y", "y", "n"])  # typed by key, not position
 
     assert wizard.run_wizard() == 0
 
@@ -845,6 +858,7 @@ def test_engine_step_offers_auto_and_defaults_to_it(monkeypatch, capsys, _isolat
         "",   # install path
         "n",  # autostart
         "y",  # hooks
+        "y",  # notify tool
         "n",  # verify
     ])
 
@@ -855,7 +869,7 @@ def test_engine_step_offers_auto_and_defaults_to_it(monkeypatch, capsys, _isolat
 
 def test_engine_step_still_allows_pinning_one(monkeypatch, _isolated):
     home, tv_home = _isolated
-    _feed(monkeypatch, ["", "", "", "2", "", "n", "y", "n"])  # 2 = Razer Chroma
+    _feed(monkeypatch, ["", "", "", "2", "", "n", "y", "y", "n"])  # 2 = Razer Chroma
     assert wizard.run_wizard() == 0
     assert config_mod.load(tv_home / "config.toml").engine.mode == "chroma"
 
@@ -877,7 +891,7 @@ def test_unavailable_options_are_marked_but_still_selectable(monkeypatch, capsys
 
     # Typed by key, not position — inserting new engines must not silently renumber
     # what an existing test (or a copied instruction) types.
-    _feed(monkeypatch, ["", "", "", "openrgb", "", "n", "y", "n"])  # leading "" = keep English
+    _feed(monkeypatch, ["", "", "", "openrgb", "", "n", "y", "y", "n"])  # leading "" = keep English
     assert wizard.run_wizard() == 0
 
     out = capsys.readouterr().out

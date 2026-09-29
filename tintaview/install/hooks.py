@@ -25,6 +25,7 @@ import difflib
 import json
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -300,6 +301,10 @@ def _backup(path: Path) -> Path | None:
     stamp = _dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     dest = path.with_name(path.name + BACKUP_SUFFIX + stamp)
     dest.write_bytes(path.read_bytes())
+    # The original's permissions, not the umask's: `~/.claude.json` is 0600, and a
+    # world-readable copy of it next to it would undo that.
+    with contextlib.suppress(OSError):
+        shutil.copymode(path, dest)
     _prune_backups(path)
     return dest
 
@@ -323,6 +328,9 @@ def apply(plan: HookPlan) -> Path | None:
     backup = _backup(plan.path)
     tmp = plan.path.with_name(plan.path.name + ".tintaview-tmp")
     tmp.write_text(plan.after, encoding="utf-8")
+    if backup is not None:  # the file existed: keep its mode across the rename
+        with contextlib.suppress(OSError):
+            shutil.copymode(backup, tmp)
     os.replace(tmp, plan.path)
     log.info("hooks %s: %s (backup: %s)", plan.action, plan.path, backup)
     return backup

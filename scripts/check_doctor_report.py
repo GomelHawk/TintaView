@@ -17,7 +17,8 @@ import sys
 #: Every section a working install must have reported on. `ENGINE` and `STATS` are
 #: deliberately absent: a CI runner has no lighting hardware and no signed-in agent, so
 #: both are expected to warn.
-REQUIRED_SECTIONS = {"ENVIRONMENT", "CONFIG", "DAEMON", "HOOK SCRIPT", "AGENT HOOKS"}
+REQUIRED_SECTIONS = {"ENVIRONMENT", "CONFIG", "DAEMON", "HOOK SCRIPT", "AGENT HOOKS",
+                     "NOTIFY TOOL"}
 
 
 def main(path: str) -> int:

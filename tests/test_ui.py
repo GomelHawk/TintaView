@@ -1005,6 +1005,7 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
             "escalation.enabled": False,
             "escalation.after_seconds": 120,
             "escalation.command": "notify-send hi",
+            "notify.command": "notify-send done",
             "update.check": False,
             "engine.mode": "openrgb",
             "colors.idle": "#010203",
@@ -1029,6 +1030,7 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     assert cfg.escalation.enabled is False
     assert cfg.escalation.after_seconds == 120
     assert cfg.escalation.command == "notify-send hi"
+    assert cfg.notify.command == "notify-send done"
     assert cfg.update.check is False
     assert cfg.engine.mode == "openrgb"
     assert cfg.colors.idle == "#010203"
@@ -2640,6 +2642,62 @@ def test_a_usage_alert_runs_the_users_command_once_per_crossing(tray, monkeypatc
     app_instance._apply_results({"claude": _usage_result("claude", 4)})
     app_instance._apply_results({"claude": _usage_result("claude", 92)})
     assert len(calls) == 2
+
+
+def test_an_agents_notification_balloons_and_runs_the_notify_command(tray, monkeypatch):
+    app_instance, server = tray
+    app_instance._cfg.notify.command = "  ntfy publish phone  "
+    calls: list[tuple] = []
+    monkeypatch.setattr(tray_mod.subprocess, "Popen",
+                        lambda command, **kwargs: calls.append((command, kwargs)))
+    balloons: list[tuple] = []
+    monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage",
+                        lambda self, title, message, *a, **k: balloons.append((title, message)))
+
+    # Through the callback `StatusServer.request_notify` calls, not the slot directly:
+    # the tray has to have registered itself, the same way as for `/show` and `/quit`.
+    # (Same thread here, so the signal is delivered synchronously.)
+    server.on_notify("codex", 'Build "green": 3 tests fixed', "/work/app")
+
+    assert balloons == [("Codex CLI", 'Build "green": 3 tests fixed')]
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == "ntfy publish phone"
+    env = kwargs["env"]
+    assert env["TINTAVIEW_STATUS"] == "notify"
+    assert env["TINTAVIEW_AGENTS"] == "Codex CLI"
+    assert env["TINTAVIEW_MESSAGE"] == tray_mod._cmd_safe('Build "green": 3 tests fixed')
+    assert env["TINTAVIEW_CWD"] == "/work/app"
+    for name in ("TINTAVIEW_QUESTION", "TINTAVIEW_DETAIL", "TINTAVIEW_TOOL"):
+        assert env[name] == "", name
+
+
+def test_an_agents_notification_without_a_command_only_balloons(tray, monkeypatch):
+    """Neither of the other two commands stands in for `notify.command`."""
+    app_instance, _server = tray
+    app_instance._cfg.escalation.command = "notify-send question"
+    app_instance._cfg.stats.alert_command = "notify-send limit"
+    calls = _capture_popen(monkeypatch)
+    balloons: list[tuple] = []
+    monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage",
+                        lambda self, *a, **k: balloons.append(a))
+
+    app_instance._on_notify_requested("claude", "done", "")
+
+    assert calls == []
+    assert len(balloons) == 1
+
+
+def test_every_notify_field_is_accounted_for():
+    """Same tripwire as for `StatsConfig`: a new `NotifyConfig` field has to be either
+    written by the dialog (and mirrored in `_apply_settings`) or config-file only."""
+    from dataclasses import fields
+
+    from tintaview.core.config import NotifyConfig
+
+    dialog_writes = {"command"}
+    config_file_only: set[str] = set()
+    assert {f.name for f in fields(NotifyConfig)} == dialog_writes | config_file_only
 
 
 def test_the_usage_command_is_not_the_confirm_command(tray, monkeypatch):

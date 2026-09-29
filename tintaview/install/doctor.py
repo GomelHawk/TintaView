@@ -15,6 +15,7 @@ failure (bad config) doesn't get buried under a wall of downstream noise caused 
     4. ENGINE        — which lighting backends probe OK, and why the others don't
     5. HOOK SCRIPT   — tv-hook + hook.env, the "silent killer" if they drift
     6. AGENT HOOKS   — per-agent install status (+ Codex's feature flag)
+    6b. NOTIFY TOOL  — the notify_user MCP server, registered per agent (optional)
     7. STATS         — can each agent's usage provider produce rows
     8. LIVE HOOK TEST (--verbose only) — an interactive, best-effort real-event check
     9. PAINT (--paint only) — open the configured engine, cycle colours, ask "did you see it?"
@@ -632,6 +633,96 @@ def _check_agent_hooks(
             _check_codex_flag(reporter, cfg, adapter)
 
 
+# --------------------------------------------------------------------------- 6b. notify tool
+
+
+def _check_notify_tool(
+    reporter: _Reporter, cfg: Config, env: Environment, split_home: object = _UNRESOLVED
+) -> None:
+    """Is TintaView's MCP server (`core/mcp.py`) registered with each enabled agent?
+
+    Optional, so a missing registration is a WARN, never a FAIL: plenty of people will
+    decline it in the wizard. What *is* a FAIL is a registration whose interpreter is
+    gone — the agent then reports a broken MCP server at the start of every session.
+
+    Resolved the same way the wizard wrote it: the agent's configured home (the distro's
+    UNC path in a WSL split), and in a split the Windows interpreter as the distro names
+    it. A distro that can't be reached reports nothing, as for the hooks.
+    """
+    from ..agents import base as agents_base
+    from . import hooks as hooks_mod
+    from . import mcp as mcp_install
+
+    keys = [k for k in cfg.enabled_agents if k in mcp_install.SUPPORTED]
+    if not keys:
+        return
+    if split_home is _UNRESOLVED:
+        split_home = _wsl_split_home(env)
+    from .detect import MODE_WSL_SPLIT
+
+    split = env.mode == MODE_WSL_SPLIT and bool(env.is_windows_side)
+    if split and split_home is None:
+        return  # distro unreachable: unknown is not missing
+    try:
+        python = (mcp_install.wsl_python(env.distro) if split
+                  else mcp_install.console_python())
+    except Exception as exc:  # noqa: BLE001 - a wsl.exe hiccup must not sink the report
+        log.info("notify tool: could not resolve the interpreter: %r", exc)
+        return
+    # `hooks install` registers it natively; only the wizard reaches into a distro.
+    fix_cmd = "tintaview setup" if split else "tintaview hooks install --agent {key}"
+
+    for key in keys:
+        adapter = agents_base.get(key)
+        if adapter is None:
+            continue
+        name = adapter.display_name
+        home = mcp_install.agent_home(cfg, adapter)
+        path = mcp_install.config_paths(key, home)[0]
+        fix = fix_cmd.format(key=key)
+        try:
+            state = mcp_install.status(key, home, python)
+        except Exception as exc:  # noqa: BLE001
+            reporter.warn("NOTIFY TOOL", f"{name}: could not check ({exc})",
+                          f"run `{fix}` to register it again")
+            continue
+        if state == hooks_mod.STATUS_INSTALLED:
+            reporter.ok("NOTIFY TOOL", f"{name}: registered ({path})")
+        elif state == hooks_mod.STATUS_MISSING:
+            reporter.warn(
+                "NOTIFY TOOL", f"{name}: not registered — agents can't notify you",
+                f"optional: run `{fix}` so \"notify me when it's done\" works",
+            )
+        elif state == hooks_mod.STATUS_PARTIAL:
+            reporter.warn(
+                "NOTIFY TOOL", f"{name}: registered, but each call will ask for approval",
+                f"run `{fix}` to add the approval setting back",
+            )
+        elif state == hooks_mod.STATUS_UNREADABLE:
+            reporter.warn(
+                "NOTIFY TOOL", f"{name}: {path} could not be read or parsed",
+                "check the file's permissions and that it is valid — nothing is "
+                "registered or removed until it can be read",
+            )
+        else:  # stale-path
+            registered = mcp_install.registered_launcher(key, home) or {}
+            command = str(registered.get("command") or "")
+            # From a split's Windows side a `/mnt/c/...` path can't be tested, and the
+            # wizard wrote it from this very interpreter: a mismatch there is always an
+            # old install.
+            gone = split or not Path(command).exists()
+            if gone:
+                reporter.fail(
+                    "NOTIFY TOOL", f"{name}: registered for a Python that no longer "
+                    f"exists ({command})", f"run `{fix}` to point it at {python}",
+                )
+            else:
+                reporter.warn(
+                    "NOTIFY TOOL", f"{name}: registered for another TintaView ({command})",
+                    f"run `{fix}` to point it at this one ({python})",
+                )
+
+
 # --------------------------------------------------------------------------- 7. stats
 
 
@@ -840,6 +931,7 @@ def run_doctor(verbose: bool = False, paint: bool = False,
     split_home = _wsl_split_home(env)
     _check_hook_script(reporter, cfg, env, split_home)
     _check_agent_hooks(reporter, cfg, env, split_home)
+    _check_notify_tool(reporter, cfg, env, split_home)
     _check_stats(reporter, cfg)
     if verbose:
         _live_hook_test(reporter, cfg, daemon_ok, interactive)

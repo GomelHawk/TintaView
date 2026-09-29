@@ -504,8 +504,8 @@ class SettingsDialog(QtWidgets.QDialog):
     # --- Alerts tab ----------------------------------------------------------
 
     def _build_alerts_tab(self) -> QtWidgets.QWidget:
-        """The two things TintaView says out loud on its own: an unanswered confirm, and
-        a usage window about to run out.
+        """The things TintaView says out loud: an unanswered confirm, a usage window about
+        to run out, and a message an agent was asked to send (`notify.command`).
 
         Their own tab rather than three more rows on General, because both are
         "interrupt me when…" settings with a threshold and a switch each, and General is
@@ -568,6 +568,28 @@ class SettingsDialog(QtWidgets.QDialog):
         outer.addWidget(alert_body)
         self._usage_alert_check.toggled.connect(alert_body.setEnabled)
         alert_body.setEnabled(stats.alert_enabled)
+
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        outer.addWidget(line)
+
+        # No tick box: the balloon is what the user asked the agent for, and an empty
+        # command already means "the balloon and nothing else".
+        heading = QtWidgets.QLabel(t("settings.notify"))
+        font = heading.font()
+        font.setBold(True)
+        heading.setFont(font)
+        heading.setWordWrap(True)
+        outer.addWidget(heading)
+        outer.addWidget(_hint(t("settings.notify.hint")))
+        notify_body = QtWidgets.QWidget()
+        notify_form = QtWidgets.QFormLayout(notify_body)
+        self._notify_command = QtWidgets.QLineEdit(self.result_cfg.notify.command)
+        self._notify_command.setPlaceholderText(t("settings.escalate.command.placeholder"))
+        notify_form.addRow(t("settings.escalate.command"), self._notify_command)
+        notify_form.addRow(_hint(t("settings.notify.command.hint")))
+        outer.addWidget(notify_body)
 
         outer.addStretch(1)
         return widget
@@ -787,6 +809,7 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.escalation.enabled = self._escalate_check.isChecked()
         cfg.escalation.after_seconds = self._escalate_spin.value()
         cfg.escalation.command = self._escalate_command.text().strip()
+        cfg.notify.command = self._notify_command.text().strip()
         cfg.update.check = self._update_check.isChecked()
         cfg.ui.clocks.enabled = self._clocks_check.isChecked()
         # Empty slots drop out, so the stored order is the on-screen order with no gaps.

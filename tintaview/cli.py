@@ -246,7 +246,45 @@ def _cmd_hooks(args: argparse.Namespace) -> int:
         if adapter.key == "codex":
             failures += _apply_codex_flag(adapter, args.yes)
 
+    # The notify tool's MCP registration rides along with the hooks, at user scope only
+    # (the agents register MCP servers per user): an uninstall that left it behind would
+    # point every new session at an interpreter that is about to be deleted.
+    if args.scope == "user" and not args.hook_bin:
+        for adapter in adapters:
+            failures += _apply_notify_tool(cfg, adapter, args.action, args.yes)
+
     return 1 if failures else 0
+
+
+def _apply_notify_tool(cfg, adapter, action: str, assume_yes: bool) -> int:
+    """Register (or remove) the notify tool for one agent. Returns 1 on failure, else 0."""
+    from .install import hooks as hooks_mod
+    from .install import mcp as mcp_install
+
+    if adapter.key not in mcp_install.SUPPORTED:
+        return 0
+    home = mcp_install.agent_home(cfg, adapter)
+    try:
+        plans = (mcp_install.plan_install(adapter.key, home, mcp_install.console_python())
+                 if action == "install" else mcp_install.plan_uninstall(adapter.key, home))
+    except (OSError, ValueError) as exc:
+        print(f"{adapter.display_name}: notify tool: {exc}", file=sys.stderr)
+        return 1
+    pending = [p for p in plans if p.changes]
+    if not pending:
+        return 0
+    print(f"\n=== {adapter.display_name} — notify tool (MCP) ===")
+    for plan in pending:
+        for note in plan.notes:
+            print(f"  note: {note}")
+        print(plan.diff)
+    if not (assume_yes or _confirm("Apply these changes?")):
+        print("  skipped.")
+        return 0
+    for plan in pending:
+        backup = hooks_mod.apply(plan)
+        print(f"  written: {plan.path}" + (f" (backup: {backup})" if backup else ""))
+    return 0
 
 
 def _apply_codex_flag(adapter, assume_yes: bool) -> int:

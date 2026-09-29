@@ -173,7 +173,7 @@ Wizard (Terminal)…**, and **Run diagnostics** in the tray menu runs `doctor`.
 
 ## What the wizard asks
 
-`tintaview setup` runs the same eight-step flow whether it's launched by `install.ps1`,
+`tintaview setup` runs the same nine-step flow whether it's launched by `install.ps1`,
 by `install.sh`, or by hand:
 
 1. **Language** — which language the tray and usage panel speak (see
@@ -195,7 +195,9 @@ by `install.sh`, or by hand:
    an XDG autostart entry (Linux), or a launchd agent (macOS). No admin, no Scheduled Task.
 7. **Hooks** — for each agent, shows the exact before/after diff of the config file
    it's about to write and asks for confirmation before touching anything.
-8. **Verify** — saves the config, installs the hook script, then optionally waits
+8. **Notify tool** — registers TintaView's `notify_user` tool with each agent, the same
+   way: a diff, then a confirmation (see [Notify me when it's done](#notify-me-when-its-done)).
+9. **Verify** — saves the config, installs the hook script, then optionally waits
    (about a minute) for a real event from your agent so you know it actually worked.
 
 Answer every question with its default and skip the prompts entirely with
@@ -416,6 +418,44 @@ at 91%."), `TINTAVIEW_AGENTS` names the agent, `TINTAVIEW_LIMIT` the window and 
 its percentage as a whole number; the question variables are set and empty. So the Telegram
 example above works unchanged in both places.
 
+## Notify me when it's done
+
+Start a long task and add *"notify me via phone when it's done"* — nothing else. Claude Code,
+Codex and Cursor each see a `notify_user` tool from TintaView in every session, and call it
+when the task finishes with a sentence of their own ("Migration finished: 142 tables, no
+errors."). The tray shows it as a notification, and **Settings… → Alerts → When an agent
+notifies me** takes a command for everything past the desktop — the Telegram one above works
+as it is, with `TINTAVIEW_MESSAGE` holding the agent's sentence. The command and any token in
+it stay in TintaView's config; the agent only ever sends the text.
+
+| Variable | Holds |
+| --- | --- |
+| `TINTAVIEW_MESSAGE` | What the agent wrote, on one line (lines joined with ` ⏎ `), at most 1000 characters. |
+| `TINTAVIEW_AGENTS` | Who sent it: "Codex CLI". |
+| `TINTAVIEW_CWD` | The agent's working directory, i.e. which project it is about. |
+| `TINTAVIEW_STATUS` | Always `notify` — so one script can serve all three commands. |
+
+The question variables are set and empty, and on Windows `"` becomes `'`, as for the other
+commands.
+
+The tool is an [MCP](https://modelcontextprotocol.io) server that ships with TintaView
+(`python -m tintaview.core.mcp`); the setup wizard registers it after the hooks, with a diff of
+each file and a confirmation per agent:
+
+| Agent | What the wizard adds |
+| --- | --- |
+| Claude Code | `mcpServers.tintaview` in `~/.claude.json`, and `mcp__tintaview__notify_user` in `permissions.allow` of `~/.claude/settings.json` |
+| Codex CLI | `[mcp_servers.tintaview]` in `~/.codex/config.toml`, with `approval_mode = "approve"` for the tool |
+| Cursor | `mcpServers.tintaview` in `~/.cursor/mcp.json` |
+
+The permission entries are there because the call comes at the end of a long task, when
+nobody may be around to approve it. Cursor keeps its approval setting in its own UI, so it
+may ask the first time. New sessions pick the tool up; one already open doesn't.
+
+It needs the tray: a headless TintaView has nothing to show the message with, and the tool
+tells the agent so — as it does when TintaView isn't running at all — so the agent can say
+the notification didn't go out rather than claim it did.
+
 ## Configuration
 
 One file: `~/.tintaview/config.toml` (Windows: `%LOCALAPPDATA%\TintaView\config.toml`),
@@ -459,6 +499,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `escalation.enabled` | `true` | Keep reminding you while an agent waits for confirmation: the chime repeats (if `ui.chime_on_confirm` is on) and a notification appears every `escalation.after_seconds`, until you answer. A single chime is missed by anyone who walked away. Also on the **Alerts** tab in **Settings…**. |
 | `escalation.after_seconds` | `60` | How long a confirmation must go unanswered before the first reminder, and the interval between reminders after that. |
 | `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. Its environment always has `TINTAVIEW_STATUS`, `TINTAVIEW_AGENTS`, `TINTAVIEW_MESSAGE` (a finished sentence with the start of the request), `TINTAVIEW_QUESTION`, `TINTAVIEW_DETAIL` (the whole request — command, file or every question — on one line), `TINTAVIEW_TOOL` and `TINTAVIEW_CWD`, even when empty; see [Reminders you can't miss](#reminders-you-cant-miss), including what that means for secrets. Its output and exit code are ignored, and a failure is logged rather than shown. |
+| `notify.command` | *(none)* | Shell command run once for every message an agent sends with the `notify_user` tool — see [Notify me when it's done](#notify-me-when-its-done). `TINTAVIEW_STATUS` is `notify`; `TINTAVIEW_MESSAGE`, `TINTAVIEW_AGENTS` and `TINTAVIEW_CWD` say what and who, and the question variables are empty. The tray notification appears either way. Output and exit code ignored, a failure logged. Also on the **Alerts** tab in **Settings…**. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
@@ -478,7 +519,7 @@ bare `tintaview` — see [After installing](#after-installing-either-way).
 | `tintaview run [--headless]` | Same as above; `--headless` runs the broker only, with no GUI. |
 | `tintaview setup [--platform P] [-y]` | Run the install/reconfigure wizard. `--platform` overrides platform detection; `-y` accepts every default. |
 | `tintaview doctor [-v] [--paint] [--json]` | Diagnose an install — see [Troubleshooting](docs/TROUBLESHOOTING.md). `-v` also offers a live 30-second hook test. `--paint` cycles the lighting engine through red/yellow/green and asks whether you saw it. `--json` prints the same checks as one JSON document (and never prompts) — the thing to attach to a bug report. |
-| `tintaview hooks {install,status,uninstall} [--agent A] [--scope user\|project] [--hook-bin PATH] [--all-agents] [-y]` | Manage one agent's (or all agents') hook configuration, with a diff-and-confirm flow. |
+| `tintaview hooks {install,status,uninstall} [--agent A] [--scope user\|project] [--hook-bin PATH] [--all-agents] [-y]` | Manage one agent's (or all agents') hook configuration, with a diff-and-confirm flow. `install` and `uninstall` also register or remove the [notify tool](#notify-me-when-its-done) (user scope only, and not with `--hook-bin`). |
 | `tintaview update [--check-only]` | Check for, and install, a newer version. |
 | `tintaview --version` | Print the installed version. |
 
@@ -537,9 +578,9 @@ broken.
   your config, usage cache and logs under `%LOCALAPPDATA%\TintaView` are left in place.
 - **Linux / macOS** — `sh packaging/install.sh --uninstall`. Same behaviour: the
   autostart entry and install prefix are removed, `~/.tintaview` is left alone.
-- **Either way**, to also remove the hook entries TintaView installed into your agents'
-  own config files, run this first (needs a working install, so do it *before*
-  uninstalling, or reinstall to run it):
+- **Either way**, to also remove the hook entries and the notify tool TintaView installed
+  into your agents' own config files, run this first (needs a working install, so do it
+  *before* uninstalling, or reinstall to run it):
 
   ```sh
   tintaview hooks uninstall --agent all
@@ -547,7 +588,9 @@ broken.
 
   Leaving them in place is harmless — an agent calling a hook with nothing listening on
   the other end fails silently and always exits 0 — but they'll keep showing up in
-  `tintaview hooks status` output on any other machine that shares the config.
+  `tintaview hooks status` output on any other machine that shares the config. The
+  notify tool is noisier: with the program gone, agents report that the `tintaview` MCP
+  server failed to start.
 
 ## Contributing
 

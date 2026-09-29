@@ -7,6 +7,8 @@ real failure mode, not as defensive habit; don't "simplify" them away.
 Routes (all GET, loopback only — see AGENTS.md, "Core contracts"):
 
     /v1/event/{event}?agent=&sid=&tool=   hook ingress
+    POST /v1/notify?agent=                a message an agent asked to send the user
+                                          (the MCP server's `notify_user`, `core/mcp.py`)
     /{session-start,session-end,working,idle,confirm}?sid=
                                           agent-less aliases, agent defaults to claude
     /state                                read-only status for the tray and `doctor`
@@ -45,7 +47,7 @@ from .events import (
     TOOL_START,
     WORKING,
 )
-from .request import MAX_BODY_BYTES, MAX_QUESTION_CHARS, HookRequest, clean_id
+from .request import MAX_BODY_BYTES, MAX_QUESTION_CHARS, HookRequest, clean, clean_id
 from .request import parse as parse_request
 from .stalldetect import StallDetector
 from .state import StateStore
@@ -61,6 +63,14 @@ DEFAULT_AGENT = "claude"
 DEFAULT_SID = "default"
 
 _V1_PREFIX = "/v1/event/"
+
+#: Where `core/mcp.py` posts a `notify_user` call. A sibling of `/v1/event/`, not an
+#: event: it changes no session's status and never touches the lights.
+NOTIFY_PATH = "/v1/notify"
+
+#: Longest notification text kept. An agent summarising an hour of work can write a
+#: page; a phone push and a tray balloon both want a sentence or two.
+MAX_NOTIFY_CHARS = 1000
 
 #: How often `serve_forever` wakes to notice `shutdown()`. The stdlib default is 0.5 s,
 #: which every `stop()` — including one per test in tests/test_server.py — paid in full
@@ -170,6 +180,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _route_post(self) -> None:
         status_server: StatusServer = self.server.status_server  # type: ignore[attr-defined]
         parsed = urlparse(self.path)
+        if parsed.path == NOTIFY_PATH:
+            self._route_notify(status_server, parse_qs(parsed.query))
+            return
         if not parsed.path.startswith(_V1_PREFIX):
             self._send_json({"error": "not found"}, status=404)
             return
@@ -191,6 +204,31 @@ class _Handler(BaseHTTPRequestHandler):
         status_server.handle_event(event, agent, sid, _first(query, "tool", ""),
                                    request.question, request=request,
                                    actor=request.actor or clean_id(_first(query, "aid", "")))
+
+    def _route_notify(self, status_server: StatusServer, query: dict[str, list[str]]) -> None:
+        """``{"message": …, "cwd": …}`` from the MCP server, answered with whether anything
+        showed it.
+
+        Unlike a hook, the caller waits for this answer and relays it to the agent, so
+        the reply comes after the callback — which only emits a Qt signal, never I/O.
+        ``notified: false`` (headless, or a malformed body) is what lets the agent tell
+        the user the notification did not go out, instead of claiming it did.
+        """
+        try:
+            payload = json.loads(self._read_body() or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        if not isinstance(payload, dict):
+            self._send_json({"ok": False, "error": "body must be a JSON object"}, status=400)
+            return
+        message = clean(payload.get("message"), MAX_NOTIFY_CHARS)
+        if not message:
+            self._send_json({"ok": False, "error": "message is empty"}, status=400)
+            return
+        agent = clean_id(_first(query, "agent", "")) or DEFAULT_AGENT
+        cwd = clean(payload.get("cwd"), MAX_NOTIFY_CHARS)
+        self._send_json({"ok": True,
+                         "notified": status_server.request_notify(agent, message, cwd)})
 
     def _route(self) -> None:
         status_server: StatusServer = self.server.status_server  # type: ignore[attr-defined]
@@ -432,6 +470,11 @@ class StatusServer:
         #: as `/show` does. Also called on an HTTP worker thread.
         self.on_quit: Callable[[], None] | None = None
 
+        #: Set by the tray to its "an agent asked to notify the user" slot, called as
+        #: ``(agent, message, cwd)``. Left None headless, so `POST /v1/notify` answers
+        #: `notified: false` there. Called on an HTTP worker thread, like `on_show`.
+        self.on_notify: Callable[[str, str, str], None] | None = None
+
         #: Every `controller.apply()` goes through here — see `_StatusApplier`.
         self._applier = _StatusApplier(self.controller.apply)
 
@@ -648,6 +691,20 @@ class StatusServer:
             callback()
         except Exception:
             log.exception("on_quit callback failed")
+            return False
+        return True
+
+    def request_notify(self, agent: str, message: str, cwd: str = "") -> bool:
+        """Invoke the registered notify callback. Never raises — same contract as
+        `request_show()`."""
+        callback = self.on_notify
+        if callback is None:
+            log.info("notification from %s dropped: nothing registered to show it", agent)
+            return False
+        try:
+            callback(agent, message, cwd)
+        except Exception:
+            log.exception("on_notify callback failed")
             return False
         return True
 

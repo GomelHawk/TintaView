@@ -1007,3 +1007,168 @@ def test_json_never_prompts(monkeypatch, capsys):
     )
 
     D.run_doctor(verbose=True, as_json=True)
+
+
+# --------------------------------------------------------------------------- notify tool
+
+
+def _native_env():
+    from tintaview.install import detect as detect_mod
+
+    return detect_mod.Environment(platform=detect_mod.PLATFORM_LINUX,
+                                  mode=detect_mod.MODE_NATIVE)
+
+
+def _register(key: str, home: pathlib.Path, python: str, *, allow: bool = True) -> None:
+    from tintaview.install import mcp as mcp_install
+
+    plans = mcp_install.plan_install(key, home, python)
+    for plan in plans if allow else plans[:1]:
+        hooks_mod.apply(plan)
+
+
+def test_notify_tool_registered_is_ok(tmp_path, capsys):
+    from tintaview.install import mcp as mcp_install
+
+    cfg = _write_config(enabled_agents=["claude", "codex", "jetbrains"])
+    for key in ("claude", "codex"):
+        _register(key, agents_base.get(key).default_home(), mcp_install.console_python())
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, _native_env(), None)
+
+    out = capsys.readouterr().out
+    assert (reporter.fails, reporter.warns) == (0, 0), out
+    assert "Claude Code: registered" in out and "Codex CLI: registered" in out
+    assert "JetBrains" not in out  # stats-only: no agent to call a tool
+
+
+def test_notify_tool_missing_is_only_a_warning(capsys):
+    """Optional — declining it in the wizard must not turn `doctor` red."""
+    cfg = _write_config(enabled_agents=["cursor"])
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, _native_env(), None)
+
+    assert (reporter.fails, reporter.warns) == (0, 1)
+    out = capsys.readouterr().out
+    assert "not registered" in out and "tintaview hooks install --agent cursor" in out
+
+
+def test_notify_tool_without_its_approval_rule_warns(capsys):
+    from tintaview.install import mcp as mcp_install
+
+    cfg = _write_config(enabled_agents=["claude"])
+    _register("claude", agents_base.get("claude").default_home(),
+              mcp_install.console_python(), allow=False)
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, _native_env(), None)
+
+    assert (reporter.fails, reporter.warns) == (0, 1)
+    assert "will ask for approval" in capsys.readouterr().out
+
+
+def test_notify_tool_for_a_deleted_python_fails(tmp_path, capsys):
+    """The agent reports a broken MCP server every session — that one is a real fault."""
+    cfg = _write_config(enabled_agents=["codex"])
+    _register("codex", agents_base.get("codex").default_home(), str(tmp_path / "gone" / "python"))
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, _native_env(), None)
+
+    assert reporter.fails == 1
+    assert "no longer exists" in capsys.readouterr().out
+
+
+def test_notify_tool_for_another_existing_python_warns(tmp_path, capsys):
+    other = tmp_path / "other-venv" / "python"
+    other.parent.mkdir()
+    other.write_text("")
+    cfg = _write_config(enabled_agents=["cursor"])
+    _register("cursor", agents_base.get("cursor").default_home(), str(other))
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, _native_env(), None)
+
+    assert (reporter.fails, reporter.warns) == (0, 1)
+    assert "another TintaView" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_notify_tool_accepts_the_same_venv_python_spelled_differently(tmp_path, monkeypatch,
+                                                                      capsys):
+    """`bin/python` and `bin/python3` are one interpreter: the wizard and an autostarted
+    tray may each report a different one, and that must not read as stale."""
+    from tintaview.install import mcp as mcp_install
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").symlink_to(sys.executable)
+    (venv_bin / "python").symlink_to("python3")
+    cfg = _write_config(enabled_agents=["cursor"])
+    _register("cursor", agents_base.get("cursor").default_home(), str(venv_bin / "python"))
+    monkeypatch.setattr(mcp_install, "console_python", lambda: str(venv_bin / "python3"))
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, _native_env(), None)
+
+    assert (reporter.fails, reporter.warns) == (0, 0), capsys.readouterr().out
+
+
+def test_wsl_split_notify_tool_is_read_from_the_distro(tmp_path, monkeypatch, capsys):
+    """Against the distro's files and the Windows interpreter as the distro names it —
+    what the wizard wrote — never the Windows side's own home or `sys.executable`."""
+    from tintaview.install import mcp as mcp_install
+
+    unc_root, home, env = _fake_distro(tmp_path, monkeypatch)
+    distro_python = "/mnt/c/Users/dev/AppData/Local/TintaView/venv/Scripts/python.exe"
+    monkeypatch.setattr(mcp_install, "wsl_python", lambda distro: distro_python)
+    claude_home = unc_root / "home" / "dev" / ".claude"
+    claude_home.mkdir(parents=True)
+    _register("claude", claude_home, distro_python)
+    cfg = _write_config(enabled_agents=["claude"],
+                        agents={"claude": AgentConfig(home=str(claude_home))})
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, env, home)
+
+    out = capsys.readouterr().out
+    assert (reporter.fails, reporter.warns) == (0, 0), out
+    assert str(claude_home.parent / ".claude.json") in out
+
+
+def test_wsl_split_notify_tool_from_an_old_install_fails_and_points_at_setup(
+        tmp_path, monkeypatch, capsys):
+    from tintaview.install import mcp as mcp_install
+
+    unc_root, home, env = _fake_distro(tmp_path, monkeypatch)
+    monkeypatch.setattr(mcp_install, "wsl_python", lambda distro: "/mnt/c/new/python.exe")
+    claude_home = unc_root / "home" / "dev" / ".claude"
+    claude_home.mkdir(parents=True)
+    _register("claude", claude_home, "/mnt/c/old/python.exe")
+    cfg = _write_config(enabled_agents=["claude"],
+                        agents={"claude": AgentConfig(home=str(claude_home))})
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, env, home)
+
+    assert reporter.fails == 1
+    # `hooks install` only registers natively; the wizard is what reaches the distro.
+    assert "tintaview setup" in capsys.readouterr().out
+
+
+def test_wsl_split_notify_tool_reports_nothing_for_an_unreachable_distro(monkeypatch, capsys):
+    from tintaview.install import detect as detect_mod
+    from tintaview.install import mcp as mcp_install
+
+    env = detect_mod.Environment(platform=detect_mod.PLATFORM_WINDOWS,
+                                 mode=detect_mod.MODE_WSL_SPLIT, distro="Ubuntu")
+    monkeypatch.setattr(mcp_install, "wsl_python",
+                        lambda distro: pytest.fail("must not call wsl.exe again"))
+    cfg = _write_config(enabled_agents=["claude"])
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, env, None)
+
+    assert reporter.records == []

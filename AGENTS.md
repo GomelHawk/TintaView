@@ -106,6 +106,7 @@ ask what it did *not* cover.
 ```
 tintaview/
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
+             mcp.py                                      # the notify_user MCP server
   engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
   agents/    base.py  claude.py  codex.py  cursor.py     # hook manifest + paths per agent
   stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py
@@ -115,6 +116,7 @@ tintaview/
   ui/        tray.py  workers.py  dialogs.py  flyout.py  badges.py  wizard.py  icons.py  settings_dialog.py
   install/   detect.py  hooks.py  hookscript.py  codex_flag.py  autostart.py  wsl.py
              components.py  doctor.py  update.py  restart.py
+             mcp.py                                      # registers core/mcp.py per agent
              win_console.py  win_identity.py             # Windows-only tray startup bits
   hooks/     tv-hook.sh  tv-hook.cmd                     # shipped as package data
   assets/generated/  logo_full.png  tintaview.ico          # built by scripts/build_assets.py;
@@ -210,6 +212,7 @@ tool-start, tool-end`.
 | `GET` | `/v1/event/{event}?agent=&sid=&tool=` | Hook ingress |
 | `POST` | `/v1/event/{event}?agent=` | Hook ingress with the agent's whole payload as the body — what the shims send for `confirm` (see below). The session id comes from the body; a query `sid` is only a fallback |
 | `GET` | `/{session-start,session-end,working,idle,confirm}` | Agent-less aliases defaulting to `agent=claude`, so a hand-written one-line `curl` hook keeps working |
+| `POST` | `/v1/notify?agent=` | `{"message", "cwd"}` from the MCP server's `notify_user` call; answers `{"notified": bool}` — see [Notify tool](#notify-tool-mcp) |
 | `GET` | `/state` | Read-only status for the tray and `doctor` |
 | `GET` | `/healthz` | Liveness for `doctor` |
 | `GET` | `/show` | A second launch asks the running instance to surface its usage panel |
@@ -363,7 +366,7 @@ OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in p
 | | Config TintaView writes | Session start/end | Working | "Waiting for you" |
 | --- | --- | --- | --- | --- |
 | Claude Code | `~/.claude/settings.json` | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest`, plus `Notification` + matcher `permission_prompt` |
-| Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
+| Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag and the notify tool's `[mcp_servers.tintaview]`) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
 | Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`/`postToolUse`, `beforeShellExecution`/`afterShellExecution` | none → stall heuristic |
 
 A summary, not the contract: each adapter's `bindings()` is the source of truth, and two details
@@ -481,6 +484,54 @@ every caller reports **nothing**, because unknown is not missing.
 `tintaview` plugin could collapse install down to one `/plugin install`. It would only ever cover
 two of the three agents — Cursor has no plugin equivalent — so the merge-and-diff path above stays
 the primary route regardless, and a plugin would be an addition to it, never a replacement.
+
+### Notify tool (MCP)
+
+"Notify me via phone when it's done" works with no instruction to the agent because
+TintaView registers an MCP server, `python -m tintaview.core.mcp <agent>`, in each agent's
+own MCP config; every session lists its one tool, `notify_user`, and the model picks it by
+its description (`core/mcp.TOOL_DESCRIPTION` — that text *is* the feature, edit it with
+care). The server forwards a call to `POST /v1/notify`; the tray balloons it and runs
+`notify.command` (`TINTAVIEW_STATUS=notify`, `MESSAGE`, `AGENTS`, `CWD`; the question
+variables empty). The agent only ever sends text — the command and any token in it stay in
+`config.toml`. Rules:
+
+- **The launcher is a contract, like the `tv-hook` path.** The module path is baked into
+  every registered config, so `tintaview.core.mcp` never moves. The interpreter written is
+  `install.mcp.console_python()` — never `pythonw.exe`, which has no stdio. In a WSL split
+  it is the **Windows** `python.exe` under its `wslpath -u` path, started by the in-distro
+  agent through interop; loopback then reaches the Windows daemon, the same trick as
+  `curl.exe`. Measured: Windows Python launched that way gets working stdio and
+  `LOCALAPPDATA`, so it reads the Windows-side config for the port.
+- **Registration follows the hook merge's rules** (`install/mcp.py`, plans are `HookPlan`s
+  and go through `hooks.apply`): diff, one confirmation per agent, backup, atomic write,
+  idempotent, and only TintaView's own keys — `mcpServers.tintaview` (Claude's
+  `~/.claude.json`, Cursor's `~/.cursor/mcp.json`), `[mcp_servers.tintaview]` (Codex), and
+  the one Claude `permissions.allow` rule `mcp__tintaview__notify_user`. Uninstall
+  (`tintaview hooks uninstall`) removes exactly those and leaves a file byte-identical to
+  before (verified against real `~/.claude.json` and `~/.codex/config.toml`).
+- **The tool must not ask permission.** It is called when a long task ends, often to
+  someone who walked away, so Claude gets the allow rule and Codex
+  `tools.notify_user.approval_mode = "approve"`. Cursor's approval lives in its UI and is
+  not touched.
+- **`~/.claude.json` is Claude Code's live state file**, beside `~/.claude` rather than in
+  it (`claude_state_path`). It is re-serialised exactly as Claude writes it — 2-space,
+  `ensure_ascii=False`, no trailing newline — so the diff is only our lines, and
+  `hooks.apply` keeps each file's mode on both the backup and the rewrite: it is 0600.
+- **Never claim a notification went out.** `/v1/notify` answers `notified: false` when no
+  `on_notify` is registered (headless); the tool then returns `isError` with a sentence
+  telling the agent to tell the user instead, as it does when the daemon is unreachable.
+- **`doctor` has a `NOTIFY TOOL` section** (`_check_notify_tool`), resolved exactly as the
+  wizard writes it and silent for an unreachable distro. Not registered is a **WARN** —
+  it is optional — and only a registration whose interpreter is gone is a **FAIL**. One
+  venv Python answers to `python` and `python3`, so `install.mcp.same_python` matches
+  "same directory, same file", not the string. The CI smoke jobs require the section.
+- **Hand `wsl.exe` Windows paths with forward slashes.** It passes its arguments through
+  a shell that strips backslashes — measured: `wslpath -u C:\Users\…` received
+  `C:UsersdmitrAppData…`, which silently skipped the wizard's split registration until a
+  real `doctor` run showed no NOTIFY TOOL lines at all.
+- **`notify.command` is a Qt-dialog field only**, like the other two commands — the console
+  wizard registers the tool but has never edited `escalation.*`/`stats.*` commands.
 
 ### Cursor stall heuristic
 

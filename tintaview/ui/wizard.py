@@ -41,6 +41,7 @@ from ..i18n import LANGUAGES, set_language
 from ..i18n import normalize as normalize_language
 from ..install import codex_flag, detect
 from ..install import hooks as hooks_mod
+from ..install import mcp as mcp_install
 from ..install.detect import (
     MODE_WSL_SPLIT,
     PLATFORM_LINUX,
@@ -810,6 +811,70 @@ def _step_hooks(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> d
     return {"route": "native", "applied": _step_hooks_native(cfg, assume_yes)}
 
 
+# --------------------------------------------------------------------------- step 7b: notify tool
+
+
+def _step_notify_tool(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> None:
+    """Register TintaView's MCP server (the ``notify_user`` tool) with each enabled agent.
+
+    One confirmation per agent, covering every file that agent needs changed (Claude
+    has two), with the same show-the-diff flow as the hooks above. In a WSL split the
+    agents' files are reached over UNC, like the hooks, and the launcher written is this
+    Windows interpreter under its in-distro ``/mnt/c/...`` path.
+    """
+    keys = [k for k in cfg.enabled_agents if k in mcp_install.SUPPORTED]
+    if not keys:
+        return
+    print("\n=== Notify tool ===")
+    print("  Lets you tell an agent \"notify me when it's done\": it calls TintaView's")
+    print("  notify_user tool, which shows a notification and runs notify.command.")
+    split = env.platform == PLATFORM_WINDOWS and env.mode == MODE_WSL_SPLIT
+    try:
+        if split:
+            from ..install import wsl as wsl_mod
+
+            if not env.distro:
+                print("  No WSL distro selected — the notify tool was not registered.")
+                return
+            python = mcp_install.wsl_python(env.distro)
+            homes = wsl_mod.agent_homes_unc(env.distro)
+        else:
+            python = mcp_install.console_python()
+            homes = {}
+    except Exception as exc:  # noqa: BLE001 - a WSL hiccup must not end the wizard
+        print(f"  Couldn't work out how the agents should start it ({exc}) — skipped.")
+        return
+    for key in keys:
+        adapter = agents_base.get(key)
+        if adapter is None:
+            continue
+        home = Path(homes[key]) if key in homes else mcp_install.agent_home(cfg, adapter)
+        try:
+            plans = mcp_install.plan_install(key, home, python)
+        except (OSError, ValueError) as exc:
+            print(f"\n--- {adapter.display_name} ---\n  Could not read its config: {exc}")
+            continue
+        _confirm_and_apply_notify_tool(adapter.display_name, plans, assume_yes)
+
+
+def _confirm_and_apply_notify_tool(name: str, plans: list[hooks_mod.HookPlan],
+                                   assume_yes: bool) -> bool:
+    for plan in plans:
+        _show_hook_plan(plan)
+    pending = [p for p in plans if p.changes]
+    if not pending:
+        print(f"  {name}: already registered — nothing to change.")
+        return True
+    files = ", ".join(str(p.path) for p in pending)
+    if not _prompt_yes_no(f"Register the notify tool for {name} ({files})?", True, assume_yes):
+        print("  Skipped — you can register it later with `tintaview setup`.")
+        return False
+    for plan in pending:
+        hooks_mod.apply(plan)
+    print("  Done.")
+    return True
+
+
 # --------------------------------------------------------------------------- hook script + hook.env
 
 # Lives in tintaview.install.hookscript so `tintaview hooks install` can deploy the
@@ -933,6 +998,7 @@ def _run(platform_override: str | None, assume_yes: bool) -> int:
     _step_install_path(env, assume_yes)
     _step_autostart(env, assume_yes)
     _step_hooks(cfg, env, assume_yes)
+    _step_notify_tool(cfg, env, assume_yes)
     return _step_verify(cfg, env, assume_yes)
 
 

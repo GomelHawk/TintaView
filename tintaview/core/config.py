@@ -356,6 +356,21 @@ class EscalationConfig:
 
 
 @dataclass
+class NotifyConfig:
+    """What happens when an agent itself asks TintaView to tell the user something.
+
+    The agent does that through the ``notify_user`` tool of TintaView's MCP server
+    (`core/mcp.py`) — "run the migration and notify me via phone when it's done" — and
+    knows nothing else about TintaView. The tray always shows the message as a balloon;
+    `command` is where it goes further (a phone push, a webhook), run once per message
+    through the shell, detached, output ignored, a failure logged. The command, and any
+    token in it, stays in this file: the agent only ever sends the text.
+    """
+
+    command: str = ""
+
+
+@dataclass
 class UpdateConfig:
     check: bool = True
 
@@ -369,6 +384,7 @@ class Config:
     stats: StatsConfig = field(default_factory=StatsConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     escalation: EscalationConfig = field(default_factory=EscalationConfig)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     enabled_agents: list[str] = field(default_factory=lambda: ["claude"])
     agents: dict[str, AgentConfig] = field(default_factory=dict)
@@ -582,6 +598,7 @@ def load(path: Path | None = None) -> Config:
         stats=_build(StatsConfig, raw.get("stats", {}), "stats"),
         ui=ui,
         escalation=_build(EscalationConfig, raw.get("escalation", {}), "escalation"),
+        notify=_build(NotifyConfig, raw.get("notify", {}), "notify"),
         update=_build(UpdateConfig, raw.get("update", {}), "update"),
         enabled_agents=[str(a) for a in enabled],
         agents=agents,
@@ -728,6 +745,7 @@ def dumps(cfg: Config) -> str:
     out += _table("ui.clocks", cfg.ui.clocks, skip=("clocks",))
     out += _array_of_tables("ui.clocks.clock", cfg.ui.clocks.clocks)
     out += _table("escalation", cfg.escalation)
+    out += _table("notify", cfg.notify)
     out += _table("update", cfg.update)
     out.append("[agents]")
     out.append(f"enabled = {_toml_value(cfg.enabled_agents)}")

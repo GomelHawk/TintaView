@@ -97,6 +97,24 @@ Other things worth checking by hand:
   `tv-hook` sentinel — anything else you've hand-written in the same file is left
   completely alone, including hook entries you added by hand for some other tool.
 
+## "Notify me when it's done" doesn't notify
+
+`tintaview doctor` → the `NOTIFY TOOL` section, one line per agent:
+
+| Line | Meaning | Fix |
+| --- | --- | --- |
+| `not registered` (WARN) | The agent has no `notify_user` tool — the wizard's Notify tool step was declined or never ran | `tintaview setup` (or `tintaview hooks install --agent <key>` outside a WSL split) |
+| `each call will ask for approval` (WARN) | Registered, but the setting that lets it run unattended is gone, so a notification at the end of a task waits for a click | same |
+| `registered for another TintaView` (WARN) | Points at a different, still-existing Python — an old dev checkout, a second install | same, to point it at this one |
+| `registered for a Python that no longer exists` (FAIL) | TintaView was moved or reinstalled elsewhere; the agent reports a broken `tintaview` MCP server every session | same |
+
+Also check: **a session started before registering doesn't have the tool** — start a new
+one. **Nothing pops up but the agent says it sent it** — the tray must be running; a
+`--headless` TintaView can't show anything, and the tool tells the agent so. **The phone
+stays quiet but the desktop notification appears** — that is `notify.command`
+(**Settings… → Alerts**); run it by hand in a terminal with `TINTAVIEW_MESSAGE` set to see
+its error, since TintaView only logs a command that fails to start.
+
 ## Codex hooks not firing
 
 Codex's lifecycle hooks are newer and version-gated, and the flag name changed between
