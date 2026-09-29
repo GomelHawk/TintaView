@@ -4,6 +4,19 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.7.2 — 2026-09-29
+
+- **A usage limit can now run your own command**, just like an unanswered question. Set it
+  under **Settings… → Alerts → Warn me before a usage limit runs out**. It runs once each time
+  a window crosses your threshold, with `TINTAVIEW_STATUS=limit`, `TINTAVIEW_LIMIT` (e.g.
+  "5-hour limit"), `TINTAVIEW_PCT` and a ready-made `TINTAVIEW_MESSAGE`. It's a separate
+  setting from the question command, so nothing new fires until you fill it in.
+- Fixed: a Claude Code question could go unnoticed, with no reminder and no command, while a
+  background subagent in the same session was still running tools.
+- **After updating, run the setup wizard once** to get the subagent fix: tray → **Settings…** →
+  **Open Full Setup Wizard (Terminal)…**, and go through it to the end. Nothing prompts you
+  for this.
+
 ## 0.7.1 — 2026-09-25
 
 - The tray popup is short again: it only says that an agent is waiting for your answer. The
@@ -29,9 +42,9 @@ Nothing to reconfigure, and no hook reinstall needed.
   marked e.g. "Signed out — usage from 6d ago".
 - **Every usage-panel section can collapse to its header**, including one that shows only an
   error.
-- **After updating, run `tintaview hooks install --agent all` once** (or `tintaview setup`) —
-  without it, reminders quote only the old short sentence. The tray reminds you if Claude Code
-  is set up; with only Codex, nothing does.
+- **After updating, run the setup wizard once** — tray → **Settings…** → **Open Full Setup
+  Wizard (Terminal)…** — without it, reminders quote only the old short sentence. The tray
+  reminds you if Claude Code is set up; with only Codex, nothing does.
 
 ## 0.6.1 — 2026-09-16
 

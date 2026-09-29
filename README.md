@@ -160,6 +160,17 @@ tintaview setup
 This is the wizard that actually configures anything — the installer only puts files on
 disk. Nothing lights up and no hooks are installed until you've run it.
 
+**On Windows, `tintaview` isn't on your PATH.** The installer keeps it inside its own folder, so
+type the full path wherever this README (or [Troubleshooting](docs/TROUBLESHOOTING.md)) says
+`tintaview …` — in PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\TintaView\venv\Scripts\tintaview.exe" setup
+```
+
+The wizard is also one click away without a terminal: tray → **Settings…** → **Open Full Setup
+Wizard (Terminal)…**, and **Run diagnostics** in the tray menu runs `doctor`.
+
 ## What the wizard asks
 
 `tintaview setup` runs the same eight-step flow whether it's launched by `install.ps1`,
@@ -378,7 +389,9 @@ Do you want to allow creating the requested empty file at /home/you/x outside th
 | Cursor | *Nothing* — it has no "waiting for approval" hook; TintaView infers that state itself, and the variables are empty. |
 
 Updating from an older TintaView? The hook script only starts sending the full request once it
-is reinstalled: run `tintaview setup` (or `tintaview hooks install`). The tray reminds you at
+is reinstalled: run the setup wizard (`tintaview setup`, or tray → **Settings…** → **Open Full
+Setup Wizard (Terminal)…**). `tintaview hooks install` works too, except in a WSL split install,
+where only the wizard reaches the script inside the distro. The tray reminds you at
 startup when Claude Code is set up, since Claude needs a new hook for this; with only Codex,
 nothing prompts you, and until you reinstall `TINTAVIEW_DETAIL` stays empty.
 
@@ -455,6 +468,9 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `agents.jetbrains.quota_path` | *(auto-detected)* | Path to a specific `AIAssistantQuotaManager2.xml` or IDE data directory; empty scans every installed JetBrains IDE and uses the most recently updated one. |
 
 ## Commands
+
+On Windows each of these is `%LOCALAPPDATA%\TintaView\venv\Scripts\tintaview.exe`, not a
+bare `tintaview` — see [After installing](#after-installing-either-way).
 
 | Command | Description |
 | --- | --- |

@@ -6,6 +6,10 @@ The default first move for almost everything below is:
 tintaview doctor -v
 ```
 
+(On Windows, `tintaview` isn't on PATH: use
+`& "$env:LOCALAPPDATA\TintaView\venv\Scripts\tintaview.exe" doctor -v` in PowerShell, or
+**Run diagnostics** in the tray menu, which runs every check that doesn't ask you a question.)
+
 It checks environment, config, the daemon, the lighting engine, the hook script, each
 agent's installed hooks and each agent's usage stats, in that order — an early failure
 (e.g. a broken config) is usually the real cause of everything printed after it. `-v`

@@ -598,7 +598,7 @@ function Invoke-Install {
                 Enable-Autostart
                 Write-Note 'Autostart entry refreshed'
             } else {
-                Write-Note 'Autostart is off and was left off (turn it on with: tintaview setup --reconfigure)'
+                Write-Note "Autostart is off and was left off (turn it on with: $LauncherPath setup)"
             }
         } elseif ($NoAutostart) {
             Write-Note 'Skipping autostart (-NoAutostart)'

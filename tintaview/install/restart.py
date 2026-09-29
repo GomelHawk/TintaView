@@ -207,7 +207,7 @@ def restart_if_running(cfg: Config) -> bool:
         if pid is None:
             return False
         if pid == os.getpid():
-            # `tintaview setup --reconfigure` invoked inside the running tray's own
+            # `tintaview setup` invoked inside the running tray's own
             # process would be asking us to kill ourselves mid-wizard.
             log.debug("skipping restart: this process is the running instance")
             return False
