@@ -72,17 +72,34 @@ fi
 # must never be able to break the request line, and quietly rewriting a session id into a
 # *different* valid one would silently merge two sessions into one bucket.
 #
+# The same sed also picks up Claude's "agent_id", which only a *subagent's* hook carries
+# (measured on 2.1.284: the main thread's payloads have none). A subagent reports under
+# its parent's session id, so without it a background subagent's next tool call read as
+# the session going back to work and wiped a question the user had not answered yet.
+# It is taken only from the flat header — everything before "hook_event_name" — so a
+# main-thread tool whose *input* has an "agent_id" key (SendMessage, TaskStop) is not
+# mistaken for one. Same safe-character rule: a value outside it is simply not sent.
+# Separate -e pieces rather than `;`, because BSD sed reads a `;` after a label as part
+# of the label's name. `t cut` / `:cut` is a no-op branch whose only job is to reset the
+# substitution flag the header cut just set, so `t aid` tests the agent_id match alone.
+#
 # Guarded on a tty because a manual `tv-hook.sh claude working` at an interactive terminal
 # must return instantly rather than block on a stdin read that will never come.
-SID=""
+QUERY=""
 if [ ! -t 0 ]; then
-    SID=$(sed -n "/\"$FIELD\"[[:space:]]*:/{s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]*\\)\".*/\\1/p;q;}")
+    QUERY=$(sed -n -e "/\"$FIELD\"[[:space:]]*:/{" \
+        -e h \
+        -e "s/.*\"$FIELD\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]\\{1,\\}\\)\".*/sid=\\1/" \
+        -e "t sid" -e q -e ":sid" -e x \
+        -e "s/\"hook_event_name\".*//" -e "t cut" -e ":cut" \
+        -e "s/.*\"agent_id\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9._-]\\{1,\\}\\)\".*/aid=\\1/" \
+        -e "t aid" -e g -e p -e q -e ":aid" -e H -e g -e "s/\\n/\\&/" -e p -e q -e "}")
 fi
-[ -n "$SID" ] || SID="default"
+[ -n "$QUERY" ] || QUERY="sid=default"
 
 # Fire and forget: short timeout, discard output, and always exit 0 — whatever
 # happens here (daemon down, curl missing, network namespace weirdness) must never
 # surface as a hook failure to the agent.
-"$TINTAVIEW_CURL" -s -m 1 "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&sid=$SID" >/dev/null 2>&1
+"$TINTAVIEW_CURL" -s -m 1 "$TINTAVIEW_URL/v1/event/$EVENT?agent=$AGENT&$QUERY" >/dev/null 2>&1
 
 exit 0

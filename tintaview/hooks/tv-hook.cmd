@@ -66,6 +66,9 @@ set "LINE="
 set "TOKEN="
 set "AFTER="
 set "CHECK="
+set "AID="
+set "AIDQ="
+set "REST="
 set /p LINE=
 
 set "SID=default"
@@ -103,8 +106,35 @@ if defined TOKEN (
     if "!CHECK!"=="!TOKEN!" if not "!TOKEN!"=="" set "SID=!TOKEN!"
 )
 
+REM Claude's "agent_id", which only a *subagent's* hook carries. A subagent reports under
+REM its parent's session id, so without it a background subagent's next tool call read as
+REM the session going back to work and wiped a question the user had not answered yet
+REM (see tv-hook.sh). Taken only when "hook_event_name" still follows it: the flat header
+REM comes first, so an "agent_id" key inside a main-thread tool's input (SendMessage,
+REM TaskStop) is never mistaken for the caller. Same scrape, same character check.
+if defined LINE (
+    set "AFTER=!LINE:*"agent_id":"=!"
+    if not "!AFTER!"=="!LINE!" (
+        set "REST=!AFTER:"hook_event_name"=!"
+        if not "!REST!"=="!AFTER!" (
+            for /f tokens^=1^ delims^=^" %%V in ("!AFTER!") do set "AID=%%V"
+        )
+    )
+)
+if defined AID (
+    set "CHECK=!AID!"
+    set "CHECK=!CHECK:&=!"
+    set "CHECK=!CHECK:%%=!"
+    set "CHECK=!CHECK: =!"
+    set "CHECK=!CHECK:<=!"
+    set "CHECK=!CHECK:>=!"
+    set "CHECK=!CHECK:|=!"
+    set "CHECK=!CHECK:^=!"
+    if "!CHECK!"=="!AID!" set "AIDQ=&aid=!AID!"
+)
+
 REM Fire and forget: short timeout, discard output, always succeed regardless of what
 REM happened above — a hook must never fail the agent's turn.
-"%TINTAVIEW_CURL%" -s -m 1 "%TINTAVIEW_URL%/v1/event/%EVENT%?agent=%AGENT%&sid=%SID%" >nul 2>&1
+"%TINTAVIEW_CURL%" -s -m 1 "%TINTAVIEW_URL%/v1/event/%EVENT%?agent=%AGENT%&sid=%SID%!AIDQ!" >nul 2>&1
 
 exit /b 0

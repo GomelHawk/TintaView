@@ -248,6 +248,16 @@ effective status (`None` when it did not change), computed under the store's own
 re-read `effective()` afterwards to decide what to paint, or two events on two worker threads
 apply each other's stale fold.
 
+**A Claude subagent reports under its parent's session id.** Its hook payloads add an
+`agent_id` the main thread's never carry (measured on 2.1.284), which the shims forward as
+`aid=` — scraped only from the flat header before `"hook_event_name"`, so an `agent_id` key in
+a main-thread tool's *input* (SendMessage, TaskStop) doesn't count. `StateStore.set(actor=)`
+then refuses to let a subagent move a session off a `confirm` someone else raised: a
+background subagent still running Bash used to turn the main thread's open question back into
+`working` before it was ever escalated. The main thread may always clear a confirm, so a
+subagent's denied or abandoned prompt can't stay red for the rest of the session. The fix
+reaches an install only once `tv-hook` is recopied (`tintaview setup` / `hooks install`).
+
 **Every session carries its own last-seen stamp, and the watchdog expires sessions individually**
 (`StateStore.expired` / `end_many`). A single store-wide clock — which is what this was — is wrong
 in both directions once more than one agent is running: a chatty session vouches for every stale

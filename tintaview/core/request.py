@@ -69,6 +69,9 @@ class HookRequest:
     """One confirm payload, reduced to what the state store keeps."""
 
     sid: str = ""
+    #: Claude's ``agent_id`` when a *subagent* is the one asking (the main thread's
+    #: payloads carry none); see `StateStore.set`'s ``actor``.
+    actor: str = ""
     #: Short, for the balloon (≤ `MAX_QUESTION_CHARS`).
     question: str = ""
     #: The whole request on one line (≤ `MAX_DETAIL_CHARS`): what `TINTAVIEW_DETAIL` gets.
@@ -108,7 +111,7 @@ def parse(body: bytes) -> HookRequest:
     try:
         return _from_payload(payload)
     except Exception:  # noqa: BLE001 - an unexpected shape costs the description, nothing else
-        return HookRequest(sid=_sid(payload))
+        return HookRequest(sid=_sid(payload), actor=_actor(payload))
 
 
 def _sid(payload: dict) -> str:
@@ -119,11 +122,20 @@ def _sid(payload: dict) -> str:
     return ""
 
 
+def _actor(payload: dict) -> str:
+    return clean_id(payload.get("agent_id"))
+
+
+def clean_id(raw: Any) -> str:
+    """``raw`` if it is a usable session/agent id — the shim's character set — else ""."""
+    return raw if isinstance(raw, str) and _SAFE_SID.fullmatch(raw) else ""
+
+
 def _salvage(text: str) -> HookRequest:
     """A payload cut off at `MAX_BODY_BYTES` (or otherwise broken): keep the session id
     and the tool's name, which every agent writes before the large ``tool_input``."""
     found: dict[str, str] = {}
-    for name in (*_SID_FIELDS, "tool_name", "message", "cwd"):
+    for name in (*_SID_FIELDS, "agent_id", "tool_name", "message", "cwd"):
         match = re.search(_FLAT_FIELD.format(name=name), text)
         if match:
             found[name] = match.group(1)
@@ -131,18 +143,18 @@ def _salvage(text: str) -> HookRequest:
 
 
 def _from_payload(payload: dict) -> HookRequest:
-    sid = _sid(payload)
+    sid, actor = _sid(payload), _actor(payload)
     cwd = clean(payload.get("cwd"), 500)
     tool = clean(payload.get("tool_name"), 100)
     tool_input = payload.get("tool_input")
     if not tool:
         # Claude's Notification: a sentence and nothing else.
-        return HookRequest(sid=sid, question=clean(payload.get("message"), MAX_QUESTION_CHARS),
-                           cwd=cwd)
+        return HookRequest(sid=sid, actor=actor,
+                           question=clean(payload.get("message"), MAX_QUESTION_CHARS), cwd=cwd)
     detail = clean(describe(tool, tool_input if isinstance(tool_input, dict) else {}),
                    MAX_DETAIL_CHARS)
-    return HookRequest(sid=sid, question=clean(detail, MAX_QUESTION_CHARS), detail=detail,
-                       tool=tool, cwd=cwd)
+    return HookRequest(sid=sid, actor=actor, question=clean(detail, MAX_QUESTION_CHARS),
+                       detail=detail, tool=tool, cwd=cwd)
 
 
 def describe(tool: str, tool_input: dict) -> str:

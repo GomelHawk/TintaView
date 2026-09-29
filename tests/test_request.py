@@ -178,3 +178,17 @@ def test_cursors_session_field_is_understood_too():
     req = parse(json.dumps({"conversation_id": "conv-9"}).encode())
 
     assert req.sid == "conv-9"
+
+
+def test_a_subagents_request_names_it_and_the_main_threads_does_not():
+    subagent = parse(_fixture("claude_subagent_pre_tool_use_bash.json"))
+    main = parse(_fixture("claude_permission_request_bash.json"))
+
+    assert subagent.actor == "ae1cd3f527dd405c1"
+    assert main.actor == ""
+
+
+def test_a_cut_off_subagent_request_keeps_its_agent_id():
+    body = _fixture("claude_subagent_pre_tool_use_bash.json")
+
+    assert parse(body[: body.index(b'"tool_input"') + 20]).actor == "ae1cd3f527dd405c1"

@@ -1,0 +1,16 @@
+{
+  "session_id": "ddfa5841-6633-4a15-99f1-1e97f637091b",
+  "transcript_path": "/home/user/.claude/projects/-home-user-project/ddfa5841-6633-4a15-99f1-1e97f637091b.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "07ea09a1-081e-4de2-ae59-1eadbe956a51",
+  "permission_mode": "default",
+  "agent_id": "ae1cd3f527dd405c1",
+  "agent_type": "general-purpose",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo hi",
+    "description": "Run echo command to output 'hi'"
+  },
+  "tool_use_id": "toolu_014WgwcUvaikxJypEYsuwAgX"
+}

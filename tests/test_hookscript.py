@@ -198,3 +198,58 @@ def test_a_malformed_payload_is_not_an_error(daemon):
     _invoke(daemon, "claude", "confirm", '{"session_id": "abc-123", "message": ')
 
     assert daemon.calls[-1]["body"] == b'{"session_id": "abc-123", "message": '
+
+
+# ------------------------------------------------------------------------ subagents
+
+FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
+
+
+def _captured(name: str) -> str:
+    """A captured payload, sent as the agent sends it: one line of compact JSON."""
+    return json.dumps(json.loads((FIXTURES / name).read_text()), separators=(",", ":"))
+
+
+def test_a_subagents_tool_call_carries_its_agent_id(daemon):
+    """Captured on 2.1.284: a subagent reports under its parent's session id, plus an
+    `agent_id` the main thread's payloads never have."""
+    payload = _captured("claude_subagent_pre_tool_use_bash.json")
+
+    query = _run(daemon, "claude", "tool-start", payload)
+
+    assert query["sid"] == [json.loads(payload)["session_id"]]
+    assert query["aid"] == ["ae1cd3f527dd405c1"]
+
+
+def test_the_main_threads_tool_call_carries_none(daemon):
+    query = _run(daemon, "claude", "tool-start", _captured("claude_pre_tool_use_agent.json"))
+
+    assert query["sid"] == ["ddfa5841-6633-4a15-99f1-1e97f637091b"]
+    assert "aid" not in query
+
+
+def test_an_agent_id_inside_the_tool_input_is_not_the_senders(daemon):
+    """Hand-built: a main-thread SendMessage/TaskStop names *another* agent in its input.
+    Only the flat header, before `hook_event_name`, says who is calling."""
+    payload = json.loads(_captured("claude_pre_tool_use_agent.json"))
+    payload["tool_input"] = {"agent_id": "someone-else", "message": "hi"}
+
+    query = _run(daemon, "claude", "tool-start", json.dumps(payload))
+
+    assert query["sid"] == [payload["session_id"]]
+    assert "aid" not in query
+
+
+def test_an_unsafe_agent_id_is_dropped_not_the_session(daemon):
+    query = _run(daemon, "claude", "tool-end", {
+        "session_id": "abc-123", "agent_id": "a b&c", "hook_event_name": "PostToolUse"})
+
+    assert query["sid"] == ["abc-123"]
+    assert "aid" not in query
+
+
+def test_an_agent_id_without_a_session_id_still_falls_back(daemon):
+    query = _run(daemon, "claude", "working", {"agent_id": "a1", "hook_event_name": "x"})
+
+    assert query["sid"] == ["default"]
+    assert "aid" not in query

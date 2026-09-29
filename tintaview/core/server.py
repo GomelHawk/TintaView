@@ -45,7 +45,7 @@ from .events import (
     TOOL_START,
     WORKING,
 )
-from .request import MAX_BODY_BYTES, MAX_QUESTION_CHARS, HookRequest
+from .request import MAX_BODY_BYTES, MAX_QUESTION_CHARS, HookRequest, clean_id
 from .request import parse as parse_request
 from .stalldetect import StallDetector
 from .state import StateStore
@@ -189,7 +189,8 @@ class _Handler(BaseHTTPRequestHandler):
         # `sid` is honoured as a fallback for a caller that knows it and posts no JSON.
         sid = request.sid or _first(query, "sid", DEFAULT_SID)
         status_server.handle_event(event, agent, sid, _first(query, "tool", ""),
-                                   request.question, request=request)
+                                   request.question, request=request,
+                                   actor=request.actor or clean_id(_first(query, "aid", "")))
 
     def _route(self) -> None:
         status_server: StatusServer = self.server.status_server  # type: ignore[attr-defined]
@@ -235,8 +236,9 @@ class _Handler(BaseHTTPRequestHandler):
             sid = _first(query, "sid", DEFAULT_SID)
             tool = _first(query, "tool", "")
             question = _clean_question(_first(query, "question", ""))
+            actor = clean_id(_first(query, "aid", ""))
             self._write_ack()
-            status_server.handle_event(event, agent, sid, tool, question)
+            status_server.handle_event(event, agent, sid, tool, question, actor=actor)
             return
 
         legacy_event = path.lstrip("/")
@@ -526,7 +528,8 @@ class StatusServer:
     # --- event handling ------------------------------------------------------------
 
     def handle_event(self, event: str, agent: str, sid: str, tool: str,
-                     question: str = "", request: HookRequest | None = None) -> None:
+                     question: str = "", request: HookRequest | None = None,
+                     actor: str = "") -> None:
         """Update the state store (and the stall detector) for one hook event, then hand
         the new effective status to the applier — but only when it actually changed.
         `StateStore`'s mutators report that (and what it changed *to*, computed under the
@@ -537,6 +540,9 @@ class StatusServer:
         Returns as soon as the store is updated: the actual `controller.apply()` runs on
         the applier thread, so the ack this request already sent is never followed by a
         handler thread sitting on a slow vendor SDK call.
+
+        ``actor`` is the subagent that sent the event (the shim's ``aid=``, Claude's
+        ``agent_id``), "" for the session's main thread — see `StateStore.set`.
         """
         # `agents.enabled` has to be enforced *here*, not only where hooks are installed.
         # Unticking an agent in the wizard stops TintaView managing its hooks, but any
@@ -559,9 +565,9 @@ class StatusServer:
             elif event == SESSION_END:
                 effective = self.state.end(agent, sid)
             elif event == WORKING:
-                effective = self.state.set(agent, sid, STATUS_WORKING)
+                effective = self.state.set(agent, sid, STATUS_WORKING, actor=actor)
             elif event == IDLE:
-                effective = self.state.set(agent, sid, STATUS_IDLE)
+                effective = self.state.set(agent, sid, STATUS_IDLE, actor=actor)
             elif event == CONFIRM:
                 # The question — and, from a posted payload, the whole request — ride
                 # along for display only, exactly like `tool`: they never influence the
@@ -570,7 +576,7 @@ class StatusServer:
                 request = request or HookRequest()
                 effective = self.state.set(
                     agent, sid, STATUS_CONFIRM, question=question, detail=request.detail,
-                    request_tool=request.tool, cwd=request.cwd,
+                    request_tool=request.tool, cwd=request.cwd, actor=actor,
                 )
             elif event == TOOL_START:
                 stall_seconds = self._stall_seconds_for(agent)
@@ -578,11 +584,11 @@ class StatusServer:
                     self._stall.tool_start(agent, sid, stall_seconds)
                 # The tool name rides along for display only (the flyout shows what an
                 # agent is busy *with*); it never influences the status or the lights.
-                effective = self.state.set(agent, sid, STATUS_WORKING, tool=tool)
+                effective = self.state.set(agent, sid, STATUS_WORKING, tool=tool, actor=actor)
             elif event == TOOL_END:
                 # "" rather than leaving it: the tool has finished, so the session is
                 # still working but no longer on anything we can name.
-                effective = self.state.set(agent, sid, STATUS_WORKING, tool="")
+                effective = self.state.set(agent, sid, STATUS_WORKING, tool="", actor=actor)
             else:
                 log.warning("unhandled event %r for %s/%s", event, agent, sid)
                 return

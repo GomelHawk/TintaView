@@ -1364,3 +1364,101 @@ def test_a_tool_starting_drops_the_request_for_good(server_engine):
     assert _wait_until(lambda: _claude(server)["effective"] == "confirm")
     assert _claude(server)["detail"] == ""
     assert _claude(server)["question"] == "Claude needs your permission"
+
+
+# ------------------------------------------------------------------------- subagents
+
+
+def _sub_event(server: StatusServer, event: str, sid: str, aid: str, tool: str = "") -> None:
+    """What the shim sends for a subagent's hook: the parent's sid plus `aid=`."""
+    url = f"{server.url}/v1/event/{event}?agent=claude&sid={sid}&aid={aid}"
+    if tool:
+        url += f"&tool={tool}"
+    with urllib.request.urlopen(url, timeout=2) as resp:
+        assert resp.status == 200
+
+
+def _question_open(server: StatusServer) -> tuple[str, str]:
+    body = (HOOK_FIXTURES / "claude_permission_request_ask_user_question.json").read_bytes()
+    sid = json.loads(body)["session_id"]
+    _event(server, "session-start", "claude", sid)
+    _post_confirm(server, "claude", body)
+    assert _wait_until(lambda: _claude(server).get("detail"))
+    return sid, _claude(server)["detail"]
+
+
+def test_a_background_subagent_does_not_close_the_main_threads_question(server_engine):
+    """Reported 2026-09-29: the main thread asked (AskUserQuestion) while a background
+    subagent was still running Bash under the same session id. Its PreToolUse turned the
+    session back to `working` and the question was never escalated."""
+    server, _engine = server_engine
+    sid, detail = _question_open(server)
+
+    _sub_event(server, "tool-start", sid, "af8a731d04a18d102", tool="Bash")
+    _sub_event(server, "tool-end", sid, "af8a731d04a18d102")
+    _sub_event(server, "working", sid, "af8a731d04a18d102")
+    time.sleep(0.05)
+
+    entry = _claude(server)
+    assert entry["sessions"] == {sid: "confirm"}
+    assert entry["detail"] == detail
+
+
+def test_the_main_thread_answering_still_closes_it(server_engine):
+    server, _engine = server_engine
+    sid, _detail = _question_open(server)
+    _sub_event(server, "tool-start", sid, "af8a731d04a18d102", tool="Bash")
+
+    _event(server, "tool-end", "claude", sid)  # PostToolUse for AskUserQuestion
+
+    assert _wait_until(lambda: _claude(server)["effective"] == "working")
+    assert _claude(server)["detail"] == ""
+
+
+def test_a_subagent_clears_its_own_question_but_not_another_ones(server_engine):
+    server, _engine = server_engine
+    permission = json.loads((HOOK_FIXTURES / "claude_permission_request_bash.json").read_text())
+    permission["agent_id"] = "sub-a"  # hand-built: a subagent's PermissionRequest
+    sid = permission["session_id"]
+    _post_confirm(server, "claude", json.dumps(permission).encode())
+    assert _wait_until(lambda: _claude(server).get("effective") == "confirm")
+
+    _sub_event(server, "tool-start", sid, "sub-b", tool="Read")
+    time.sleep(0.05)
+    assert _claude(server)["effective"] == "confirm"
+
+    _sub_event(server, "tool-end", sid, "sub-a")  # its own PostToolUse, once allowed
+    assert _wait_until(lambda: _claude(server)["effective"] == "working")
+
+
+def test_the_main_thread_can_clear_a_subagents_question(server_engine):
+    """A subagent's prompt that was denied or dropped must not stay red for the rest of
+    the session: the main thread's next event is allowed to end it."""
+    server, _engine = server_engine
+    _event(server, "confirm", "claude", "s1")
+    _sub_event(server, "confirm", "s1", "sub-a")
+
+    _event(server, "idle", "claude", "s1")
+
+    assert _wait_until(lambda: _claude(server)["effective"] == "idle")
+
+
+def test_a_subagents_event_on_a_working_session_is_ordinary(server_engine):
+    server, _engine = server_engine
+    _event(server, "session-start", "claude", "s1")
+
+    _sub_event(server, "tool-start", "s1", "sub-a", tool="Grep")
+
+    assert _wait_until(lambda: _claude(server)["effective"] == "working")
+    assert _claude(server)["tool"] == "Grep"
+
+
+def test_a_suppressed_subagent_event_still_counts_as_a_sign_of_life(server_engine):
+    server, _engine = server_engine
+    _event(server, "confirm", "claude", "s1")
+    stamp = server.state._sessions[("claude", "s1")].seen
+    time.sleep(0.02)
+
+    _sub_event(server, "tool-start", "s1", "sub-a", tool="Bash")
+
+    assert _wait_until(lambda: server.state._sessions[("claude", "s1")].seen > stamp)

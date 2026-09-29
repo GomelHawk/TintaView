@@ -54,6 +54,9 @@ class _Session:
     #: label and is deliberately left alone by a confirm.
     request_tool: str = ""
     cwd: str = ""
+    #: Who raised the current confirm: a subagent's id, or "" for the main thread. Only
+    #: meaningful while `status` is confirm — see `StateStore.set`'s ``actor``.
+    confirm_actor: str = ""
     seen: float = field(default_factory=time.monotonic)
 
 
@@ -87,7 +90,7 @@ class StateStore:
 
     def set(self, agent: str, sid: str, status: str, tool: str | None = None,
             question: str = "", detail: str = "", request_tool: str = "",
-            cwd: str = "") -> str | None:
+            cwd: str = "", actor: str = "") -> str | None:
         """Set a session's status, and optionally the tool it's running.
 
         ``tool=None`` means "unchanged" and ``tool=""`` means "no longer running a named
@@ -107,16 +110,32 @@ class StateStore:
         so that pair survives a message typed while the question is open. A tool starting
         or ending, idle, or the session ending all clear it — those only happen once the
         question has been answered or dropped.
+
+        ``actor`` is the subagent that sent the event ("" for the main thread). A
+        subagent reports under its parent's session id, so a background subagent still
+        running tools while the main thread waits on a question used to read as the
+        session going back to work: the confirm, its question and the escalation clock
+        were all gone before anyone was notified. So a subagent may not move a session
+        off a confirm that someone *else* raised — it only counts as a sign of life. The
+        main thread may, always: it is what a foreground subagent hands back to, and
+        letting it clear a subagent's prompt keeps one that was denied or abandoned from
+        staying red for the rest of the session.
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status {status!r}")
         with self._lock:
             before = self.effective()
             session = self._sessions.get((agent, sid))
+            if (session is not None and actor and status != STATUS_CONFIRM
+                    and session.status == STATUS_CONFIRM and session.confirm_actor != actor):
+                session.seen = time.monotonic()
+                self._touch()
+                return None
             if session is None:
                 session = _Session(status=status)
                 self._sessions[(agent, sid)] = session
             if status == STATUS_CONFIRM:
+                session.confirm_actor = actor
                 if detail or not session.detail:
                     session.question, session.detail = question, detail
                     session.request_tool, session.cwd = request_tool, cwd

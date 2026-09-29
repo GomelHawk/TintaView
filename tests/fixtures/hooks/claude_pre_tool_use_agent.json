@@ -1,0 +1,16 @@
+{
+  "session_id": "ddfa5841-6633-4a15-99f1-1e97f637091b",
+  "transcript_path": "/home/user/.claude/projects/-home-user-project/ddfa5841-6633-4a15-99f1-1e97f637091b.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "07ea09a1-081e-4de2-ae59-1eadbe956a51",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "description": "Run echo hi command",
+    "prompt": "Run the bash command 'echo hi' and report the output.",
+    "subagent_type": "general-purpose",
+    "model": "haiku"
+  },
+  "tool_use_id": "toolu_01HbgWS4Qz3PJG556ByzKtnN"
+}
