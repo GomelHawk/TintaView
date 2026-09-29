@@ -4,6 +4,13 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.8.1 — 2026-09-29
+
+- **The explanations in Settings are readable on a dark theme.** On Windows' dark mode they
+  were drawn almost in the background colour and looked like empty space.
+- **The Settings window is about a quarter shorter**, with shorter hints on the Alerts tab.
+  The details of each command's variables are in the README.
+
 ## 0.8.0 — 2026-09-29
 
 - **"Notify me when it's done."** Start a long task in Claude Code, Codex or Cursor and add
