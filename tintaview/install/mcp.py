@@ -66,12 +66,15 @@ def console_python(executable: str | None = None) -> str:
     The tray runs under ``pythonw.exe``, which has no standard streams to speak MCP over;
     its console sibling sits in the same ``Scripts`` directory.
     """
-    exe = Path(executable or sys.executable)
+    text = executable or sys.executable
+    exe = Path(text)
     if exe.name.lower() == "pythonw.exe":
         sibling = exe.with_name("python.exe")
         if sibling.exists() or executable is not None:
             return str(sibling)
-    return str(exe)
+    # The string as given, not `str(exe)`: on Windows a `Path` round trip rewrites every
+    # separator, and this is compared against the command already in the agent's config.
+    return text
 
 
 def launcher(agent_key: str, python: str) -> dict[str, Any]:
