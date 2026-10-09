@@ -9,6 +9,7 @@
 
   "tray.menu.refresh_usage": "Оновити витрати",
   "tray.menu.sound_on_confirm": "Звук під час запиту підтвердження",
+  "tray.menu.keep_awake": "Не засинати",
   "tray.menu.pause_lighting": "Призупинити підсвічування",
   "tray.menu.settings": "Налаштування…",
   "tray.menu.check_updates": "Перевірити оновлення",

@@ -8,6 +8,7 @@
 
   "tray.menu.refresh_usage": "Aggiorna l'utilizzo",
   "tray.menu.sound_on_confirm": "Suono alla richiesta di conferma",
+  "tray.menu.keep_awake": "Mantieni attivo",
   "tray.menu.pause_lighting": "Sospendi l'illuminazione",
   "tray.menu.settings": "Impostazioni…",
   "tray.menu.check_updates": "Cerca aggiornamenti",

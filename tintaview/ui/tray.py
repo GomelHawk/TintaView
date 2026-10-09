@@ -37,6 +37,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from tintaview.core.config import Config
 from tintaview.core.events import STATUS_NONE
+from tintaview.core.keepawake import KeepAwake
 from tintaview.i18n import set_language, t
 from tintaview.stats import format as fmt
 from tintaview.ui import icons
@@ -225,6 +226,13 @@ class TrayApp(QtCore.QObject):
         self._tooltip_key: tuple[Any, ...] | None = None
         self._blink_on = True
         self._sound_action: QtGui.QAction | None = None  # set by _build_menu below
+        #: Built before the menu, which reads its state for the check mark. Re-applied
+        #: from config at startup: unlike "Pause lighting", this toggle is remembered.
+        self._keep_awake = KeepAwake()
+        if cfg.ui.keep_awake:
+            self._keep_awake.acquire()
+        # Released explicitly on a clean quit; a crash releases it too (see keepawake).
+        app.aboutToQuit.connect(self._keep_awake.release)
         self._usage_results: dict[str, UsageResult] = {}
         self._last_usage_fetch = 0.0
         # Last engine note we ballooned about — so a sticky "G HUB restarted" doesn't
@@ -347,6 +355,11 @@ class TrayApp(QtCore.QObject):
         # contradicting the dialog.
         self._sound_action = sound_action
 
+        awake_action = menu.addAction(t("tray.menu.keep_awake"))
+        awake_action.setCheckable(True)
+        awake_action.setChecked(self._cfg.ui.keep_awake)
+        awake_action.toggled.connect(self._set_keep_awake)
+
         pause_action = menu.addAction(t("tray.menu.pause_lighting"))
         pause_action.setCheckable(True)
         pause_action.setChecked(self._lighting_paused())
@@ -466,6 +479,18 @@ class TrayApp(QtCore.QObject):
             save(self._cfg)
         except Exception:
             log.exception("could not persist chime_on_confirm")
+
+    def _set_keep_awake(self, on: bool) -> None:
+        """The "Keep awake" menu toggle. The choice is saved even when the platform
+        refuses the request, so it is retried on the next start; the failure is logged."""
+        self._keep_awake.set(on)
+        self._cfg.ui.keep_awake = on
+        try:
+            from tintaview.core.config import save
+
+            save(self._cfg)
+        except Exception:
+            log.exception("could not persist keep_awake")
 
     def _on_flyout_toggle(self, agent_key: str, collapsed: bool) -> None:
         """The flyout owns collapse/expand as live UI state; this just mirrors that

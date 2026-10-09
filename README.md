@@ -262,6 +262,7 @@ Right-click the tray icon for:
 | --- | --- |
 | **Refresh usage** | Poll every agent now instead of waiting for the 5-minute cycle. |
 | **Sound on confirm** | Play a sound the moment a session first needs your approval. |
+| **Keep awake** | Keep the computer from going to sleep — also after you lock it — for as long as it is ticked, like Caffeine, so a long agent run finishes while you are away. The screen can still turn off to save power. It does not depend on what your agents are doing, and it is remembered across restarts. On a laptop with the charger in, closing the lid may not sleep it while this is on. |
 | **Pause lighting** | Hand your devices straight back to Synapse / G HUB / OpenRGB and stop driving them — for recording, streaming or screenshots. The tray icon and the usage panel keep working; only the hardware is released. It is deliberately **not** remembered across restarts, so you can never end up with permanently dead lights and no idea why. |
 | **Settings…** | The settings window (agents, language, clocks, colours, engine, update options). |
 | **Check for updates** | Run the update check now and offer to install. |
@@ -492,6 +493,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `stats.alert_command` | *(none)* | Shell command run once each time the alert above fires — see [Reminders you can't miss](#reminders-you-cant-miss). `TINTAVIEW_STATUS` is `limit`; `TINTAVIEW_AGENTS`, `TINTAVIEW_LIMIT`, `TINTAVIEW_PCT` and `TINTAVIEW_MESSAGE` say which window crossed, and the question variables are empty. Output and exit code ignored, a failure logged. Also on the **Alerts** tab in **Settings…**. |
 | `stats.show_estimate` | `true` | Show the local token/cost estimate under each agent's official rows. Also a tick box in **Settings…**. Off skips the transcript scan entirely, not just the rows. |
 | `ui.chime_on_confirm` | `false` | Play a sound when a session first needs your approval. |
+| `ui.keep_awake` | `false` | The tray's **Keep awake** toggle: no system sleep (locked screen included) while it is on; the display may still turn off. |
 | `ui.language` | `en` | Interface language for the tray and usage panel — see [Interface language](#interface-language). `en` \| `es` \| `it` \| `de` \| `pl` \| `ru` \| `be` \| `uk`; anything else falls back to English. |
 | `ui.clocks.enabled` | `false` | Show world clocks in the usage panel — a band of up to four times between the TintaView title and the first agent. Also a tick box in **Settings…** → **Clocks**. |
 | `[[ui.clocks.clock]]` | *(none)* | One table per clock, in display order, up to four. `zone` is an IANA id (`zone = 'Europe/Warsaw'`); `show_city` (default `true`) labels that clock "Poland/Warsaw" rather than "Poland". Each clock follows its own zone's daylight-saving changes — nothing to update twice a year. Pick them by country in **Settings…** → **Clocks**; extras beyond four are dropped on load. |

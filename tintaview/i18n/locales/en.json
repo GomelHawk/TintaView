@@ -8,6 +8,7 @@
 
   "tray.menu.refresh_usage": "Refresh usage",
   "tray.menu.sound_on_confirm": "Sound on confirm",
+  "tray.menu.keep_awake": "Keep awake",
   "tray.menu.pause_lighting": "Pause lighting",
   "tray.menu.settings": "Settings…",
   "tray.menu.check_updates": "Check for updates",

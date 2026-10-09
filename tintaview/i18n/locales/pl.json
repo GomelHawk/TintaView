@@ -9,6 +9,7 @@
 
   "tray.menu.refresh_usage": "Odśwież zużycie",
   "tray.menu.sound_on_confirm": "Dźwięk przy prośbie o potwierdzenie",
+  "tray.menu.keep_awake": "Nie usypiaj",
   "tray.menu.pause_lighting": "Wstrzymaj podświetlenie",
   "tray.menu.settings": "Ustawienia…",
   "tray.menu.check_updates": "Sprawdź aktualizacje",

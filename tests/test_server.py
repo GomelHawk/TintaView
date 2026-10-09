@@ -556,7 +556,9 @@ def test_disabled_agent_events_are_ignored():
         # ...while an enabled one on the same server is unaffected.
         _event(server, "session-start", agent="claude", sid="a1")
         _event(server, "working", agent="claude", sid="a1")
-        assert _get_state(server)["agents"]["claude"]["effective"] == "working"
+        assert _wait_until(
+            lambda: _get_state(server)["agents"].get("claude", {}).get("effective") == "working"
+        )
     finally:
         server.stop()
 
@@ -1456,6 +1458,9 @@ def test_a_subagents_event_on_a_working_session_is_ordinary(server_engine):
 def test_a_suppressed_subagent_event_still_counts_as_a_sign_of_life(server_engine):
     server, _engine = server_engine
     _event(server, "confirm", "claude", "s1")
+    # The hook is acked before the store is updated, so the session may not exist yet
+    # when the reply arrives — reading it straight away raced on a busy CI runner.
+    assert _wait_until(lambda: ("claude", "s1") in server.state._sessions)
     stamp = server.state._sessions[("claude", "s1")].seen
     time.sleep(0.02)
 

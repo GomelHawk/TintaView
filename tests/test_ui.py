@@ -705,6 +705,66 @@ def test_tray_sound_toggle_persists(tray, tmp_path):
     assert (tmp_path / "config.toml").exists()
 
 
+class _FakeKeepAwake:
+    def __init__(self):
+        self.calls = []
+
+    def acquire(self):
+        self.calls.append(True)
+        return True
+
+    def release(self):
+        self.calls.append(False)
+
+    def set(self, on):
+        self.calls.append(on)
+        return on
+
+
+def test_tray_keep_awake_toggle_acquires_releases_and_persists(tray, tmp_path):
+    from tintaview.core.config import load
+
+    app_instance, _ = tray
+    fake = _FakeKeepAwake()
+    app_instance._keep_awake = fake
+    action = next(
+        a for a in app_instance.tray.contextMenu().actions() if a.text() == "Keep awake"
+    )
+    assert action.isChecked() is False
+
+    action.trigger()
+    assert fake.calls == [True]
+    assert load(tmp_path / "config.toml").ui.keep_awake is True
+
+    action.trigger()
+    assert fake.calls == [True, False]
+    assert load(tmp_path / "config.toml").ui.keep_awake is False
+
+
+def test_tray_keep_awake_is_reapplied_at_startup(qapp, monkeypatch, tmp_path):
+    """The toggle is remembered, so a tray started with it on holds the request
+    straight away rather than waiting for the menu to be touched."""
+    monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
+    for worker in (tray_mod.StatsWorker, tray_mod.UpdateCheckWorker, tray_mod.HookCheckWorker):
+        monkeypatch.setattr(worker, "fetch", lambda self: None)
+    fake = _FakeKeepAwake()
+    monkeypatch.setattr(tray_mod, "KeepAwake", lambda: fake)
+    cfg = Config()
+    cfg.ui.keep_awake = True
+
+    app_instance = TrayApp(cfg, _FakeServer(), qapp)
+    try:
+        assert fake.calls == [True]
+        action = next(
+            a for a in app_instance.tray.contextMenu().actions() if a.text() == "Keep awake"
+        )
+        assert action.isChecked() is True
+    finally:
+        for timer in ("state_timer", "usage_timer", "blink_timer", "anim_timer"):
+            getattr(app_instance, timer).stop()
+        app_instance.tray.hide()
+
+
 # --------------------------------------------------------------------------- update check
 
 

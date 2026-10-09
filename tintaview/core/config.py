@@ -322,6 +322,10 @@ class ClocksConfig:
 @dataclass
 class UIConfig:
     chime_on_confirm: bool = False
+    #: The tray menu's "Keep awake" toggle: hold off system sleep (also behind a locked
+    #: screen) for as long as it is on, while still letting the display turn off — see
+    #: `core/keepawake.py`. Independent of agent activity by design.
+    keep_awake: bool = False
     collapsed_agents: list[str] = field(default_factory=list)  # flyout sections user collapsed
     #: Interface language for the tray and the usage panel — a code from
     #: `tintaview.i18n.LANGUAGES`. English by default, and English again for anything
