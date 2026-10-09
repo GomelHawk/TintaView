@@ -56,8 +56,15 @@ MODULE = "tintaview.core.mcp"
 #: Claude Code's permission rule for exactly this one tool (``mcp__<server>__<tool>``).
 CLAUDE_ALLOW_RULE = f"mcp__{SERVER_KEY}__{mcp_server.TOOL_NAME}"
 
+#: Copilot CLI has no user-level setting that pre-approves a single MCP tool — only the
+#: `--allow-tool` flag and "approve for the rest of this session" at the prompt (its
+#: `permissions.allow` rules are enterprise-managed settings) — so this is said, not done.
+COPILOT_APPROVAL_NOTE = (
+    "Copilot asks before the tool runs. To skip that, approve it for the session at the "
+    "first prompt, or start Copilot with --allow-tool='tintaview(notify_user)'.")
+
 #: Agents that can be registered. Stats-only providers have no agent to call a tool.
-SUPPORTED = ("claude", "codex", "cursor")
+SUPPORTED = ("claude", "codex", "copilot", "cursor")
 
 
 def console_python(executable: str | None = None) -> str:
@@ -118,6 +125,8 @@ def config_paths(agent_key: str, home: Path) -> list[Path]:
         return [home / "config.toml"]
     if agent_key == "cursor":
         return [home / "mcp.json"]
+    if agent_key == "copilot":
+        return [home / "mcp-config.json"]
     return []
 
 
@@ -215,6 +224,18 @@ def plan_install(agent_key: str, home: Path, python: str) -> list[HookPlan]:
 
         return [_json_plan(agent_key, config_paths(agent_key, home)[0], add_cursor, [
             note, "Cursor may ask you to approve the tool the first time it runs."])]
+    if agent_key == "copilot":
+        def add_copilot(data: dict) -> None:
+            servers = data.get("mcpServers")
+            servers = dict(servers) if isinstance(servers, dict) else {}
+            # `tools` is Copilot's visibility filter (which of the server's tools the
+            # model sees), not an approval: naming the one tool keeps it explicit.
+            servers[SERVER_KEY] = {"type": "local", **entry, "env": {},
+                                   "tools": [mcp_server.TOOL_NAME]}
+            data["mcpServers"] = servers
+
+        return [_json_plan(agent_key, config_paths(agent_key, home)[0], add_copilot, [
+            note, COPILOT_APPROVAL_NOTE])]
     return []
 
 
@@ -285,7 +306,7 @@ def plan_uninstall(agent_key: str, home: Path) -> list[HookPlan]:
         state, settings = config_paths(agent_key, home)
         return [_json_plan(agent_key, state, drop_server, []),
                 _json_plan(agent_key, settings, disallow, [])]
-    if agent_key == "cursor":
+    if agent_key in ("cursor", "copilot"):
         return [_json_plan(agent_key, config_paths(agent_key, home)[0], drop_server, [])]
     if agent_key == "codex":
         import tomlkit
@@ -357,7 +378,9 @@ def _auto_approved(agent_key: str, home: Path) -> bool:
         tools = entry.get("tools") if hasattr(entry, "get") else None
         tool = tools.get(mcp_server.TOOL_NAME) if hasattr(tools, "get") else None
         return hasattr(tool, "get") and tool.get("approval_mode") == "approve"
-    return True  # Cursor: its approval setting is in its own UI, not a file of ours
+    # Cursor: its approval setting is in its own UI, not a file of ours. Copilot: no
+    # user-level setting pre-approves one MCP tool (see COPILOT_APPROVAL_NOTE).
+    return True
 
 
 def registered_launcher(agent_key: str, home: Path) -> dict[str, Any] | None:

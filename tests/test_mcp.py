@@ -305,6 +305,29 @@ def test_cursor_registration(tmp_path):
     assert json.loads(path.read_text()) == {"mcpServers": {"other": {"command": "x"}}}
 
 
+def test_copilot_registration(tmp_path):
+    """Copilot reads `~/.copilot/mcp-config.json`: a `local` server, with `tools` naming
+    the one tool the model may see. Only our entry is added, and only it is removed."""
+    home = _home(tmp_path, "copilot")
+    path = home / "mcp-config.json"
+    path.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}, indent=2) + "\n")
+
+    plans = mcp_install.plan_install("copilot", home, PY)
+    assert [p.path for p in plans] == [path]
+    assert any("--allow-tool='tintaview(notify_user)'" in n for n in plans[0].notes)
+    _apply(plans)
+    servers = json.loads(path.read_text())["mcpServers"]
+    assert servers["other"] == {"command": "x"}
+    assert servers["tintaview"] == {"type": "local", "command": PY,
+                                    "args": ["-m", "tintaview.core.mcp", "copilot"],
+                                    "env": {}, "tools": ["notify_user"]}
+    assert mcp_install.status("copilot", home, PY) == hooks_mod.STATUS_INSTALLED
+    assert mcp_install.plan_install("copilot", home, PY)[0].action == hooks_mod.ACTION_NOOP
+
+    _apply(mcp_install.plan_uninstall("copilot", home))
+    assert json.loads(path.read_text()) == {"mcpServers": {"other": {"command": "x"}}}
+
+
 @pytest.mark.parametrize("key", mcp_install.SUPPORTED)
 def test_a_registration_for_another_interpreter_is_stale(tmp_path, key):
     home = _home(tmp_path, key)

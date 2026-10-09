@@ -4,6 +4,43 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.9.1 — 2026-10-09
+
+- **"Notify me when it's done" now works in GitHub Copilot CLI too.** Run the setup wizard
+  once more (tray → **Settings…** → **Open Full Setup Wizard (Terminal)…**) or
+  `tintaview hooks install --agent copilot`: it adds TintaView's `notify_user` tool to
+  `~/.copilot/mcp-config.json`, shown first and only after you confirm. Copilot may ask
+  before the tool runs; approve it for the session, or start Copilot with
+  `--allow-tool='tintaview(notify_user)'` to skip the question.
+
+## 0.9.0 — 2026-10-09
+
+- **GitHub Copilot CLI now lights up**, like Claude Code, Codex and Cursor. Its lights turn
+  red when Copilot asks for permission or asks you a question. To switch it on, run the setup
+  wizard once (tray → **Settings…** → **Open Full Setup Wizard (Terminal)…**) or
+  `tintaview hooks install --agent copilot`. TintaView's hooks go in a file of their own,
+  `~/.copilot/hooks/tintaview.json`, and nothing of yours is edited. It needs a recent
+  Copilot CLI (tested on 1.0.94 and later). In a WSL setup it's the Copilot you run inside
+  WSL that lights up. If Copilot was already ticked for its usage card, the tray tells you at
+  startup that its hooks are missing.
+- **Keep awake**: a new tray menu item that stops the computer from going to sleep — also
+  after you lock it — so a long agent run finishes while you're away. The screen can still
+  turn off to save power. While it's on, the tray icon shows a small green shield. It is
+  remembered across restarts. With a laptop on its charger, closing the lid may not put it
+  to sleep while this is on.
+- **Your own notification sound.** The new **Sound** tab in **Settings…** has the
+  "Sound when an agent needs confirmation" option (moved from General), plus a custom WAV,
+  OGG or MP3 file with its own volume and a **Test** button. If the file can't be played,
+  the usual system sound plays instead.
+- **Fixes after an update are picked up by themselves**: TintaView now refreshes its own hook
+  script at startup when it's out of date, instead of waiting for you to re-run the setup.
+- **Codex**: to stop the "clamping SessionEnd hook timeout to 3s" warning at every Codex
+  start, run `tintaview hooks install --agent codex` once.
+- Pressing **OK** in Settings no longer undoes a Keep awake toggle or a collapsed usage
+  section you changed while the window was open.
+- `tintaview doctor` also checks Keep awake and your custom sound, and whether the hook
+  script is up to date.
+
 ## 0.8.1 — 2026-09-29
 
 - **The explanations in Settings are readable on a dark theme.** On Windows' dark mode they
