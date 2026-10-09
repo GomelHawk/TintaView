@@ -1937,6 +1937,8 @@ def test_hook_check_worker_emits_the_shared_helpers_answer(qapp, monkeypatch):
         return ["Codex CLI"]
 
     monkeypatch.setattr(wsl_mod, "missing_hooks", fake_missing)
+    refreshed: list = []
+    monkeypatch.setattr("tintaview.install.hookscript.refresh_if_outdated", refreshed.append)
     cfg = Config()
     worker = tray_mod.HookCheckWorker(cfg)
     seen: list[list] = []
@@ -1946,6 +1948,24 @@ def test_hook_check_worker_emits_the_shared_helpers_answer(qapp, monkeypatch):
 
     assert asked == [cfg]
     assert seen == [["Codex CLI"]]
+    assert refreshed == [cfg]  # the outdated-script refresh rides on the same startup run
+
+
+def test_hook_check_worker_still_checks_when_the_refresh_fails(qapp, monkeypatch):
+    import tintaview.install.wsl as wsl_mod
+
+    def boom(cfg):
+        raise OSError("locked")
+
+    monkeypatch.setattr("tintaview.install.hookscript.refresh_if_outdated", boom)
+    monkeypatch.setattr(wsl_mod, "missing_hooks", lambda cfg, env=None, keys=None: ["Cursor"])
+    worker = tray_mod.HookCheckWorker(Config())
+    seen: list[list] = []
+    worker.missing_ready.connect(seen.append)
+
+    worker._run()
+
+    assert seen == [["Cursor"]]
 
 
 def test_hook_check_worker_stays_silent_when_the_distro_is_unreachable(qapp, monkeypatch):
@@ -1954,6 +1974,7 @@ def test_hook_check_worker_stays_silent_when_the_distro_is_unreachable(qapp, mon
     import tintaview.install.wsl as wsl_mod
 
     monkeypatch.setattr(wsl_mod, "missing_hooks", lambda cfg, env=None, keys=None: None)
+    monkeypatch.setattr("tintaview.install.hookscript.refresh_if_outdated", lambda cfg: False)
     worker = tray_mod.HookCheckWorker(Config())
     seen: list[list] = []
     worker.missing_ready.connect(seen.append)

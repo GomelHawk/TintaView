@@ -314,6 +314,15 @@ class HookCheckWorker(_GuardedWorker):
             from tintaview.install import wsl
         except ImportError:
             return
+        # An upgrade never rewrites the installed `tv-hook` (agents point at its stable
+        # path), so this is where an outdated copy gets the current script — silently:
+        # it is TintaView's own file, not the user's config. See `refresh_if_outdated`.
+        try:
+            from tintaview.install import hookscript
+
+            hookscript.refresh_if_outdated(self._cfg)
+        except Exception:
+            log.exception("could not refresh the hook script")
         try:
             missing = wsl.missing_hooks(self._cfg)
         except Exception:

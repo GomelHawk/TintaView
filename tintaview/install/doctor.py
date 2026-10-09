@@ -16,6 +16,7 @@ failure (bad config) doesn't get buried under a wall of downstream noise caused 
     5. HOOK SCRIPT   — tv-hook + hook.env, the "silent killer" if they drift
     6. AGENT HOOKS   — per-agent install status (+ Codex's feature flag)
     6b. NOTIFY TOOL  — the notify_user MCP server, registered per agent (optional)
+    6c. KEEP AWAKE / SOUND — can the tray's keep-awake and custom chime work here
     7. STATS         — can each agent's usage provider produce rows
     8. LIVE HOOK TEST (--verbose only) — an interactive, best-effort real-event check
     9. PAINT (--paint only) — open the configured engine, cycle colours, ask "did you see it?"
@@ -483,6 +484,7 @@ def _check_hook_script(
         )
     else:
         reporter.ok("HOOK SCRIPT", f"{hook_bin} exists{where}")
+        _check_hook_script_current(reporter, hook_bin)
 
     expected_url = f"http://{cfg.server.host}:{cfg.server.port}"
 
@@ -512,6 +514,77 @@ def _check_hook_script(
         )
     else:
         reporter.ok("HOOK SCRIPT", f"{hook_env} points at {expected_url}{where}")
+
+
+def _check_hook_script_current(reporter: _Reporter, hook_bin: Path) -> None:
+    """Is the installed `tv-hook` the one this version ships? An upgrade never rewrites
+    it; the tray does at startup (`hookscript.refresh_if_outdated`), so an outdated copy
+    here means the tray hasn't started since the upgrade — or couldn't write the file."""
+    from . import hookscript
+
+    state = hookscript.script_state(hook_bin)
+    if state == hookscript.SCRIPT_OUTDATED:
+        reporter.warn(
+            "HOOK SCRIPT", f"{hook_bin} is from an older TintaView version",
+            "restart TintaView (it refreshes the script at startup), "
+            "or run `tintaview hooks install --agent all`",
+        )
+    elif state == hookscript.SCRIPT_CURRENT:
+        reporter.ok("HOOK SCRIPT", f"{hook_bin.name} is up to date")
+
+
+# --------------------------------------------------------------------------- 6c. keep awake / sound
+
+
+def _check_keep_awake(reporter: _Reporter, cfg: Config) -> None:
+    """Whether "Keep awake" can work here. It reports availability, not whether the
+    running tray holds the request right now — that lives in the tray process."""
+    from ..core import keepawake
+
+    if not cfg.ui.keep_awake:
+        reporter.ok("KEEP AWAKE", "off")
+        return
+    backend = keepawake.backend()
+    if backend is None:
+        reporter.warn(
+            "KEEP AWAKE", "on, but nothing on this system can keep it awake",
+            "install systemd (systemd-inhibit) or, on GNOME, gnome-session; "
+            "or untick Keep awake in the tray menu",
+        )
+    else:
+        reporter.ok("KEEP AWAKE", f"on, via {backend}")
+
+
+def _check_sound(reporter: _Reporter, cfg: Config) -> None:
+    ui = cfg.ui
+    if not ui.chime_on_confirm:
+        reporter.ok("SOUND", "off")
+        return
+    if not ui.chime_custom or not ui.chime_sound.strip():
+        reporter.ok("SOUND", "on, system sound")
+        return
+    path = Path(ui.chime_sound.strip())
+    if not path.is_file():
+        reporter.warn(
+            "SOUND", f"custom sound {path} does not exist — the system sound plays instead",
+            "pick another file in Settings… → Sound",
+        )
+        return
+    if path.suffix.lower() not in (".wav", ".ogg", ".mp3"):
+        reporter.warn(
+            "SOUND", f"custom sound {path.name} is not WAV, OGG or MP3 — it may not play",
+            "pick a WAV, OGG or MP3 file in Settings… → Sound",
+        )
+        return
+    try:
+        from PySide6 import QtMultimedia  # noqa: F401
+    except Exception as exc:  # ImportError, or a missing libpulse on Linux
+        reporter.warn(
+            "SOUND", f"custom sound can't be played here ({exc}) — the system sound plays instead",
+            "install your desktop's PulseAudio/PipeWire client libraries (libpulse)",
+        )
+        return
+    reporter.ok("SOUND", f"on, {path.name} at {ui.chime_volume}%")
 
 
 # --------------------------------------------------------------------------- 6. agent hooks
@@ -932,6 +1005,8 @@ def run_doctor(verbose: bool = False, paint: bool = False,
     _check_hook_script(reporter, cfg, env, split_home)
     _check_agent_hooks(reporter, cfg, env, split_home)
     _check_notify_tool(reporter, cfg, env, split_home)
+    _check_keep_awake(reporter, cfg)
+    _check_sound(reporter, cfg)
     _check_stats(reporter, cfg)
     if verbose:
         _live_hook_test(reporter, cfg, daemon_ok, interactive)

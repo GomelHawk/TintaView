@@ -1172,3 +1172,62 @@ def test_wsl_split_notify_tool_reports_nothing_for_an_unreachable_distro(monkeyp
     D._check_notify_tool(reporter, cfg, env, None)
 
     assert reporter.records == []
+
+
+# --------------------------------------------------------------------------- outdated hook script / keep awake / sound
+
+
+def test_an_outdated_hook_script_is_a_warning_with_a_fix(tmp_path, capsys):
+    from tintaview.install import hookscript
+
+    hook = tmp_path / "tv-hook.sh"
+    hook.write_text("#!/bin/sh\n# old\n", encoding="utf-8")
+    reporter = D._Reporter(verbose=True)
+    D._check_hook_script_current(reporter, hook)
+    out = capsys.readouterr().out
+    assert reporter.warns == 1 and reporter.fails == 0
+    assert "older TintaView version" in out and "restart TintaView" in out
+
+    hook.write_text(hookscript.packaged_script("tv-hook.sh"), encoding="utf-8")
+    reporter = D._Reporter(verbose=True)
+    D._check_hook_script_current(reporter, hook)
+    assert reporter.warns == 0
+    assert "up to date" in capsys.readouterr().out
+
+
+def test_keep_awake_section(monkeypatch, capsys):
+    from tintaview.core import keepawake
+
+    cfg = Config()
+    reporter = D._Reporter(verbose=True)
+    D._check_keep_awake(reporter, cfg)
+    assert "[OK  ] KEEP AWAKE     off" in capsys.readouterr().out
+
+    cfg.ui.keep_awake = True
+    monkeypatch.setattr(keepawake, "backend", lambda: None)
+    D._check_keep_awake(reporter, cfg)
+    assert reporter.warns == 1
+    monkeypatch.setattr(keepawake, "backend", lambda: "systemd-inhibit")
+    D._check_keep_awake(reporter, cfg)
+    assert "on, via systemd-inhibit" in capsys.readouterr().out
+
+
+def test_sound_section(tmp_path, capsys):
+    cfg = Config()
+    reporter = D._Reporter(verbose=True)
+    D._check_sound(reporter, cfg)
+    cfg.ui.chime_on_confirm = True
+    D._check_sound(reporter, cfg)
+    cfg.ui.chime_custom = True
+    cfg.ui.chime_sound = str(tmp_path / "gone.ogg")
+    D._check_sound(reporter, cfg)
+    weird = tmp_path / "ding.aiff"
+    weird.write_bytes(b"x")
+    cfg.ui.chime_sound = str(weird)
+    D._check_sound(reporter, cfg)
+    out = capsys.readouterr().out
+    assert "SOUND          off" in out
+    assert "on, system sound" in out
+    assert "does not exist" in out
+    assert "not WAV, OGG or MP3" in out
+    assert reporter.warns == 2 and reporter.fails == 0

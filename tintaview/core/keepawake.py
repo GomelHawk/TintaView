@@ -107,6 +107,17 @@ class KeepAwake:
             log.info("keep-awake released")
 
 
+def backend() -> str | None:
+    """What `acquire()` would use on this machine, for `doctor` — or None when nothing
+    can keep it awake. Only checks availability; never takes the request."""
+    if sys.platform == "win32":
+        return "Windows power request"
+    if sys.platform == "darwin":
+        return "caffeinate" if shutil.which("caffeinate") else None
+    commands = _linux_commands()
+    return commands[0][0] if commands else None
+
+
 def _linux_commands() -> list[list[str]]:
     """Inhibitor commands to try, best first. Each wraps `cat` so the inhibitor ends
     when our end of its stdin pipe closes — see the module docstring."""
