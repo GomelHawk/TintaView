@@ -82,7 +82,7 @@ def test_tooltip_says_none_yet_then_peeks_at_the_newest(qapp):
 def test_clicking_an_empty_bell_does_nothing(qapp):
     card = _card(qapp)
     card._open_notifications()
-    assert card._notify_popup is None
+    assert card.findChild(NotifyPopup) is None
 
 
 def test_opening_the_list_marks_it_seen_and_shows_every_message(qapp):
@@ -90,7 +90,7 @@ def test_opening_the_list_marks_it_seen_and_shows_every_message(qapp):
     card.notify_log.add(NotifyEntry("claude", "first <b>not markup</b>", cwd="/p/TintaView"))
     card.notify_log.add(NotifyEntry("copilot", "second"))
     card._open_notifications()
-    popup = card._notify_popup
+    popup = card.findChild(NotifyPopup)
     try:
         assert isinstance(popup, NotifyPopup) and popup.isVisible()
         assert not card.notify_log.unread
@@ -107,11 +107,35 @@ def test_clear_empties_the_list_and_grays_the_bell(qapp):
     card = _card(qapp)
     card.notify_log.add(NotifyEntry("claude", "done"))
     card._open_notifications()
-    popup = card._notify_popup
+    popup = card.findChild(NotifyPopup)
     clear = next(b for b in popup.findChildren(QtWidgets.QPushButton) if b.text() == "Clear")
     clear.click()
     assert card.notify_log.entries == []
     assert card._bell_tooltip() == "No notifications yet"
+
+
+def test_an_opened_list_leaves_no_reference_cycle(qapp):
+    """The CI crash (Windows access violation, macOS segfault in shiboken's
+    `mainThreadDeletionHandler`, PySide6 6.12): card and popup referenced each other,
+    so only the cycle collector could free them — on whatever thread it ran — and the
+    deferred Qt delete then hit a popup that had already deleted itself on close.
+    Without a cycle the last reference going away frees the card at once, right here
+    on the main thread, which is all this checks: `gc` is off while it runs."""
+    import gc
+    import weakref
+
+    gc.collect()
+    gc.disable()
+    try:
+        card = _card(qapp)
+        card.notify_log.add(NotifyEntry("claude", "done"))
+        card._open_notifications()
+        card.findChild(NotifyPopup).close()
+        ref = weakref.ref(card)
+        del card
+        assert ref() is None, "the card is only freeable by the cycle collector"
+    finally:
+        gc.enable()
 
 
 def _bell_pixels(card: Flyout) -> set[str]:

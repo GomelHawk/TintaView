@@ -718,8 +718,11 @@ class SettingsDialog(QtWidgets.QDialog):
         sound.play_chime(True, self._chime_file.text(), self._chime_volume.value())
         if not self._chime_watching:
             # The player exists only once something has been played through it.
-            sound.on_playing_changed(self._show_chime_playing)
+            sound.on_playing_changed(self._on_chime_state)
             self._chime_watching = True
+        self._show_chime_playing(sound.is_playing())
+
+    def _on_chime_state(self, _state: object) -> None:
         self._show_chime_playing(sound.is_playing())
 
     def _show_chime_playing(self, playing: bool) -> None:

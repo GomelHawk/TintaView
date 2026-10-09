@@ -625,7 +625,6 @@ class Flyout(QtWidgets.QWidget):
         #: `notify_user` messages behind the bell. The tray owns it (it is where the
         #: messages arrive); the card only reads it, marks it seen and clears it.
         self.notify_log = notify_log or NotifyLog()
-        self._notify_popup: NotifyPopup | None = None
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)  # needed to get mouseMoveEvent without a button held
         self._cfg = cfg or Config()
@@ -876,8 +875,13 @@ class Flyout(QtWidgets.QWidget):
         if not self.notify_log.entries:
             return
         QtWidgets.QToolTip.hideText()
-        popup = NotifyPopup(self, self.notify_log, on_clear=self._clear_notifications)
-        self._notify_popup = popup
+        # No Python reference to the popup is kept, and it gets none to the card — Clear
+        # comes back as a signal. A card <-> popup reference cycle can only be freed by
+        # the cycle collector, which may run on any thread; PySide then hands the Qt
+        # delete to the main thread, and with the popup also deleting itself on close
+        # that crashed CI on Windows and macOS (PySide6 6.12) inside unrelated tests.
+        popup = NotifyPopup(self, self.notify_log)
+        popup.cleared.connect(self._clear_notifications)
         bell = self._bell_rect()
         # Right-aligned with the card, just under the title bar.
         popup.adjustSize()
@@ -1157,14 +1161,16 @@ class NotifyPopup(QtWidgets.QFrame):
 
     MAX_LIST_H = 360  # past this (about five entries) the list scrolls
 
-    def __init__(self, parent: QtWidgets.QWidget, log: NotifyLog,
-                 on_clear: Callable[[], None]) -> None:
+    #: Clear was pressed — the card empties the log. A signal rather than a callback the
+    #: popup holds, so the popup never keeps the card alive (see `_open_notifications`).
+    cleared = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget, log: NotifyLog) -> None:
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
         # Without it the rounded border sits on a square of window background.
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setObjectName("notifyPopup")
-        self._on_clear = on_clear
         self.setFixedWidth(CARD_W - 2 * PAD)
         self.setStyleSheet(
             f"QLabel {{ color: {TEXT.name()}; background: transparent; }}"
@@ -1264,6 +1270,6 @@ class NotifyPopup(QtWidgets.QFrame):
         p.end()
 
     def _clear(self) -> None:
-        self._on_clear()
+        self.cleared.emit()
         self.close()
 

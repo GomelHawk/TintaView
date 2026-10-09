@@ -90,16 +90,14 @@ def stop() -> None:
         _player.stop()
 
 
-def on_playing_changed(callback: Callable[[bool], None]) -> None:
-    """Call `callback(playing)` whenever a custom sound starts or stops, for the
-    settings dialog's Test/Stop button. Connected to the one shared player, so it is
-    only possible once that exists — i.e. after `play_file` has been called."""
-    if _player is None:
-        return
-    from PySide6 import QtMultimedia
-
-    playing = QtMultimedia.QMediaPlayer.PlaybackState.PlayingState
-    _player.playbackStateChanged.connect(lambda state: callback(state == playing))
+def on_playing_changed(slot: Callable[[Any], None]) -> None:
+    """Connect `slot` to the shared player's playback-state signal, for the settings
+    dialog's Test/Stop button; the slot asks `is_playing()` for the answer. Pass a
+    method of a QObject, never a lambda: Qt then drops the connection when that object
+    is destroyed, where a lambda would keep a closed dialog alive for the life of the
+    player. Only possible once the player exists — after `play_file` has been called."""
+    if _player is not None:
+        _player.playbackStateChanged.connect(slot)
 
 
 def _linear_volume(volume: int) -> float:
