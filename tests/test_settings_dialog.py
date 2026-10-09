@@ -928,3 +928,68 @@ def test_the_escalation_controls_follow_their_tick_box(qapp, tmp_path):
 
     assert dialog._escalate_spin.isEnabled() is True
     assert dialog._escalate_command.isEnabled() is True
+
+
+# --------------------------------------------------------------------------- Sound tab
+
+
+def test_sound_tab_sits_between_alerts_and_clocks(qapp, tmp_path):
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    tabs = dialog.findChild(QtWidgets.QTabWidget)
+    names = [tabs.tabText(i) for i in range(tabs.count())]
+    assert names[names.index("Alerts") + 1] == "Sound"
+    assert names[names.index("Sound") + 1] == "Clocks"
+    # Moved, not copied: the chime box lives on the Sound tab only.
+    assert tabs.widget(names.index("Sound")).isAncestorOf(dialog._chime_check)
+    assert not tabs.widget(names.index("General")).isAncestorOf(dialog._chime_check)
+
+
+def test_sound_controls_follow_both_tick_boxes(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.ui.chime_on_confirm = False
+    cfg.ui.chime_custom = False
+    dialog = SettingsDialog(cfg)
+    custom_controls = (dialog._chime_file, dialog._chime_volume)
+
+    assert dialog._chime_custom_check.isEnabled() is False
+    assert not any(w.isEnabled() for w in custom_controls)
+
+    dialog._chime_check.setChecked(True)
+    assert dialog._chime_custom_check.isEnabled() is True
+    assert not any(w.isEnabled() for w in custom_controls)
+
+    dialog._chime_custom_check.setChecked(True)
+    assert all(w.isEnabled() for w in custom_controls)
+
+    dialog._chime_check.setChecked(False)  # the outer box grays everything again
+    assert not any(w.isEnabled() for w in custom_controls)
+
+
+def test_sound_tab_writes_every_field_it_shows(qapp, tmp_path):
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    dialog._chime_check.setChecked(True)
+    dialog._chime_custom_check.setChecked(True)
+    dialog._chime_file.setText("  /sounds/ding.ogg  ")
+    dialog._chime_volume.setValue(35)
+
+    dialog._on_accept()
+
+    reloaded = config_mod.load(dialog.result_cfg.path)
+    assert reloaded.ui.chime_on_confirm is True
+    assert reloaded.ui.chime_custom is True
+    assert reloaded.ui.chime_sound == "/sounds/ding.ogg"
+    assert reloaded.ui.chime_volume == 35
+
+
+def test_the_test_button_plays_what_is_on_screen(qapp, tmp_path, monkeypatch):
+    from tintaview.ui import settings_dialog as dialog_mod
+
+    calls = []
+    monkeypatch.setattr(dialog_mod.sound, "play_chime", lambda *a: calls.append(a))
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    dialog._chime_file.setText("/sounds/new.wav")
+    dialog._chime_volume.setValue(60)
+
+    dialog._test_chime()
+
+    assert calls == [(True, "/sounds/new.wav", 60)]

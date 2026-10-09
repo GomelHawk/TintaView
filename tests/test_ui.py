@@ -1056,6 +1056,9 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
         **{
             "enabled_agents": ["codex"],
             "ui.chime_on_confirm": True,
+            "ui.chime_custom": True,
+            "ui.chime_sound": "/sounds/ding.ogg",
+            "ui.chime_volume": 40,
             "stats.poll_seconds": 90,
             "stats.show_estimate": False,
             "stats.show_trend": False,
@@ -1081,6 +1084,9 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     cfg = app_instance._cfg
     assert cfg.enabled_agents == ["codex"]
     assert cfg.ui.chime_on_confirm is True
+    assert cfg.ui.chime_custom is True
+    assert cfg.ui.chime_sound == "/sounds/ding.ogg"
+    assert cfg.ui.chime_volume == 40
     assert cfg.stats.poll_seconds == 90
     assert cfg.stats.show_estimate is False
     assert cfg.stats.show_trend is False
@@ -1133,6 +1139,41 @@ def test_every_stats_field_is_accounted_for():
         "Tray._apply_settings, assert it in the test above and add it to `dialog_writes`; "
         "otherwise add it to `config_file_only`."
     )
+
+
+def test_every_ui_field_is_accounted_for():
+    """The same tripwire for `UIConfig`: the chime fields are read by `_chime` off the
+    live config, so one the Sound tab writes but `_apply_settings` forgets would only
+    take effect after a restart."""
+    from dataclasses import fields
+
+    from tintaview.core.config import UIConfig
+
+    # Written by SettingsDialog and asserted in the mirror test above.
+    dialog_writes = {"chime_on_confirm", "chime_custom", "chime_sound", "chime_volume",
+                     "language", "clocks"}
+    # Written by the tray itself (menu toggle, flyout collapse), never by the dialog.
+    tray_writes = {"keep_awake", "collapsed_agents"}
+
+    assert {f.name for f in fields(UIConfig)} == dialog_writes | tray_writes, (
+        "UIConfig changed. If the settings dialog writes the new field, mirror it in "
+        "Tray._apply_settings, assert it in the mirror test and add it to `dialog_writes`."
+    )
+
+
+def test_chime_plays_the_configured_sound(tray, monkeypatch):
+    app_instance, _ = tray
+    calls = []
+    monkeypatch.setattr(tray_mod.sound, "play_chime", lambda *a: calls.append(a))
+    ui = app_instance._cfg.ui
+
+    app_instance._chime()  # chime off
+    assert calls == []
+
+    ui.chime_on_confirm, ui.chime_custom, ui.chime_sound, ui.chime_volume = (
+        True, True, "/s/ding.mp3", 30)
+    app_instance._chime()
+    assert calls == [(True, "/s/ding.mp3", 30)]
 
 
 def test_every_escalation_field_is_accounted_for():

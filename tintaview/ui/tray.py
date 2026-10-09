@@ -40,7 +40,7 @@ from tintaview.core.events import STATUS_NONE
 from tintaview.core.keepawake import KeepAwake
 from tintaview.i18n import set_language, t
 from tintaview.stats import format as fmt
-from tintaview.ui import icons
+from tintaview.ui import icons, sound
 from tintaview.ui.dialogs import DoctorReportDialog, show_about
 from tintaview.ui.flyout import Flyout
 from tintaview.ui.workers import (
@@ -554,6 +554,10 @@ class TrayApp(QtCore.QObject):
         self._cfg.enabled_agents = list(new_cfg.enabled_agents)
         self._cfg.agents = new_cfg.agents  # newly enabled agents' seeded defaults
         self._cfg.ui.chime_on_confirm = new_cfg.ui.chime_on_confirm
+        # Read by `_chime` on the next confirm.
+        self._cfg.ui.chime_custom = new_cfg.ui.chime_custom
+        self._cfg.ui.chime_sound = new_cfg.ui.chime_sound
+        self._cfg.ui.chime_volume = new_cfg.ui.chime_volume
         self._cfg.ui.language = new_cfg.ui.language
         self._cfg.stats.poll_seconds = new_cfg.stats.poll_seconds
         # `StatsService` holds this very object, so this line is what makes the setting
@@ -1102,17 +1106,10 @@ class TrayApp(QtCore.QObject):
             log.exception("user command failed to start: %r", command)
 
     def _chime(self) -> None:
-        if not self._cfg.ui.chime_on_confirm:
+        ui = self._cfg.ui
+        if not ui.chime_on_confirm:
             return
-        if sys.platform == "win32":
-            try:
-                import winsound
-
-                winsound.MessageBeep(winsound.MB_ICONASTERISK)
-                return
-            except Exception:
-                pass
-        QtWidgets.QApplication.beep()
+        sound.play_chime(ui.chime_custom, ui.chime_sound, ui.chime_volume)
 
     # --- usage / flyout -------------------------------------------------------------
 

@@ -322,6 +322,12 @@ class ClocksConfig:
 @dataclass
 class UIConfig:
     chime_on_confirm: bool = False
+    #: Play `chime_sound` (WAV, OGG or MP3) at `chime_volume` percent instead of the
+    #: system sound — see `ui/sound.py`. The path is kept when this is switched off, so
+    #: ticking it again restores the same file. Volume applies to the custom file only.
+    chime_custom: bool = False
+    chime_sound: str = ""
+    chime_volume: int = 100
     #: The tray menu's "Keep awake" toggle: hold off system sleep (also behind a locked
     #: screen) for as long as it is on, while still letting the display turn off — see
     #: `core/keepawake.py`. Independent of agent activity by design.

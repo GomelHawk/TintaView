@@ -45,6 +45,7 @@ from ..engines.factory import ENGINE_DISPLAY, ENGINE_MODES, available_engines, e
 from ..i18n import LANGUAGES, t
 from ..i18n import normalize as normalize_language
 from ..install import detect
+from . import sound
 
 log = logging.getLogger(__name__)
 
@@ -406,6 +407,7 @@ class SettingsDialog(QtWidgets.QDialog):
         tabs = QtWidgets.QTabWidget(self)
         tabs.addTab(self._build_general_tab(), t("settings.tab.general"))
         tabs.addTab(self._build_alerts_tab(), t("settings.tab.alerts"))
+        tabs.addTab(self._build_sound_tab(), t("settings.tab.sound"))
         tabs.addTab(self._build_clocks_tab(), t("settings.tab.clocks"))
         tabs.addTab(self._build_lighting_tab(), t("settings.tab.lighting"))
 
@@ -470,14 +472,6 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow(t("settings.language"), self._language_combo)
         form.addRow(_hint(t("settings.language.hint")))
 
-        self._chime_check = QtWidgets.QCheckBox(t("settings.chime"))
-        self._chime_check.setChecked(self._cfg.ui.chime_on_confirm)
-        # Spanning the whole form, not sitting in the field column beside an empty label:
-        # a QCheckBox clips its own text rather than wrapping or eliding it, and the field
-        # column is only as wide as the longest *label* leaves it — which cut the German
-        # wording short by a word.
-        form.addRow(self._chime_check)
-
         self._poll_spin = QtWidgets.QSpinBox()
         # Lower bound normally 30s (the usage APIs rate-limit and their windows are
         # hours long), but never above whatever the file already says: clamping a
@@ -489,7 +483,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self._poll_spin.setValue(stored_poll)
         form.addRow(t("settings.poll"), self._poll_spin)
 
-        # Spanning, same reason as the chime row above.
+        # Spanning the whole form, not sitting in the field column beside an empty label:
+        # a QCheckBox clips its own text rather than wrapping or eliding it, and the field
+        # column is only as wide as the longest *label* leaves it — which cut the German
+        # wording short by a word.
         self._estimate_check = QtWidgets.QCheckBox(t("settings.stats_estimate"))
         self._estimate_check.setChecked(self._cfg.stats.show_estimate)
         self._estimate_check.setToolTip(t("settings.stats_estimate.tooltip"))
@@ -502,7 +499,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self._update_check = QtWidgets.QCheckBox(t("settings.update_check"))
         self._update_check.setChecked(self._cfg.update.check)
-        form.addRow(self._update_check)  # spanning, same reason as the chime row
+        form.addRow(self._update_check)  # spanning, same reason as the estimate row
 
         return widget
 
@@ -616,6 +613,96 @@ class SettingsDialog(QtWidgets.QDialog):
 
         outer.addStretch(1)
         return widget
+
+    # --- Sound tab -----------------------------------------------------------
+
+    def _build_sound_tab(self) -> QtWidgets.QWidget:
+        """The confirm chime: on/off, then an optional custom file with its own volume.
+
+        Nested the same way as the other tabs' tick boxes: what a box switches on is
+        grayed out under it while it is off. The custom-sound controls need *both* boxes,
+        so the inner body's enabled state is the conjunction — Qt would gray it with its
+        parent anyway, but the custom box itself must stay live under a ticked chime.
+        """
+        widget = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(widget)
+        ui = self.result_cfg.ui
+
+        self._chime_check = QtWidgets.QCheckBox(t("settings.chime"))
+        self._chime_check.setChecked(ui.chime_on_confirm)
+        outer.addWidget(self._chime_check)
+
+        chime_body = QtWidgets.QWidget()
+        chime_layout = QtWidgets.QVBoxLayout(chime_body)
+        chime_layout.setContentsMargins(20, 0, 0, 0)
+        self._chime_custom_check = QtWidgets.QCheckBox(t("settings.chime.custom"))
+        self._chime_custom_check.setChecked(ui.chime_custom)
+        chime_layout.addWidget(self._chime_custom_check)
+
+        custom_body = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(custom_body)
+        form.setContentsMargins(20, 0, 0, 0)
+        file_row = QtWidgets.QWidget()
+        file_layout = QtWidgets.QHBoxLayout(file_row)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        self._chime_file = QtWidgets.QLineEdit(ui.chime_sound)
+        self._chime_file.setPlaceholderText(t("settings.chime.file.placeholder"))
+        browse = QtWidgets.QPushButton(t("settings.chime.browse"))
+        browse.clicked.connect(self._browse_chime)
+        file_layout.addWidget(self._chime_file, 1)
+        file_layout.addWidget(browse)
+        form.addRow(t("settings.chime.file"), file_row)
+
+        volume_row = QtWidgets.QWidget()
+        volume_layout = QtWidgets.QHBoxLayout(volume_row)
+        volume_layout.setContentsMargins(0, 0, 0, 0)
+        self._chime_volume = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._chime_volume.setRange(0, 100)
+        self._chime_volume.setValue(max(0, min(100, int(ui.chime_volume))))
+        volume_label = QtWidgets.QLabel()
+        volume_label.setMinimumWidth(volume_label.fontMetrics().horizontalAdvance("100 %"))
+        self._chime_volume.valueChanged.connect(lambda v: volume_label.setText(f"{v} %"))
+        volume_label.setText(f"{self._chime_volume.value()} %")
+        volume_layout.addWidget(self._chime_volume, 1)
+        volume_layout.addWidget(volume_label)
+        form.addRow(t("settings.chime.volume"), volume_row)
+        form.addRow(_hint(t("settings.chime.volume.hint")))
+
+        test = QtWidgets.QPushButton(t("settings.chime.test"))
+        test.clicked.connect(self._test_chime)
+        test_row = QtWidgets.QHBoxLayout()  # a button-sized button, not a field-wide bar
+        test_row.addWidget(test)
+        test_row.addStretch(1)
+        form.addRow("", test_row)
+        chime_layout.addWidget(custom_body)
+        outer.addWidget(chime_body)
+        outer.addStretch(1)
+
+        def sync() -> None:
+            chime_body.setEnabled(self._chime_check.isChecked())
+            custom_body.setEnabled(
+                self._chime_check.isChecked() and self._chime_custom_check.isChecked()
+            )
+
+        self._chime_check.toggled.connect(sync)
+        self._chime_custom_check.toggled.connect(sync)
+        sync()
+        return widget
+
+    def _browse_chime(self) -> None:
+        start = self._chime_file.text().strip()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            t("settings.chime.browse.title"),
+            start,
+            f"{t('settings.chime.browse.filter')} ({' '.join(sound.SOUND_SUFFIXES)})",
+        )
+        if path:
+            self._chime_file.setText(path)
+
+    def _test_chime(self) -> None:
+        """Play exactly what a confirm would, with the values on screen right now."""
+        sound.play_chime(True, self._chime_file.text(), self._chime_volume.value())
 
     # --- Clocks tab ----------------------------------------------------------
 
@@ -822,6 +909,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self._seed_new_agent_defaults(newly_enabled)
 
         cfg.ui.chime_on_confirm = self._chime_check.isChecked()
+        cfg.ui.chime_custom = self._chime_custom_check.isChecked()
+        cfg.ui.chime_sound = self._chime_file.text().strip()
+        cfg.ui.chime_volume = self._chime_volume.value()
         cfg.ui.language = self._language_combo.currentData()
         cfg.stats.poll_seconds = self._poll_spin.value()
         cfg.stats.show_estimate = self._estimate_check.isChecked()
