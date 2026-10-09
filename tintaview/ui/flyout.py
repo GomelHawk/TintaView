@@ -331,10 +331,20 @@ def _icon_pen(color: QtGui.QColor, rect: QRectF) -> QtGui.QPen:
     return pen
 
 
+GEAR_SCALE = 0.80
+#: …and its stroke, a touch lighter than the bell's and the X's: at 80% the full
+#: weight crowded the teeth and the hole.
+GEAR_STROKE = 0.85
+
+
 def _draw_gear_icon(p: QtGui.QPainter, rect: QRectF, color: QtGui.QColor = TEXT) -> None:
     """A generic 6-tooth cog drawn as an outline, with a round hole — no trademarked
-    icon set involved. Tapered teeth with round joins, so no corner is sharp."""
-    cx, cy, s = rect.center().x(), rect.center().y(), rect.width()
+    icon set involved. Tapered teeth with round joins, so no corner is sharp.
+
+    Drawn at `GEAR_SCALE` of its box: at full size the teeth reach further out than the
+    bell's rim and the close X's arms, and the gear read as the biggest of the three."""
+    cx, cy = rect.center().x(), rect.center().y()
+    s = rect.width() * GEAR_SCALE
     outline = QtGui.QPainterPath()
     outline.addEllipse(QtCore.QPointF(cx, cy), s * 0.31, s * 0.31)
     for i in range(6):
@@ -351,7 +361,9 @@ def _draw_gear_icon(p: QtGui.QPainter, rect: QRectF, color: QtGui.QColor = TEXT)
         tooth.addPolygon(QtGui.QPolygonF(points))
         tooth.closeSubpath()
         outline = outline.united(tooth)
-    p.setPen(_icon_pen(color, rect))
+    pen = _icon_pen(color, rect)
+    pen.setWidthF(pen.widthF() * GEAR_STROKE)
+    p.setPen(pen)
     p.setBrush(Qt.NoBrush)
     p.drawPath(outline)
     p.drawEllipse(QtCore.QPointF(cx, cy), s * 0.12, s * 0.12)
@@ -362,10 +374,18 @@ def _draw_gear_icon(p: QtGui.QPainter, rect: QRectF, color: QtGui.QColor = TEXT)
 BELL_DOT = QtGui.QColor(*icons.MARK_BRAND_DOT)
 
 
+#: The bell is drawn a touch inside its box, like the gear (`GEAR_SCALE`), so the three
+#: title-bar icons read as one size. Its stroke stays the shared one.
+BELL_SCALE = 0.92
+
+
 def _draw_bell_icon(p: QtGui.QPainter, rect: QRectF, color: QtGui.QColor,
                     dot: bool = False) -> None:
     """An outline bell: dome and flared rim, a short hanger, a clapper arc below."""
-    cx, top, s = rect.center().x(), rect.top(), rect.width()
+    s = rect.width() * BELL_SCALE
+    cx = rect.center().x()
+    top = rect.center().y() - s / 2
+    right = cx + s / 2
     rim = top + s * 0.70
     body = QtGui.QPainterPath()
     body.moveTo(cx - s * 0.36, rim)
@@ -381,7 +401,7 @@ def _draw_bell_icon(p: QtGui.QPainter, rect: QRectF, color: QtGui.QColor,
     clapper.arcTo(QRectF(cx - s * 0.10, rim + s * 0.02, s * 0.20, s * 0.16), 180, 180)
     p.drawPath(clapper)
     if dot:
-        centre = QtCore.QPointF(rect.right() - s * 0.12, top + s * 0.18)
+        centre = QtCore.QPointF(right - s * 0.12, top + s * 0.18)
         p.setPen(Qt.NoPen)
         p.setBrush(CARD_BG)  # a ring of background, so the dot stands off the outline
         p.drawEllipse(centre, s * 0.22, s * 0.22)
