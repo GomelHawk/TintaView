@@ -2842,6 +2842,12 @@ def test_an_agents_notification_balloons_and_runs_the_notify_command(tray, monke
     assert env["TINTAVIEW_CWD"] == "/work/app"
     for name in ("TINTAVIEW_QUESTION", "TINTAVIEW_DETAIL", "TINTAVIEW_TOOL"):
         assert env[name] == "", name
+    # ...and it is kept for the panel's bell, the same object the card reads.
+    entry = app_instance.notify_log.entries[0]
+    assert (entry.agent, entry.message, entry.project) == (
+        "codex", 'Build "green": 3 tests fixed', "app")
+    assert app_instance.notify_log.unread
+    assert app_instance.flyout.notify_log is app_instance.notify_log
 
 
 def test_an_agents_notification_without_a_command_only_balloons(tray, monkeypatch):

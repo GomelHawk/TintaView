@@ -43,6 +43,7 @@ from tintaview.stats import format as fmt
 from tintaview.ui import icons, sound
 from tintaview.ui.dialogs import DoctorReportDialog, show_about
 from tintaview.ui.flyout import Flyout
+from tintaview.ui.notify_log import NotifyEntry, NotifyLog
 from tintaview.ui.workers import (
     DoctorWorker,
     HookCheckWorker,
@@ -291,11 +292,14 @@ class TrayApp(QtCore.QObject):
         with contextlib.suppress(AttributeError):
             server.on_notify = self.notify_requested.emit
 
+        #: The bell in the usage panel's title bar — see `ui/notify_log.py`.
+        self.notify_log = NotifyLog()
         self.flyout = Flyout(
             collapsed=cfg.ui.collapsed_agents,
             on_toggle=self._on_flyout_toggle,
             cfg=cfg,
             on_settings=self._open_settings,
+            notify_log=self.notify_log,
         )
 
         self.tray = QtWidgets.QSystemTrayIcon(self._badged(icons.brand_icon(ICON_SIZE)))
@@ -455,6 +459,10 @@ class TrayApp(QtCore.QObject):
         """
         label = _agent_label(agent)
         self.tray.showMessage(label, message, QtWidgets.QSystemTrayIcon.Information, 10000)
+        # Kept for the panel's bell too: a balloon is gone in ten seconds, and this is
+        # the message someone who walked away comes back to read.
+        self.notify_log.add(NotifyEntry(agent=agent, message=message, cwd=cwd))
+        self.flyout.update()
         command = self._cfg.notify.command.strip()
         if not command:
             return

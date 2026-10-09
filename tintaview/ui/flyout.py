@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from html import escape
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -30,6 +31,7 @@ from tintaview.i18n import t
 from tintaview.stats import format as fmt
 from tintaview.ui import icons
 from tintaview.ui.badges import provider_badge
+from tintaview.ui.notify_log import NotifyLog, age_text
 
 if TYPE_CHECKING:  # pragma: no cover - types only, no runtime import of the stats layer
     from tintaview.stats.model import UsageResult, UsageRow
@@ -320,24 +322,71 @@ def _draw_chevron(p: QtGui.QPainter, header_rect: QRectF, collapsed: bool) -> No
     p.drawPolygon(QtGui.QPolygonF(pts))
 
 
-def _draw_gear_icon(p: QtGui.QPainter, rect: QRectF) -> None:
-    """A generic 8-tooth cog (star silhouette, punched with a background-colour
-    hole) for the settings button — no trademarked icon set involved."""
-    cx, cy = rect.center().x(), rect.center().y()
-    r_out, r_in = rect.width() * 0.5, rect.width() * 0.32
-    teeth = 8
-    pts = [
-        QtCore.QPointF(
-            cx + (r_out if i % 2 == 0 else r_in) * math.cos(math.radians(i * (360 / (teeth * 2)))),
-            cy + (r_out if i % 2 == 0 else r_in) * math.sin(math.radians(i * (360 / (teeth * 2)))),
-        )
-        for i in range(teeth * 2)
-    ]
-    p.setPen(Qt.NoPen)
-    p.setBrush(TEXT)
-    p.drawPolygon(QtGui.QPolygonF(pts))
-    p.setBrush(CARD_BG)
-    p.drawEllipse(QtCore.QPointF(cx, cy), rect.width() * 0.19, rect.width() * 0.19)
+def _icon_pen(color: QtGui.QColor, rect: QRectF) -> QtGui.QPen:
+    """The one stroke every title-bar icon is drawn with — bell, gear and close are
+    outlines of the same weight, so the three read as a set."""
+    pen = QtGui.QPen(color, max(1.4, rect.width() * 0.085))
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    return pen
+
+
+def _draw_gear_icon(p: QtGui.QPainter, rect: QRectF, color: QtGui.QColor = TEXT) -> None:
+    """A generic 6-tooth cog drawn as an outline, with a round hole — no trademarked
+    icon set involved. Tapered teeth with round joins, so no corner is sharp."""
+    cx, cy, s = rect.center().x(), rect.center().y(), rect.width()
+    outline = QtGui.QPainterPath()
+    outline.addEllipse(QtCore.QPointF(cx, cy), s * 0.31, s * 0.31)
+    for i in range(6):
+        a = math.radians(i * 60)
+        points = []
+        # Root (wide, inside the body) then tip (narrower), corners in drawing order.
+        for r, half, signs in ((s * 0.26, s * 0.10, (-1, 1)), (s * 0.44, s * 0.075, (1, -1))):
+            for sign in signs:
+                points.append(QtCore.QPointF(
+                    cx + r * math.sin(a) + sign * half * math.cos(a),
+                    cy - r * math.cos(a) + sign * half * math.sin(a),
+                ))
+        tooth = QtGui.QPainterPath()
+        tooth.addPolygon(QtGui.QPolygonF(points))
+        tooth.closeSubpath()
+        outline = outline.united(tooth)
+    p.setPen(_icon_pen(color, rect))
+    p.setBrush(Qt.NoBrush)
+    p.drawPath(outline)
+    p.drawEllipse(QtCore.QPointF(cx, cy), s * 0.12, s * 0.12)
+
+
+#: The "new since you last looked" dot on the bell — the orange of the logo's own dot,
+#: not red: red already means "an agent needs your input".
+BELL_DOT = QtGui.QColor(*icons.MARK_BRAND_DOT)
+
+
+def _draw_bell_icon(p: QtGui.QPainter, rect: QRectF, color: QtGui.QColor,
+                    dot: bool = False) -> None:
+    """An outline bell: dome and flared rim, a short hanger, a clapper arc below."""
+    cx, top, s = rect.center().x(), rect.top(), rect.width()
+    rim = top + s * 0.70
+    body = QtGui.QPainterPath()
+    body.moveTo(cx - s * 0.36, rim)
+    body.cubicTo(cx - s * 0.25, rim - s * 0.10, cx - s * 0.30, top + s * 0.17, cx, top + s * 0.15)
+    body.cubicTo(cx + s * 0.30, top + s * 0.17, cx + s * 0.25, rim - s * 0.10, cx + s * 0.36, rim)
+    body.closeSubpath()
+    p.setPen(_icon_pen(color, rect))
+    p.setBrush(Qt.NoBrush)
+    p.drawPath(body)
+    p.drawLine(QtCore.QPointF(cx, top + s * 0.07), QtCore.QPointF(cx, top + s * 0.13))
+    clapper = QtGui.QPainterPath()
+    clapper.moveTo(cx - s * 0.10, rim + s * 0.10)
+    clapper.arcTo(QRectF(cx - s * 0.10, rim + s * 0.02, s * 0.20, s * 0.16), 180, 180)
+    p.drawPath(clapper)
+    if dot:
+        centre = QtCore.QPointF(rect.right() - s * 0.12, top + s * 0.18)
+        p.setPen(Qt.NoPen)
+        p.setBrush(CARD_BG)  # a ring of background, so the dot stands off the outline
+        p.drawEllipse(centre, s * 0.22, s * 0.22)
+        p.setBrush(BELL_DOT)
+        p.drawEllipse(centre, s * 0.15, s * 0.15)
 
 
 def _draw_close_icon(p: QtGui.QPainter, rect: QRectF) -> None:
@@ -570,8 +619,13 @@ class Flyout(QtWidgets.QWidget):
         on_toggle: Callable[[str, bool], None] | None = None,
         cfg: Config | None = None,
         on_settings: Callable[[], None] | None = None,
+        notify_log: NotifyLog | None = None,
     ) -> None:
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        #: `notify_user` messages behind the bell. The tray owns it (it is where the
+        #: messages arrive); the card only reads it, marks it seen and clears it.
+        self.notify_log = notify_log or NotifyLog()
+        self._notify_popup: NotifyPopup | None = None
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)  # needed to get mouseMoveEvent without a button held
         self._cfg = cfg or Config()
@@ -596,6 +650,13 @@ class Flyout(QtWidgets.QWidget):
         # this the flyout stays pinned open until the next explicit toggle.
         if e.type() == QtCore.QEvent.WindowDeactivate:
             self.hide()
+        if e.type() == QtCore.QEvent.ToolTip:
+            pos = QtCore.QPointF(e.pos())  # type: ignore[attr-defined]
+            if self._bell_rect().contains(pos):
+                QtWidgets.QToolTip.showText(e.globalPos(), self._bell_tooltip(), self)  # type: ignore[attr-defined]
+            else:
+                QtWidgets.QToolTip.hideText()
+            return True
         return super().event(e)
 
     def showEvent(self, e: QtGui.QShowEvent) -> None:
@@ -794,6 +855,43 @@ class Flyout(QtWidgets.QWidget):
         gear = QRectF(close.x() - TOP_BAR_BTN - TOP_BAR_BTN_GAP, row_y, TOP_BAR_BTN, TOP_BAR_BTN)
         return gear, close
 
+    def _bell_rect(self) -> QRectF:
+        """The notifications bell, left of the settings gear, same size and gap."""
+        gear, _close = self._top_bar_rects()
+        return QRectF(gear.x() - TOP_BAR_BTN - TOP_BAR_BTN_GAP, gear.y(), TOP_BAR_BTN, TOP_BAR_BTN)
+
+    def _bell_tooltip(self) -> str:
+        """A one-line peek at the newest message; the click shows them all in full."""
+        entries = self.notify_log.entries
+        if not entries:
+            return t("notify.log.empty")
+        newest = entries[0]
+        message = " ".join(newest.message.split())
+        if len(message) > 70:
+            message = message[:69].rstrip() + "…"
+        return t("notify.log.peek", agent=_display_name(newest.agent),
+                 when=age_text(newest.at), message=message)
+
+    def _open_notifications(self) -> None:
+        if not self.notify_log.entries:
+            return
+        QtWidgets.QToolTip.hideText()
+        popup = NotifyPopup(self, self.notify_log, on_clear=self._clear_notifications)
+        self._notify_popup = popup
+        bell = self._bell_rect()
+        # Right-aligned with the card, just under the title bar.
+        popup.adjustSize()
+        top_left = self.mapToGlobal(QtCore.QPoint(
+            int(self.width() - PAD - popup.width()), int(TOP_BAR_H + 4)))
+        popup.move(top_left)
+        popup.show()
+        self.notify_log.mark_seen()  # opening the list is what "seen" means
+        self.update(bell.toAlignedRect().adjusted(-4, -4, 4, 4))
+
+    def _clear_notifications(self) -> None:
+        self.notify_log.clear()
+        self.update()
+
     def _toggle(self, key: str) -> None:
         if key in self._collapsed:
             self._collapsed.discard(key)
@@ -809,7 +907,8 @@ class Flyout(QtWidgets.QWidget):
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
         pos = event.position()
         gear_rect, close_rect = self._top_bar_rects()
-        hovering = gear_rect.contains(pos) or close_rect.contains(pos)
+        hovering = gear_rect.contains(pos) or close_rect.contains(pos) or (
+            bool(self.notify_log.entries) and self._bell_rect().contains(pos))
         if not hovering:
             sections, _ = self._layout()
             hovering = any(s.collapsible and s.header_rect.contains(pos) for s in sections)
@@ -822,6 +921,9 @@ class Flyout(QtWidgets.QWidget):
             gear_rect, close_rect = self._top_bar_rects()
             if close_rect.contains(pos):
                 self.hide()
+                return
+            if self._bell_rect().contains(pos):
+                self._open_notifications()
                 return
             if gear_rect.contains(pos):
                 # Hide first: settings either opens a modal wizard or spawns a
@@ -918,10 +1020,14 @@ class Flyout(QtWidgets.QWidget):
         p.setFont(title_font)
         p.setPen(TEXT)
         title_x = x + logo_size + 8
+        bell_rect = self._bell_rect()
         p.drawText(
-            QRectF(title_x, 0, gear_rect.x() - 8 - title_x, TOP_BAR_H),
+            QRectF(title_x, 0, bell_rect.x() - 8 - title_x, TOP_BAR_H),
             Qt.AlignLeft | Qt.AlignVCenter, "TintaView",
         )
+        has_entries = bool(self.notify_log.entries)
+        _draw_bell_icon(p, bell_rect, TEXT if has_entries else FAINT,
+                        dot=has_entries and self.notify_log.unread)
         _draw_gear_icon(p, gear_rect)
         _draw_close_icon(p, close_rect)
 
@@ -1038,3 +1144,126 @@ class Flyout(QtWidgets.QWidget):
                     )
 
         p.end()
+
+
+class NotifyPopup(QtWidgets.QFrame):
+    """The bell's list: the last `notify_user` messages, newest first, each in full.
+
+    A `Qt.Popup` child of the card rather than a window of its own: a popup takes the
+    input without activating, so the card does not see `WindowDeactivate` and close
+    underneath it, and a click anywhere else dismisses it — the way a menu behaves.
+    The messages are selectable, since the point of reopening one is often to copy it.
+    """
+
+    MAX_LIST_H = 360  # past this (about five entries) the list scrolls
+
+    def __init__(self, parent: QtWidgets.QWidget, log: NotifyLog,
+                 on_clear: Callable[[], None]) -> None:
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        # Without it the rounded border sits on a square of window background.
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setObjectName("notifyPopup")
+        self._on_clear = on_clear
+        self.setFixedWidth(CARD_W - 2 * PAD)
+        self.setStyleSheet(
+            f"QLabel {{ color: {TEXT.name()}; background: transparent; }}"
+            f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent;"
+            f" border: none; }}"
+            f"QPushButton#notifyClear {{ color: {FILL.name()}; background: transparent;"
+            f" border: none; padding: 2px 4px; }}"
+            f"QPushButton#notifyClear:hover {{ text-decoration: underline; }}"
+        )
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(14, 10, 14, 8)
+        outer.setSpacing(6)
+        title = QtWidgets.QLabel(t("notify.log.title"))
+        font = title.font()
+        font.setPointSize(11)
+        font.setBold(True)
+        title.setFont(font)
+        outer.addWidget(title)
+
+        body = QtWidgets.QWidget()
+        rows = QtWidgets.QVBoxLayout(body)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(0)
+        for entry in log.entries:
+            rows.addWidget(self._separator())
+            rows.addWidget(self._entry_widget(entry))
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(body)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Measured at the width the text will actually wrap to: a word-wrapped label's
+        # plain size hint is its one-line height, which left the list too tall (or, the
+        # other way round, cut short) for the messages it holds.
+        body_w = self.width() - 28
+        body.setFixedWidth(body_w)
+        scroll.setFixedHeight(min(self.MAX_LIST_H, rows.heightForWidth(body_w)))
+        outer.addWidget(scroll)
+
+        footer = QtWidgets.QHBoxLayout()
+        footer.addStretch(1)
+        clear = QtWidgets.QPushButton(t("notify.log.clear"))
+        clear.setObjectName("notifyClear")
+        clear.setCursor(Qt.PointingHandCursor)
+        clear.clicked.connect(self._clear)
+        footer.addWidget(clear)
+        outer.addLayout(footer)
+
+    @staticmethod
+    def _separator() -> QtWidgets.QFrame:
+        line = QtWidgets.QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {BORDER.name(QtGui.QColor.HexArgb)};")
+        return line
+
+    def _entry_widget(self, entry) -> QtWidgets.QWidget:
+        box = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(box)
+        grid.setContentsMargins(0, 8, 0, 10)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+
+        badge = QtWidgets.QLabel()
+        dpr = self.devicePixelRatioF()
+        pixmap = provider_badge(entry.agent, int(18 * dpr))
+        pixmap.setDevicePixelRatio(dpr)
+        badge.setPixmap(pixmap)
+        badge.setFixedSize(18, 18)
+        grid.addWidget(badge, 0, 0, Qt.AlignTop)
+
+        head = QtWidgets.QLabel(
+            f"<b>{escape(_display_name(entry.agent))}</b>"
+            f" <span style='color:{SUBTLE.name()}'>· {escape(age_text(entry.at))}</span>")
+        grid.addWidget(head, 0, 1)
+        row = 1
+        if entry.project:
+            project = QtWidgets.QLabel(entry.project)
+            project.setStyleSheet(f"color: {FAINT.name()};")
+            grid.addWidget(project, row, 1)
+            row += 1
+        message = QtWidgets.QLabel(entry.message)
+        message.setWordWrap(True)
+        message.setTextFormat(Qt.PlainText)  # an agent's text, never markup
+        message.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        grid.addWidget(message, row, 1)
+        grid.setColumnStretch(1, 1)
+        return box
+
+    def paintEvent(self, e: QtGui.QPaintEvent) -> None:
+        # Painted rather than styled: a translucent top-level window (needed for the
+        # rounded corners) gets no stylesheet background, so the list was see-through.
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 40)))
+        p.setBrush(QtGui.QColor("#2a2a2e"))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+        p.end()
+
+    def _clear(self) -> None:
+        self._on_clear()
+        self.close()
+

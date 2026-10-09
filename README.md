@@ -427,6 +427,11 @@ notifies me** takes a command for everything past the desktop — the Telegram o
 as it is, with `TINTAVIEW_MESSAGE` holding the agent's sentence. The command and any token in
 it stay in TintaView's config; the agent only ever sends the text.
 
+Missed the notification? The **bell** in the usage panel's title bar keeps the last 10, newest
+first: hover it for the latest one, click it to read them all in full (and copy them). An orange
+dot on the bell means something arrived since you last looked. They are kept until TintaView
+restarts, or until you press **Clear**.
+
 | Variable | Holds |
 | --- | --- |
 | `TINTAVIEW_MESSAGE` | What the agent wrote, on one line (lines joined with ` ⏎ `), at most 1000 characters. |
