@@ -108,7 +108,7 @@ tintaview/
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
              mcp.py                                      # the notify_user MCP server
   engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
-  agents/    base.py  claude.py  codex.py  cursor.py     # hook manifest + paths per agent
+  agents/    base.py  claude.py  codex.py  copilot.py  cursor.py   # hook manifest + paths per agent
   stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py
              cache.py  model.py  service.py  format.py   # format.py = shared row wording
              trend.py                                    # burn-rate samples + projection
@@ -368,6 +368,7 @@ OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in p
 | Claude Code | `~/.claude/settings.json` | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest`, plus `Notification` + matcher `permission_prompt` |
 | Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag and the notify tool's `[mcp_servers.tintaview]`) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
 | Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`/`postToolUse`, `beforeShellExecution`/`afterShellExecution` | none → stall heuristic |
+| GitHub Copilot CLI | `~/.copilot/hooks/tintaview.json` — a file of our own (`{"version": 1, …}`), never the user's | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `Notification` + matchers `permission_prompt` and `elicitation_dialog` |
 
 A summary, not the contract: each adapter's `bindings()` is the source of truth, and two details
 don't fit the columns. Cursor binds **both** the generic tool pair *and* the shell-execution pair
@@ -385,8 +386,25 @@ sentence), but its Plan-mode `request_user_input` fires **only** `PreToolUse`, s
 questions are not detected — binding them needs a second `PreToolUse` entry with a matcher, which
 is unverified against Codex's `hooks.json`.
 
-JetBrains AI Assistant and GitHub Copilot CLI are deliberately absent from this table — see
-[Statistics](#statistics) for why each is stats-only with no `agents/` adapter.
+Copilot's events are spelled in **PascalCase on purpose**: Copilot sends a different payload
+by spelling — camelCase gets `sessionId`/`toolName`, PascalCase gets Claude's
+`session_id`/`tool_name`/`tool_input`, which `tv-hook` and `core/request.py` already read.
+Each entry is keyed by the shell that runs it (`bash`, or `powershell` with `& ` in front of
+`tv-hook.cmd`) and may carry a `matcher`. Measured against real sessions on 1.0.94 (Windows)
+and 1.0.95 (WSL): the payload arrives on stdin for both shells; a question (`AskUserQuestion`)
+fires `Notification`/`elicitation_dialog` and a permission prompt
+`Notification`/`permission_prompt`, each with a readable `message`; matchers are honoured, so
+`agent_idle`/`shell_completed` notifications never reach the confirm path. One exception to the
+snake_case rule: `Notification` still names its session `sessionId`, so `core/request.py` reads
+that field too — without it the confirm landed on a `default` session nothing ever cleared.
+**`PermissionRequest` must not be bound** — it fires before Copilot's own rules run, so it
+arrived for every auto-approved tool call. `SessionEnd` fired on `/exit` on 1.0.95, but after
+*every turn* (`reason: complete`) on the 1.0.94 Windows build; the next prompt reopens the
+session, so the only cost is a moment with no Copilot dot in the panel. A non-zero exit from a
+`preToolUse` hook *denies* the tool in Copilot, one more reason `tv-hook` always exits 0.
+
+JetBrains AI Assistant is deliberately absent from this table — see
+[Statistics](#statistics) for why it is stats-only with no `agents/` adapter.
 
 Per-agent gotchas that must keep being handled:
 
@@ -743,13 +761,9 @@ its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catal
   look artificially healthy. The raw-units-to-"credits" display scale (`CREDIT_SCALE` in the
   provider) is reverse-engineered from a live widget reading, not documented by JetBrains — see
   the provider's module docstring before changing it.
-- **GitHub Copilot CLI** — stats-only; no adapter in `agents/` either, even though Copilot CLI
-  *does* have a real hook system (a `preToolUse`/`postToolUse`/`sessionStart`/`sessionEnd`/
-  `permissionRequest`/`notification`/... vocabulary, confirmed against the CLI's own bundled
-  `api.schema.json`). It is dispatched over an internal "SDK callback transport" for programs
-  embedding `@github/copilot-sdk`, not a documented external shell-command hook — unverified
-  whether a plain `tv-hook`-style script can register for it, so it was not attempted. Deliberately
-  no live quota percentage either: GitHub's real "X% used, resets in Nd" figure comes from an
+- **GitHub Copilot CLI** — a hook-driven agent too (`agents/copilot.py`, see
+  [Agents and the hook layer](#agents-and-the-hook-layer)); this provider only covers usage.
+  Deliberately no live quota percentage: GitHub's real "X% used, resets in Nd" figure comes from an
   internal `copilot_internal/user` endpoint that needs a token out of the OS credential store
   (Windows Credential Manager here, target `<uuid>.github-copilot-app`) via a two-step OAuth
   exchange (`copilot_internal/v2/token` first) — reverse-engineerable in principle, but not
@@ -915,7 +929,7 @@ neither has anything to do with where the hooks actually are. Two rules, both le
 distro these are all ordinary local files. A distro that can't be reached (stopped, `wsl.exe`
 missing) is a normal condition: degrade to the local checks, never report a failure for it.
 
-`agents.enabled` legitimately contains **stats-only** keys (`jetbrains`, `copilot` — see
+`agents.enabled` legitimately contains **stats-only** keys (`jetbrains` — see
 `agents_base.STATS_ONLY_NAMES`). They have no adapter by design, so anything iterating
 `enabled_agents` and calling `agents_base.get()` must treat a `None` adapter for one of those keys
 as expected, not as a bad config value.

@@ -816,13 +816,12 @@ def test_configured_adapter_is_the_adapter_itself_without_an_override(tmp_path):
 
 
 def test_stats_only_agents_are_not_reported_as_config_errors(capsys):
-    """copilot and jetbrains have no scriptable event API, so they are usage-only *by
-    design* and belong in `agents.enabled`. Doctor used to call them unknown keys and
-    tell the user to delete them — which would remove the usage cards the STATS section
-    reports as working."""
+    """jetbrains has no scriptable event API, so it is usage-only *by design* and belongs
+    in `agents.enabled`. Doctor used to call such keys unknown and tell the user to delete
+    them — which would remove the usage cards the STATS section reports as working."""
     from tintaview.install import detect as detect_mod
 
-    cfg = _write_config(enabled_agents=["copilot", "jetbrains"])
+    cfg = _write_config(enabled_agents=["jetbrains"])
     env = detect_mod.Environment(platform=detect_mod.PLATFORM_LINUX,
                                  mode=detect_mod.MODE_NATIVE)
     reporter = D._Reporter(verbose=True)
@@ -831,7 +830,6 @@ def test_stats_only_agents_are_not_reported_as_config_errors(capsys):
 
     out = capsys.readouterr().out
     assert reporter.fails == 0 and reporter.warns == 0, out
-    assert "GitHub Copilot CLI: usage only" in out
     assert "JetBrains AI Assistant: usage only" in out
     assert "not a known agent" not in out
 
@@ -849,7 +847,7 @@ def test_a_genuinely_unknown_agent_key_still_warns(capsys):
     out = capsys.readouterr().out
     assert reporter.warns == 1
     assert "nonesuch: not a known agent" in out
-    assert "claude/codex/cursor" in out  # listed from the registry, not hardcoded
+    assert "claude/codex/copilot/cursor" in out  # listed from the registry, not hardcoded
 
 
 # --------------------------------------------------------------------------- unreadable hooks

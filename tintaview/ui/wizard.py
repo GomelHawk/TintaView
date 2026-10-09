@@ -312,9 +312,7 @@ def _detect_agent(adapter, env: Environment) -> bool:
 #: with stub hook methods, which would make the wizard's hook-diff/confirmation step
 #: run for something that installs nothing.
 #:   - JetBrains AI Assistant is an IDE plugin with no scriptable event API at all.
-#:   - GitHub Copilot CLI has a real hook system, but it is dispatched over an
-#:     internal "SDK callback transport" for `@github/copilot-sdk` embedders, not a
-#:     documented external shell-command hook — see providers/copilot.py.
+#:   (GitHub Copilot CLI used to be here; it has a real adapter now — agents/copilot.py.)
 #:
 #: Only the *detect callables* live here — they're needed nowhere but this interactive
 #: flow. The keys and display labels come from `agents_base.STATS_ONLY_AGENTS`, which is
@@ -329,18 +327,8 @@ def _jetbrains_detect() -> bool:
         return False
 
 
-def _copilot_detect() -> bool:
-    from ..stats.providers import copilot as copilot_mod
-
-    try:
-        return bool(copilot_mod.detect())
-    except Exception:
-        return False
-
-
 _STATS_ONLY_DETECT: dict[str, Callable[[], bool]] = {
     "jetbrains": _jetbrains_detect,
-    "copilot": _copilot_detect,
 }
 
 #: `(key, display label, detect callable)`, assembled from the shared key/label list.

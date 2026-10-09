@@ -49,8 +49,11 @@ LINE_SEP = " ⏎ "
 _SAFE_SID = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
 #: The fields an agent's payload names its session with, in the order they are tried
-#: (Cursor calls it ``conversation_id``; everyone else ``session_id``).
-_SID_FIELDS = ("session_id", "conversation_id")
+#: (Cursor calls it ``conversation_id``; everyone else ``session_id``). Copilot CLI's
+#: ``Notification`` — the one payload it posts here — says ``sessionId`` even when the
+#: hook is spelled PascalCase, which otherwise gets snake_case fields (measured, 1.0.95):
+#: without it the confirm landed on a "default" session that answering never cleared.
+_SID_FIELDS = ("session_id", "conversation_id", "sessionId")
 
 #: Salvage for a payload too large to parse whole: these flat fields come before
 #: ``tool_input`` in every agent's payload, so they survive the cut.

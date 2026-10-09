@@ -142,7 +142,6 @@ def all_agents() -> list[AgentAdapter]:
 #: `stats.service.DEFAULT_PROVIDERS` — nowhere else, and no display name repeated.
 STATS_ONLY_AGENTS: tuple[tuple[str, str], ...] = (
     ("jetbrains", "JetBrains AI Assistant"),
-    ("copilot", "GitHub Copilot CLI"),
 )
 
 #: Same pairs as a dict, for label lookups. Built from the tuple, not written twice.
@@ -167,6 +166,7 @@ def display_name(key: str) -> str:
 
 
 def _load_builtins() -> None:
-    if _REGISTRY:
-        return
-    from . import claude, codex, cursor  # noqa: F401  (import registers them)
+    # Unconditional, not "only while the registry is empty": importing one adapter module
+    # directly (`from tintaview.agents.claude import ...`) registers just that one, and an
+    # emptiness check then never loaded the rest. Re-importing is a dict lookup.
+    from . import claude, codex, copilot, cursor  # noqa: F401  (import registers them)

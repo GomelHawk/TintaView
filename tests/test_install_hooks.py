@@ -278,3 +278,30 @@ def test_codex_session_end_timeout_fits_codex_cap(tmp_path, monkeypatch):
     plan = H.plan_install(adapter, hook_bin)
     assert plan.action == H.ACTION_UPDATE
     assert json.loads(plan.after)["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == 3
+
+
+def test_copilot_install_round_trip_in_its_own_file(tmp_path, monkeypatch):
+    """Copilot's hooks go in a file of TintaView's own under ~/.copilot/hooks/: created
+    with its directory, idempotent, reported installed, and removed cleanly. Backups and
+    the temp file must not end in `.json` — Copilot loads every *.json in that folder."""
+    from tintaview.agents.copilot import CopilotAdapter
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    adapter = CopilotAdapter()
+    hook_bin = Path("/home/me/.tintaview/bin/tv-hook.sh")
+    target = tmp_path / ".copilot" / "hooks" / "tintaview.json"
+    assert H.status(adapter, hook_bin) == H.STATUS_MISSING
+
+    plan = H.plan_install(adapter, hook_bin)
+    assert plan.action == H.ACTION_CREATE and plan.path == target
+    H.apply(plan)
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert written["version"] == 1
+    assert H.status(adapter, hook_bin) == H.STATUS_INSTALLED
+    assert H.plan_install(adapter, hook_bin).action == H.ACTION_NOOP
+
+    H.apply(H.plan_uninstall(adapter))
+    assert "hooks" not in json.loads(target.read_text(encoding="utf-8"))
+    assert H.status(adapter, hook_bin) == H.STATUS_MISSING
+    assert not [p for p in target.parent.iterdir()
+                if p.suffix == ".json" and p.name != "tintaview.json"]

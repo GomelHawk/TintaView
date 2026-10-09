@@ -192,3 +192,28 @@ def test_a_cut_off_subagent_request_keeps_its_agent_id():
     body = _fixture("claude_subagent_pre_tool_use_bash.json")
 
     assert parse(body[: body.index(b'"tool_input"') + 20]).actor == "ae1cd3f527dd405c1"
+
+
+@pytest.mark.parametrize("notification_type, message", [
+    ("permission_prompt", "Fetch URL: https://example.com"),
+    ("elicitation_dialog", "Choose one of these options before I continue."),
+])
+def test_copilots_notification_names_its_session_in_camel_case(notification_type, message):
+    """The exact shape Copilot CLI 1.0.95 posted for a PascalCase `Notification` hook: the
+    session is `sessionId`, not `session_id`. Missing it put the confirm on a "default"
+    session that answering the prompt never cleared."""
+    body = json.dumps({
+        "sessionId": "0b142f47-e54b-49a3-8601-7ba2c986a70f",
+        "timestamp": "2026-10-09T16:40:27.125Z",
+        "cwd": "/home/dmitry/TintaView",
+        "message": message,
+        "title": "Permission needed",
+        "hook_event_name": "Notification",
+        "notification_type": notification_type,
+    }).encode()
+
+    request = parse(body)
+
+    assert request.sid == "0b142f47-e54b-49a3-8601-7ba2c986a70f"
+    assert request.question == message
+    assert request.cwd == "/home/dmitry/TintaView"

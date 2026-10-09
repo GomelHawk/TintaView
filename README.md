@@ -10,10 +10,10 @@ idle, **yellow** while it's working, and **red, blinking** when it needs you to 
 no agent session is running, devices return to their previous lighting and the tray shows
 the plain TintaView logo. Click the tray icon for a usage panel (5-hour /
 weekly limits, credits, or token totals, depending on the agent). Works with
-**Claude Code**, **Codex CLI** and **Cursor**; drives **Razer Chroma**, **Logitech G
+**Claude Code**, **Codex CLI**, **Cursor** and **GitHub Copilot CLI**; drives **Razer Chroma**, **Logitech G
 HUB** or **OpenRGB** devices; runs on **Windows, WSL, Linux and macOS**. The usage panel
-also has cards for **JetBrains AI Assistant** and **GitHub Copilot CLI** — neither lights
-up (see below), but their usage shows up alongside the others.
+also has a card for **JetBrains AI Assistant** — it doesn't light up (see below), but its
+usage shows up alongside the others.
 
 ## What works where
 
@@ -25,13 +25,11 @@ up (see below), but their usage shows up alongside the others.
 | **Claude Code** | Real events (`PermissionRequest`, plus `Notification` / `permission_prompt` on older builds) | Also covers Claude's multiple-choice questions (`AskUserQuestion`). After updating from a version without `PermissionRequest`, re-run `tintaview setup` to add the hook — the tray says so at startup. |
 | **Codex CLI** | Real event (`PermissionRequest`) | Commands only: Codex's Plan-mode multiple-choice questions fire no `PermissionRequest`, so they don't show as waiting. Hooks are version-gated — see [Troubleshooting](docs/TROUBLESHOOTING.md#codex-hooks-not-firing). Windows-native Codex (not under WSL) falls back to the `notify` program, which only reports idle. |
 | **Cursor** | **Heuristic, not a real event.** Cursor has no "waiting for approval" hook, so TintaView guesses: if a tool starts and nothing else happens for `stall_seconds` (default 8s), it's treated as a stall and turns the light red. This can occasionally be wrong in either direction — see [Troubleshooting](docs/TROUBLESHOOTING.md#cursor-never-goes-red). |
+| **GitHub Copilot CLI** | Real event (`Notification` for a permission prompt or a question) | TintaView's hooks go in a file of their own, `~/.copilot/hooks/tintaview.json`. Needs a recent Copilot CLI (tested on 1.0.94+). In a WSL-split install the hooks go inside the distro, so it's the Copilot you run in WSL that lights up. |
 
-**JetBrains AI Assistant** and **GitHub Copilot CLI** are not in that table — neither
-gets lighting or session tracking, only a usage card (see [Usage stats](#usage-stats)).
-JetBrains AI Assistant is an IDE plugin with no scriptable event API at all. Copilot
-CLI actually has a rich hook system (`preToolUse`, `sessionStart`, `notification`, …),
-but it's dispatched over an internal transport aimed at `@github/copilot-sdk`
-embedders, not a documented external shell-command hook the other three expose.
+**JetBrains AI Assistant** is not in that table — it gets no lighting or session
+tracking, only a usage card (see [Usage stats](#usage-stats)): it's an IDE plugin with no
+scriptable event API at all.
 
 **Lighting engines** — Chroma is the default when it's reachable:
 

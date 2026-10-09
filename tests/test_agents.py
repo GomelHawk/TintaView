@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from tintaview.agents import claude, codex, cursor
+from tintaview.agents import claude, codex, copilot, cursor
 from tintaview.agents.base import HOOK_SENTINEL, all_agents, get
 from tintaview.core import events
 
@@ -39,9 +39,9 @@ HOOK_COMMAND = f"{TV_HOOK_SH} claude"  # a stand-in for the installed stable pat
 # --------------------------------------------------------------------------- registry
 
 
-def test_all_agents_registers_exactly_the_three_builtins():
+def test_all_agents_registers_exactly_the_builtins():
     keys = {a.key for a in all_agents()}
-    assert keys == {"claude", "codex", "cursor"}
+    assert keys == {"claude", "codex", "copilot", "cursor"}
 
 
 def test_get_returns_none_for_unknown_key():
@@ -51,7 +51,7 @@ def test_get_returns_none_for_unknown_key():
 # --------------------------------------------------------------------------- bindings
 
 
-@pytest.mark.parametrize("adapter", [claude.ClaudeAdapter(), codex.CodexAdapter(), cursor.CursorAdapter()])
+@pytest.mark.parametrize("adapter", all_agents(), ids=lambda a: a.key)
 def test_every_binding_event_is_a_known_tintaview_event(adapter):
     for binding in adapter.bindings:
         assert binding.event in events.EVENTS, f"{adapter.key}: {binding.native_event} -> {binding.event!r}"
@@ -86,12 +86,14 @@ def _all_commands(native: dict) -> list[str]:
         for entry in entries:
             if "hooks" in entry:  # Claude/Codex nested shape
                 commands.extend(h["command"] for h in entry["hooks"])
-            else:  # Cursor flat shape
+            elif "command" in entry:  # Cursor flat shape
                 commands.append(entry["command"])
+            else:  # Copilot flat shape: the command is keyed by the shell that runs it
+                commands.extend(entry[k] for k in ("bash", "powershell") if k in entry)
     return commands
 
 
-@pytest.mark.parametrize("adapter", [claude.ClaudeAdapter(), codex.CodexAdapter(), cursor.CursorAdapter()])
+@pytest.mark.parametrize("adapter", all_agents(), ids=lambda a: a.key)
 def test_render_hooks_commands_carry_sentinel_and_end_in_valid_event(adapter):
     native = adapter.render_hooks(HOOK_COMMAND)
     commands = _all_commands(native)
@@ -184,6 +186,8 @@ def test_hooks_config_path_user_scope(tmp_path, monkeypatch):
     assert claude.ClaudeAdapter().hooks_config_path("user") == tmp_path / ".claude" / "settings.json"
     assert codex.CodexAdapter().hooks_config_path("user") == tmp_path / ".codex" / "hooks.json"
     assert cursor.CursorAdapter().hooks_config_path("user") == tmp_path / ".cursor" / "hooks.json"
+    assert copilot.CopilotAdapter().hooks_config_path("user") == (
+        tmp_path / ".copilot" / "hooks" / "tintaview.json")
 
 
 def test_hooks_config_path_project_scope(tmp_path):
@@ -197,9 +201,54 @@ def test_hooks_config_path_project_scope(tmp_path):
     assert cursor.CursorAdapter().hooks_config_path(
         "project", project_dir=project
     ) == project / ".cursor" / "hooks.json"
+    assert copilot.CopilotAdapter().hooks_config_path(
+        "project", project_dir=project
+    ) == project / ".github" / "hooks" / "tintaview.json"
 
 
 # --------------------------------------------------------------------------- setup_notes
+
+
+def test_copilot_render_hooks_shape_measured_against_the_real_cli():
+    """PascalCase events (Claude-shaped payloads with `session_id`, which tv-hook reads),
+    a versioned flat file, the command keyed by the shell, and confirm only from the two
+    notification types measured to mean "waiting for you" — never PermissionRequest,
+    which fires for auto-approved tools too."""
+    native = copilot.CopilotAdapter().render_hooks(HOOK_COMMAND)
+    assert native["version"] == 1
+    hooks = native["hooks"]
+    assert set(hooks) == {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+                          "PostToolUse", "Notification", "Stop"}
+    assert "PermissionRequest" not in hooks
+    assert {e["matcher"] for e in hooks["Notification"]} == {"permission_prompt",
+                                                             "elicitation_dialog"}
+    assert all(e["bash"].endswith(" confirm") for e in hooks["Notification"])
+    assert hooks["Stop"][0]["bash"].endswith(" idle")
+    for entries in hooks.values():
+        for entry in entries:
+            assert entry["type"] == "command" and entry["timeoutSec"] == 5
+            assert "powershell" not in entry  # a .sh script runs under bash
+
+
+@pytest.mark.parametrize("script", [
+    r"C:\Users\me\AppData\Local\TintaView\bin\tv-hook.cmd copilot",
+    r'"C:\Users\Jane Doe\AppData\Local\TintaView\bin\tv-hook.cmd" copilot',
+])
+def test_copilot_on_windows_runs_tv_hook_cmd_through_powershell(script):
+    """Copilot runs Windows hooks with PowerShell, which echoes a bare (or quoted) path
+    unless told to run it with `&`. Measured: a `.cmd` run that way gets the payload."""
+    native = copilot.CopilotAdapter().render_hooks(script)
+    entry = native["hooks"]["PreToolUse"][0]
+    assert "bash" not in entry
+    assert entry["powershell"] == f"& {script} tool-start"
+
+
+def test_copilot_is_a_hook_agent_not_stats_only():
+    from tintaview.agents import base
+
+    assert "copilot" not in base.STATS_ONLY_NAMES
+    assert get("copilot") is not None
+    assert base.display_name("copilot") == "GitHub Copilot CLI"  # unchanged label
 
 
 def test_codex_setup_notes_mention_version_gating_and_windows_fallback():
