@@ -50,7 +50,10 @@ class CodexAdapter(NestedHooksAdapter):
     def bindings(self) -> tuple[HookBinding, ...]:
         return (
             HookBinding("SessionStart", events.SESSION_START),
-            HookBinding("SessionEnd", events.SESSION_END),
+            # 3, not the default 5: Codex caps SessionEnd hooks at 3 s and, from 0.162.0
+            # at least, prints "clamping SessionEnd hook timeout to 3s" on every start
+            # when the file asks for more. tv-hook gives up after 1 s anyway.
+            HookBinding("SessionEnd", events.SESSION_END, timeout=3),
             HookBinding("UserPromptSubmit", events.WORKING),
             HookBinding("PreToolUse", events.TOOL_START),
             HookBinding("PostToolUse", events.TOOL_END),

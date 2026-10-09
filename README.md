@@ -262,7 +262,7 @@ Right-click the tray icon for:
 | --- | --- |
 | **Refresh usage** | Poll every agent now instead of waiting for the 5-minute cycle. |
 | **Sound on confirm** | Play a sound the moment a session first needs your approval. |
-| **Keep awake** | Keep the computer from going to sleep — also after you lock it — for as long as it is ticked, like Caffeine, so a long agent run finishes while you are away. The screen can still turn off to save power. It does not depend on what your agents are doing, and it is remembered across restarts. On a laptop with the charger in, closing the lid may not sleep it while this is on. |
+| **Keep awake** | Keep the computer from going to sleep — also after you lock it — for as long as it is ticked, like Caffeine, so a long agent run finishes while you are away. The screen can still turn off to save power. It does not depend on what your agents are doing, and it is remembered across restarts. While it is on, the tray icon carries a small green shield. On a laptop with the charger in, closing the lid may not sleep it while this is on. |
 | **Pause lighting** | Hand your devices straight back to Synapse / G HUB / OpenRGB and stop driving them — for recording, streaming or screenshots. The tray icon and the usage panel keep working; only the hardware is released. It is deliberately **not** remembered across restarts, so you can never end up with permanently dead lights and no idea why. |
 | **Settings…** | The settings window (agents, language, alerts, sound, clocks, colours, engine, update options). |
 | **Check for updates** | Run the update check now and offer to install. |

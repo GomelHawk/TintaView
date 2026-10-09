@@ -708,17 +708,67 @@ def test_tray_sound_toggle_persists(tray, tmp_path):
 class _FakeKeepAwake:
     def __init__(self):
         self.calls = []
+        self.active = False
 
     def acquire(self):
         self.calls.append(True)
+        self.active = True
         return True
 
     def release(self):
         self.calls.append(False)
+        self.active = False
 
     def set(self, on):
         self.calls.append(on)
+        self.active = on
         return on
+
+
+def test_keep_awake_shield_follows_the_toggle_in_every_state(tray, monkeypatch):
+    """The shield is drawn over whatever the tray shows — logo, pulse or blink — while
+    the request is held, and goes away again when it is released."""
+    app_instance, server = tray
+    fake = _FakeKeepAwake()
+    app_instance._keep_awake = fake
+    badged: list = []
+    real = tray_mod.icons.keep_awake_icon
+    monkeypatch.setattr(tray_mod.icons, "keep_awake_icon",
+                        lambda icon: badged.append(icon) or real(icon))
+
+    for status in ("idle", "working", "confirm"):
+        server.set({"effective": status, "count": 1, "agents": {}})
+        app_instance._poll_state()
+    assert badged == []  # off: icons exactly as before
+
+    fake.set(True)
+    for status in ("idle", "working", "confirm"):
+        server.set({"effective": status, "count": 1, "agents": {}})
+        app_instance._poll_state()
+        if status == "working":
+            app_instance._update_anim_icon()
+        if status == "confirm":
+            app_instance._on_blink()  # the dim half of the blink keeps it too
+    assert len(badged) >= 4
+
+    badged.clear()
+    fake.set(False)
+    server.set({"effective": "idle", "count": 1, "agents": {}})
+    app_instance._poll_state()
+    assert badged == []
+
+
+def test_toggling_keep_awake_repaints_the_icon_at_once(tray):
+    app_instance, server = tray
+    fake = _FakeKeepAwake()
+    app_instance._keep_awake = fake
+    server.set({"effective": "idle", "count": 1, "agents": {}})
+    app_instance._poll_state()
+    before = app_instance.tray.icon().cacheKey()
+
+    app_instance._set_keep_awake(True)  # no status change at all
+
+    assert app_instance.tray.icon().cacheKey() != before
 
 
 def test_tray_keep_awake_toggle_acquires_releases_and_persists(tray, tmp_path):

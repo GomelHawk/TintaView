@@ -398,8 +398,9 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(t("settings.title"))
         self._cfg = cfg
-        #: Edited in place, then either saved (accept) or discarded (reject) — never
-        #: the caller's live `cfg` directly, so a cancelled dialog changes nothing.
+        #: A copy the controls are filled from — never the caller's live `cfg`, so a
+        #: cancelled dialog changes nothing. On accept it is replaced by a fresh copy of
+        #: the live config carrying this dialog's fields, which is what gets saved.
         self.result_cfg: Config = copy.deepcopy(cfg)
         #: Set when the user wants the console wizard; acted on by the caller.
         self.launch_wizard = False
@@ -903,7 +904,12 @@ class SettingsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "TintaView", t("settings.error.no_agents"))
             return
 
-        cfg = self.result_cfg
+        # Built from the live config as it is *now*, not the copy taken when the dialog
+        # opened: everything below is a field this dialog owns, so the rest — the tray's
+        # own "Keep awake" toggle, a usage-panel section collapsed meanwhile — keeps
+        # whatever value it has at this moment instead of being written back stale.
+        cfg = copy.deepcopy(self._cfg)
+        self.result_cfg = cfg
         newly_enabled = [k for k in checked if k not in self._cfg.enabled_agents]
         cfg.enabled_agents = checked
         self._seed_new_agent_defaults(newly_enabled)

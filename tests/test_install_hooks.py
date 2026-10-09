@@ -257,3 +257,24 @@ def test_missing_file_is_still_an_empty_config(cfg_file: Path):
     adapter = NestedAdapter(cfg_file)
     assert H.status(adapter, HOOK_BIN) == H.STATUS_MISSING
     assert H.plan_install(adapter, HOOK_BIN).action == H.ACTION_CREATE
+
+
+def test_codex_session_end_timeout_fits_codex_cap(tmp_path, monkeypatch):
+    """Codex caps SessionEnd hooks at 3 s and warns on every start when the file asks
+    for more ("clamping SessionEnd hook timeout to 3s", seen on 0.162.0). An existing
+    install written with 5 is rewritten by a reinstall."""
+    from tintaview.agents.codex import CodexAdapter
+
+    adapter = CodexAdapter()
+    monkeypatch.setattr(adapter, "hooks_config_path", lambda *a, **k: tmp_path / "hooks.json")
+    hook_bin = Path("/home/me/.tintaview/bin/tv-hook.sh")
+    rendered = adapter.render_hooks(H.hook_command(adapter, hook_bin))
+    assert rendered["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] <= 3
+
+    old = json.loads(H.plan_install(adapter, hook_bin).after)
+    old["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] = 5  # as installed before
+    (tmp_path / "hooks.json").write_text(json.dumps(old, indent=2) + "\n", encoding="utf-8")
+
+    plan = H.plan_install(adapter, hook_bin)
+    assert plan.action == H.ACTION_UPDATE
+    assert json.loads(plan.after)["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == 3

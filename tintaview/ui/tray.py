@@ -298,7 +298,7 @@ class TrayApp(QtCore.QObject):
             on_settings=self._open_settings,
         )
 
-        self.tray = QtWidgets.QSystemTrayIcon(icons.brand_icon(ICON_SIZE))
+        self.tray = QtWidgets.QSystemTrayIcon(self._badged(icons.brand_icon(ICON_SIZE)))
         self.tray.setToolTip(t("tray.tooltip.connecting"))
         self.tray.activated.connect(self._on_activated)
         # Held as an attribute: `QSystemTrayIcon.setContextMenu` doesn't take ownership,
@@ -485,6 +485,9 @@ class TrayApp(QtCore.QObject):
         refuses the request, so it is retried on the next start; the failure is logged."""
         self._keep_awake.set(on)
         self._cfg.ui.keep_awake = on
+        # The shield goes on or off now, not on the next status change: the icon keys
+        # carry the keep-awake state, so the next state poll repaints whatever is showing.
+        self._poll_state()
         try:
             from tintaview.core.config import save
 
@@ -878,11 +881,17 @@ class TrayApp(QtCore.QObject):
         this the same icon" test and `setIcon` makes the platform shell rebuild the tray
         item either way, so the guard has to live here.
         """
+        key = (*key, self._keep_awake.active)  # the shield is part of what is drawn
         if key == self._icon_key:
             return
         self._icon_key = key
         self._anim_key = None  # the pulse no longer owns the icon
-        self.tray.setIcon(build())
+        self.tray.setIcon(self._badged(build()))
+
+    def _badged(self, icon: QtGui.QIcon) -> QtGui.QIcon:
+        """`icon` with the green "Keep awake" shield while the request is actually held —
+        `active`, not the config value, so a refused request never shows a shield."""
+        return icons.keep_awake_icon(icon) if self._keep_awake.active else icon
 
     def _surface_engine_note(self, payload: dict) -> None:
         """Balloon once when the lighting engine reports a new problem note.
@@ -940,12 +949,12 @@ class TrayApp(QtCore.QObject):
         """
         now = time.monotonic()
         rgb = self._cfg.colors.rgb("working")
-        key = (rgb, icons.pulse_step(now))
+        key = (rgb, icons.pulse_step(now), self._keep_awake.active)
         if key == self._anim_key:
             return
         self._anim_key = key
         self._icon_key = None  # the pulse owns the icon now
-        self.tray.setIcon(icons.pulse_icon_for_step(rgb, key[1], ICON_SIZE))
+        self.tray.setIcon(self._badged(icons.pulse_icon_for_step(rgb, key[1], ICON_SIZE)))
 
     def _tooltip_for(self, payload: dict) -> str:
         # One line per agent used to run here, but that list can only grow (JetBrains

@@ -993,3 +993,75 @@ def test_the_test_button_plays_what_is_on_screen(qapp, tmp_path, monkeypatch):
     dialog._test_chime()
 
     assert calls == [(True, "/sounds/new.wav", 60)]
+
+
+# --------------------------------------------------------------------------- saving
+
+
+def test_changes_on_every_tab_are_saved_together(qapp, tmp_path):
+    """One OK saves all tabs: a control edited on each tab must reach the file, not just
+    the tab that happened to be showing."""
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+
+    # General
+    dialog._language_combo.setCurrentIndex(dialog._language_combo.findData("de"))
+    dialog._poll_spin.setValue(240)
+    dialog._estimate_check.setChecked(not cfg.stats.show_estimate)
+    dialog._update_check.setChecked(not cfg.update.check)
+    # Alerts
+    dialog._escalate_spin.setValue(95)
+    dialog._notify_command.setText("ntfy publish me")
+    # Sound
+    dialog._chime_check.setChecked(True)
+    dialog._chime_custom_check.setChecked(True)
+    dialog._chime_file.setText("/s/ding.ogg")
+    dialog._chime_volume.setValue(55)
+    # Clocks
+    dialog._clocks_check.setChecked(True)
+    dialog._clock_format_combo.setCurrentIndex(dialog._clock_format_combo.findData("12h"))
+    # Lighting
+    dialog._color_buttons["idle"].set_hex_color("#123456")
+
+    dialog._on_accept()
+
+    saved = config_mod.load(cfg.path)
+    assert saved.ui.language == "de"
+    assert saved.stats.poll_seconds == 240
+    assert saved.stats.show_estimate is (not cfg.stats.show_estimate)
+    assert saved.update.check is (not cfg.update.check)
+    assert saved.escalation.after_seconds == 95
+    assert saved.notify.command == "ntfy publish me"
+    assert (saved.ui.chime_on_confirm, saved.ui.chime_custom) == (True, True)
+    assert (saved.ui.chime_sound, saved.ui.chime_volume) == ("/s/ding.ogg", 55)
+    assert saved.ui.clocks.enabled is True
+    assert saved.ui.clocks.format == "12h"
+    assert saved.colors.idle == "#123456"
+
+
+def test_tray_changes_made_while_the_dialog_is_open_survive_ok(qapp, tmp_path):
+    """The dialog writes only its own fields. Before, OK saved the snapshot taken when
+    it opened, so ticking "Keep awake" (or collapsing a usage section) meanwhile was
+    silently reverted in config.toml."""
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+
+    cfg.ui.keep_awake = True  # the tray menu toggle, while Settings is open
+    cfg.ui.collapsed_agents = ["codex"]  # a usage-panel section collapsed meanwhile
+    dialog._poll_spin.setValue(120)
+    dialog._on_accept()
+
+    saved = config_mod.load(cfg.path)
+    assert saved.ui.keep_awake is True
+    assert saved.ui.collapsed_agents == ["codex"]
+    assert saved.stats.poll_seconds == 120
+    assert dialog.result_cfg.ui.keep_awake is True
+
+
+def test_cancel_still_changes_nothing(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+    dialog._poll_spin.setValue(999)
+    dialog.reject()
+    assert cfg.stats.poll_seconds != 999
+    assert not cfg.path.exists()

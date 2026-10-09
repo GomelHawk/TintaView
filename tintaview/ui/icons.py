@@ -281,6 +281,85 @@ def brand_icon(size: int = 128) -> QtGui.QIcon:
     return icon
 
 
+#: The "Keep awake is on" mark: a green shield with a check, over the lower right of
+#: the tray icon — where the mark's dot sits. One colour in every state, and static: it
+#: says something about the machine, not about the agents, so it neither pulses with
+#: "working" nor blinks with "confirm".
+SHIELD_COLOR = (74, 201, 108)
+SHIELD_CHECK = (20, 30, 20)
+SHIELD_FRACTION = 0.5  # shield width as a share of the icon; 42% left spoke slivers
+
+_shield_cache: dict[int, QtGui.QIcon] = {}
+
+
+def _shield_path(x: float, y: float, w: float) -> QtGui.QPainterPath:
+    h = w * 1.15
+    p = QtGui.QPainterPath()
+    p.moveTo(x + w / 2, y)
+    p.cubicTo(x + w * 0.72, y + h * 0.10, x + w * 0.88, y + h * 0.12, x + w, y + h * 0.12)
+    p.lineTo(x + w, y + h * 0.45)
+    p.cubicTo(x + w, y + h * 0.75, x + w * 0.72, y + h * 0.92, x + w / 2, y + h)
+    p.cubicTo(x + w * 0.28, y + h * 0.92, x, y + h * 0.75, x, y + h * 0.45)
+    p.lineTo(x, y + h * 0.12)
+    p.cubicTo(x + w * 0.12, y + h * 0.12, x + w * 0.28, y + h * 0.10, x + w / 2, y)
+    p.closeSubpath()
+    return p
+
+
+def _draw_shield(pm: QtGui.QPixmap, size: int) -> None:
+    """Paint the shield into `pm`'s lower right, cutting a transparent gap around it so
+    it stands apart from the spokes underneath on any taskbar colour."""
+    w = size * SHIELD_FRACTION
+    h = w * 1.15
+    x, y = size - w, size - h
+    path = _shield_path(x, y, w)
+    p = QtGui.QPainter(pm)
+    try:
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
+        gap = max(1.0, size * 0.06)
+        p.setPen(QtGui.QPen(Qt.black, gap * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.black)
+        p.drawPath(path)
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QtGui.QColor(*SHIELD_COLOR))
+        p.drawPath(path)
+        p.setPen(QtGui.QPen(QtGui.QColor(*SHIELD_CHECK), max(1.2, w * 0.13),
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        check = QtGui.QPainterPath()
+        check.moveTo(x + w * 0.28, y + h * 0.52)
+        check.lineTo(x + w * 0.45, y + h * 0.68)
+        check.lineTo(x + w * 0.74, y + h * 0.36)
+        p.drawPath(check)
+    finally:
+        p.end()
+
+
+def keep_awake_icon(icon: QtGui.QIcon) -> QtGui.QIcon:
+    """`icon` with the keep-awake shield over it, at every tray size.
+
+    Cached by the source icon's `cacheKey`: every icon the tray shows already comes out
+    of a cache here (`state_icon`, `brand_icon`), so the pulse's handful of colours each
+    get badged once rather than on every animation tick.
+    """
+    key = icon.cacheKey()
+    cached = _shield_cache.get(key)
+    if cached is not None:
+        return cached
+    badged = QtGui.QIcon()
+    for px in TRAY_ICON_SIZES:
+        pm = icon.pixmap(px, px)
+        if pm.isNull():
+            continue
+        pm = QtGui.QPixmap(pm)  # never paint into a pixmap the source icon still owns
+        _draw_shield(pm, px)
+        badged.addPixmap(pm)
+    _shield_cache[key] = badged
+    return badged
+
+
 def write_brand_png(path: Path, size: int = 256) -> Path | None:
     """Write the brand mark to `path` as a PNG, and return it (None if it couldn't be).
 
