@@ -4,6 +4,17 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.9.2 — 2026-10-09
+
+- **Missed a "notify me when it's done" message? It's under the new bell** in the usage
+  panel's title bar. The bell keeps the last 10 messages your agents sent, newest first: hover
+  it for the latest one, click it to read them all in full and copy them. An orange dot means
+  something arrived since you last looked; **Clear** empties the list. The messages are kept
+  until TintaView restarts.
+- **Testing a long notification sound can now be stopped**: while it plays, the **Test** button
+  in **Settings… → Sound** turns into **Stop**. Closing Settings stops it too.
+- The settings button in the usage panel has a new, lighter gear icon to match the bell.
+
 ## 0.9.1 — 2026-10-09
 
 - **"Notify me when it's done" now works in GitHub Copilot CLI too.** Run the setup wizard
