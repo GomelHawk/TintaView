@@ -79,6 +79,7 @@
   "settings.chime.volume": "Громкость",
   "settings.chime.volume.hint": "Относительно громкости системы: 100 % — так громко, как позволяет система, но не громче.",
   "settings.chime.test": "Проверить",
+  "settings.chime.stop": "Стоп",
   "settings.poll": "Интервал обновления расхода:",
   "settings.poll.suffix": "с",
   "settings.stats_estimate": "Показывать локальную оценку токенов и стоимости",

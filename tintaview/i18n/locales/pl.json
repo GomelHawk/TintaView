@@ -79,6 +79,7 @@
   "settings.chime.volume": "Głośność",
   "settings.chime.volume.hint": "Względem głośności systemu: 100 % gra tak głośno, jak pozwala system, nigdy głośniej.",
   "settings.chime.test": "Testuj",
+  "settings.chime.stop": "Zatrzymaj",
   "settings.poll": "Częstotliwość odświeżania zużycia:",
   "settings.poll.suffix": "s",
   "settings.stats_estimate": "Pokaż lokalne oszacowanie tokenów i kosztu",

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,34 @@ def play_file(path: str, volume: int) -> bool:
     player.play()
     log.debug("chime: playing %s at %d%%", path, volume)
     return True
+
+
+def is_playing() -> bool:
+    """Is a custom sound playing right now? (The system sound can't be stopped and is
+    over in a second, so it never counts.)"""
+    if _player is None:
+        return False
+    from PySide6 import QtMultimedia
+
+    return bool(_player.playbackState() == QtMultimedia.QMediaPlayer.PlaybackState.PlayingState)
+
+
+def stop() -> None:
+    """Stop a custom sound mid-play — a whole song picked as the chime included."""
+    if _player is not None:
+        _player.stop()
+
+
+def on_playing_changed(callback: Callable[[bool], None]) -> None:
+    """Call `callback(playing)` whenever a custom sound starts or stops, for the
+    settings dialog's Test/Stop button. Connected to the one shared player, so it is
+    only possible once that exists — i.e. after `play_file` has been called."""
+    if _player is None:
+        return
+    from PySide6 import QtMultimedia
+
+    playing = QtMultimedia.QMediaPlayer.PlaybackState.PlayingState
+    _player.playbackStateChanged.connect(lambda state: callback(state == playing))
 
 
 def _linear_volume(volume: int) -> float:

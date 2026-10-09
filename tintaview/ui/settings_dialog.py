@@ -31,6 +31,7 @@ tables precisely so those parts *cannot* drift; everything else is on you.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import threading
@@ -669,10 +670,17 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow(t("settings.chime.volume"), volume_row)
         form.addRow(_hint(t("settings.chime.volume.hint")))
 
-        test = QtWidgets.QPushButton(t("settings.chime.test"))
-        test.clicked.connect(self._test_chime)
+        # One button that turns into Stop while the sound plays: a custom chime can be a
+        # whole song, and with only "Test" there was no way to end it.
+        self._chime_test = QtWidgets.QPushButton(t("settings.chime.test"))
+        metrics = self._chime_test.fontMetrics()
+        self._chime_test.setMinimumWidth(32 + max(
+            metrics.horizontalAdvance(t("settings.chime.test")),
+            metrics.horizontalAdvance(t("settings.chime.stop"))))  # no jump on switching
+        self._chime_test.clicked.connect(self._test_chime)
+        self._chime_watching = False
         test_row = QtWidgets.QHBoxLayout()  # a button-sized button, not a field-wide bar
-        test_row.addWidget(test)
+        test_row.addWidget(self._chime_test)
         test_row.addStretch(1)
         form.addRow("", test_row)
         chime_layout.addWidget(custom_body)
@@ -702,8 +710,27 @@ class SettingsDialog(QtWidgets.QDialog):
             self._chime_file.setText(path)
 
     def _test_chime(self) -> None:
-        """Play exactly what a confirm would, with the values on screen right now."""
+        """Play exactly what a confirm would, with the values on screen right now — or,
+        while that is still playing, stop it."""
+        if sound.is_playing():
+            sound.stop()
+            return
         sound.play_chime(True, self._chime_file.text(), self._chime_volume.value())
+        if not self._chime_watching:
+            # The player exists only once something has been played through it.
+            sound.on_playing_changed(self._show_chime_playing)
+            self._chime_watching = True
+        self._show_chime_playing(sound.is_playing())
+
+    def _show_chime_playing(self, playing: bool) -> None:
+        with contextlib.suppress(RuntimeError):  # the dialog may already be gone
+            self._chime_test.setText(t("settings.chime.stop") if playing else t("settings.chime.test"))
+
+    def done(self, result: int) -> None:
+        # OK, Cancel and the window's close button all end here: a song being tested
+        # must not keep playing behind a closed Settings window.
+        sound.stop()
+        super().done(result)
 
     # --- Clocks tab ----------------------------------------------------------
 

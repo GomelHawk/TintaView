@@ -1065,3 +1065,48 @@ def test_cancel_still_changes_nothing(qapp, tmp_path):
     dialog.reject()
     assert cfg.stats.poll_seconds != 999
     assert not cfg.path.exists()
+
+
+def test_test_turns_into_stop_while_the_sound_plays(qapp, tmp_path, monkeypatch):
+    """A custom chime can be a whole song: while it plays the button is Stop, and
+    pressing it stops the sound instead of starting it again."""
+    from tintaview.ui import settings_dialog as dialog_mod
+
+    state = {"playing": False}
+    calls: list = []
+    callbacks: list = []
+    monkeypatch.setattr(dialog_mod.sound, "is_playing", lambda: state["playing"])
+    monkeypatch.setattr(dialog_mod.sound, "stop", lambda: calls.append("stop"))
+    monkeypatch.setattr(dialog_mod.sound, "on_playing_changed", callbacks.append)
+
+    def play(*args):
+        calls.append(("play", *args))
+        state["playing"] = True
+
+    monkeypatch.setattr(dialog_mod.sound, "play_chime", play)
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    dialog._chime_check.setChecked(True)
+    dialog._chime_custom_check.setChecked(True)  # Test is grayed out otherwise
+    dialog._chime_file.setText("/music/song.mp3")
+    assert dialog._chime_test.text() == "Test"
+
+    dialog._chime_test.click()
+    assert calls == [("play", True, "/music/song.mp3", 100)]
+    assert dialog._chime_test.text() == "Stop"
+    assert len(callbacks) == 1  # watched once, however often Test is pressed
+
+    dialog._chime_test.click()  # Stop
+    assert calls[-1] == "stop"
+    state["playing"] = False
+    callbacks[0](False)  # what the player reports when playback ends
+    assert dialog._chime_test.text() == "Test"
+
+
+def test_closing_settings_stops_a_test_sound(qapp, tmp_path, monkeypatch):
+    from tintaview.ui import settings_dialog as dialog_mod
+
+    stopped: list = []
+    monkeypatch.setattr(dialog_mod.sound, "stop", lambda: stopped.append(True))
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    dialog.reject()
+    assert stopped == [True]

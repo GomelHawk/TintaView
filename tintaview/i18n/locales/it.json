@@ -78,6 +78,7 @@
   "settings.chime.volume": "Volume",
   "settings.chime.volume.hint": "Relativo al volume di sistema: 100 % suona al massimo consentito dal sistema, mai di più.",
   "settings.chime.test": "Prova",
+  "settings.chime.stop": "Ferma",
   "settings.poll": "Intervallo di aggiornamento dell'utilizzo:",
   "settings.poll.suffix": "s",
   "settings.stats_estimate": "Mostra la stima locale di token e costo",

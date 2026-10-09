@@ -79,6 +79,7 @@
   "settings.chime.volume": "Гучнасць",
   "settings.chime.volume.hint": "Адносна гучнасці сістэмы: 100 % — так гучна, як дазваляе сістэма, але не гучней.",
   "settings.chime.test": "Праверыць",
+  "settings.chime.stop": "Спыніць",
   "settings.poll": "Інтэрвал абнаўлення выдатку:",
   "settings.poll.suffix": "с",
   "settings.stats_estimate": "Паказваць лакальную ацэнку токенаў і кошту",

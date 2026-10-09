@@ -41,3 +41,10 @@ def test_a_playable_file_does_not_also_beep(beeps, monkeypatch, tmp_path):
     sound.play_chime(True, " /s/ding.mp3 ", 30)
     assert played == [("/s/ding.mp3", 30)]
     assert beeps == []
+
+
+def test_stop_and_is_playing_are_safe_before_anything_played(monkeypatch):
+    monkeypatch.setattr(sound, "_player", None)
+    assert sound.is_playing() is False
+    sound.stop()  # no player yet: nothing to stop, no error
+    sound.on_playing_changed(lambda playing: None)

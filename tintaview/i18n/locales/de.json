@@ -79,6 +79,7 @@
   "settings.chime.volume": "Lautstärke",
   "settings.chime.volume.hint": "Relativ zur Systemlautstärke: 100 % ist so laut, wie das System erlaubt, nie lauter.",
   "settings.chime.test": "Testen",
+  "settings.chime.stop": "Stopp",
   "settings.poll": "Aktualisierungsintervall für den Verbrauch:",
   "settings.poll.suffix": "s",
   "settings.stats_estimate": "Lokale Token-/Kostenschätzung anzeigen",
