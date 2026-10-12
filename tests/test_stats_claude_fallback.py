@@ -131,6 +131,7 @@ class TestPricing:
             ("claude-fable-5-1", 10.0),
             ("claude-mythos-5-1", 10.0),
             ("claude-fable-5", 10.0),
+            ("claude-opus-5-5", 4.0),
             ("claude-opus-5", 5.0),
         ],
     )
@@ -147,6 +148,12 @@ class TestPricing:
         _write(home, [_line("claude-fable-5-1", cache_read=1_000_000)])
         result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
         assert _cost(result) == pytest.approx(0.25, abs=0.005)
+
+    def test_opus_5_5_cache_reads_use_the_flat_rate(self, home):
+        """$0.20/MTok, not 0.1x of the $4 input rate."""
+        _write(home, [_line("claude-opus-5-5", cache_read=1_000_000)])
+        result = ClaudeUsageProvider().fetch(AgentConfig(home=str(home)))
+        assert _cost(result) == pytest.approx(0.20, abs=0.005)
 
     def test_other_models_keep_the_tenth_of_input_cache_rate(self, home):
         _write(home, [_line("claude-opus-5", cache_read=1_000_000)])

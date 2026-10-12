@@ -64,6 +64,7 @@ OAUTH_BETA = "oauth-2025-04-20"
 # Best-effort and not kept perfectly in sync with pricing changes — which is why every
 # figure it produces is drawn under an "Est." label with a "~" on the cost.
 PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-5-5": (4.0, 20.0),
     "claude-opus-5": (5.0, 25.0),
     "claude-opus-4-8": (5.0, 25.0),
     "claude-opus-4-7": (5.0, 25.0),
@@ -72,16 +73,22 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-fable-5": (10.0, 50.0),
     "claude-mythos-5-1": (10.0, 50.0),
     "claude-mythos-5": (10.0, 50.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
     "claude-sonnet-5": (2.0, 10.0),
     "claude-sonnet-4-6": (3.0, 15.0),
+    # The up-to-100K-token prompt rate; a longer prompt costs $0.50/$2.50, which a flat
+    # per-model table can't express, so long Haiku 5.5 prompts are understated.
+    "claude-haiku-5-5": (0.10, 0.50),
     "claude-haiku-4-5": (1.0, 5.0),
 }
 
 #: Cache-read USD per MTok where it is *not* the usual 0.1x of the input rate. Fable 5.1
 #: reads its cache at a flat $0.25/MTok; at 0.1x it would be billed here at $1.00, a 4x
-#: overstatement on the token class that dominates a long agentic session.
+#: overstatement on the token class that dominates a long agentic session. Opus 5.5 reads
+#: at $0.20, half of 0.1x its $4 input rate.
 CACHE_READ_PER_MTOK: dict[str, float] = {
     "claude-fable-5-1": 0.25,
+    "claude-opus-5-5": 0.20,
 }
 
 #: Claude Code writes placeholder assistant messages under this model id (a cancelled

@@ -55,7 +55,8 @@ TOOL_DESCRIPTION = (
     "finishes (\"notify me when done\", \"ping me on my phone when the build is green\"). "
     "Call it once, when the thing they asked about happens, with a short self-contained "
     "message that says what happened and how it turned out. Do not call it unless the "
-    "user asked to be notified."
+    "user asked to be notified. If the result is an error, nothing reached the user — "
+    "tell them in your reply instead."
 )
 
 TOOL = {

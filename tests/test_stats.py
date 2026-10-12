@@ -302,8 +302,11 @@ class TestClaudeEstimate:
         ("model", "expected_cost"),
         [
             # 1M input tokens, so the cost in dollars *is* the input rate per MTok.
+            ("claude-opus-5-5", 4.0),
             ("claude-opus-5", 5.0),
+            ("claude-sonnet-5-5", 2.0),
             ("claude-sonnet-5", 2.0),
+            ("claude-haiku-5-5", 0.10),
             ("claude-haiku-4-5-20251001", 1.0),  # a dated snapshot still resolves
             ("claude-fable-5", 10.0),
         ],

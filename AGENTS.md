@@ -105,15 +105,20 @@ ask what it did *not* cover.
 
 ```
 tintaview/
+  cli.py  __main__.py
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
+             request.py  proc.py  keepawake.py
              mcp.py                                      # the notify_user MCP server
   engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
+             ghub_sidecar.py  ghub_worker.py             # python.exe painter for pythonw trays
   agents/    base.py  claude.py  codex.py  copilot.py  cursor.py   # hook manifest + paths per agent
   stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py
              cache.py  model.py  service.py  format.py   # format.py = shared row wording
+             _scan.py                                    # shared transcript walk + memo
              trend.py                                    # burn-rate samples + projection
   i18n/      __init__.py  locales/{en,es,it,de,pl,ru,be,uk}.json
   ui/        tray.py  workers.py  dialogs.py  flyout.py  badges.py  wizard.py  icons.py  settings_dialog.py
+             notify_log.py  sound.py
   install/   detect.py  hooks.py  hookscript.py  codex_flag.py  autostart.py  wsl.py
              components.py  doctor.py  update.py  restart.py
              mcp.py                                      # registers core/mcp.py per agent
@@ -141,7 +146,7 @@ optional at runtime.
 | Engines | **Chroma, G HUB, SteelSeries GameSense and OpenRGB, Chroma default when reachable.** Auto-detect order `chroma → ghub → steelseries → openrgb → status-only`. GameSense is the only engine that works on macOS (plain local HTTP, no SDK), which is why it sits ahead of OpenRGB's catch-all. |
 | Tray icon | **A single whole-icon state.** No per-agent ray splitting or zone splitting: a user watches one agent at a time, and a gradient icon among solid ones reads as a different icon rather than a fourth state. |
 | Cursor stats | Local session token from `state.vscdb` → Cursor's own Connect RPC. No login UI of our own. |
-| Translations | **JSON catalogues read by a stdlib `t()`, not `QTranslator`, and only for the tray + usage panel.** See [Interface language](#interface-language-i18n). |
+| Translations | **JSON catalogues read by a stdlib `t()`, not `QTranslator`, and only for the tray, its settings dialog and the usage panel.** See [Interface language](#interface-language-i18n). |
 | Stack | Python 3.12+, PySide6 (Qt) tray, stdlib HTTP server. |
 
 Non-goals: lighting effects beyond solid/blink, per-agent colours or device zoning, multi-machine
@@ -152,16 +157,18 @@ winget, the Windows Store or Homebrew.
 
 TintaView has **two** places a user changes settings, and they overlap on purpose:
 
-- `ui/wizard.py` — the console wizard (`tintaview setup`). Covers everything: agent
-  hook install/diff, autostart, WSL split, platform detection, interface language, and
+- `ui/wizard.py` — the console wizard (`tintaview setup`). Covers agent hook
+  install/diff, autostart, WSL split, platform detection, interface language, and
   every engine's device-level knobs (OpenRGB host/port, G HUB `dll_path`, per-engine
-  device-type lists).
+  device-type lists). It does not edit `stats.*`, `escalation.*`, `notify.*`, the
+  sound settings or `ui.clocks` — those live in the popup only.
 - `ui/settings_dialog.py` — the in-process Qt popup opened from the tray's
-  "Settings…" menu item (`TrayApp._open_settings` in `ui/tray.py`). Covers only the
-  knobs worth reaching often without a terminal: enabled agents/providers (+ their
-  order — a drag-reorderable list), interface language, chime, usage-poll interval,
-  update-check, lighting engine mode, and the three status colours (with a
-  reset-to-defaults button). It hands
+  "Settings…" menu item (`TrayApp._open_settings` in `ui/tray.py`). Covers the
+  knobs worth reaching often without a terminal, one tab each: General (enabled
+  agents/providers + their drag-reorderable order, interface language, usage-poll
+  interval, `stats.show_estimate`, update-check), Alerts (escalation and
+  `notify.command`), Sound, Clocks, and Lighting (engine mode and the three status
+  colours, with a reset-to-defaults button). It hands
   off to the console wizard via its "Open Full Setup Wizard (Terminal)…" button, and by
   raising `launch_wizard` when a newly ticked agent has no hooks installed.
 
@@ -795,7 +802,7 @@ The decisions behind it, in the order they get questioned:
   thread and run in a `--headless` install) and `core.config`. A Qt-only mechanism would need a
   second mechanism beside it, plus compiled `.qm` files committed as generated assets and a
   build step. JSON + `dict` lookups needs neither.
-- **Scope is the tray and the usage panel, and stops there.** The console wizard, `doctor` and
+- **Scope is the tray, its settings dialog and the usage panel, and stops there.** The console wizard, `doctor` and
   the CLI stay English: they are read once from a terminal, half their output is a diff of the
   user's own config files, and a partly-translated diff-and-confirm flow is worse than an
   English one. The wizard does still *set* `ui.language` (its first step) — that is the only
