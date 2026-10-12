@@ -4,6 +4,15 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.9.3 — 2026-10-12
+
+- **The cost estimate in the usage panel now knows Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5.**
+  Before, sessions on these models were counted at a generic rate, so the "~$" figure read
+  too high: about 1.25× for Opus 5.5, 2.5× for Sonnet 5.5 and far more for Haiku 5.5. Long
+  Haiku 5.5 prompts (over 100K tokens) are still estimated at its lower short-prompt rate.
+- The gear and bell icons in the usage panel's title bar are slightly smaller and lighter, so
+  they match the close button.
+
 ## 0.9.2 — 2026-10-09
 
 - **Missed a "notify me when it's done" message? It's under the new bell** in the usage
