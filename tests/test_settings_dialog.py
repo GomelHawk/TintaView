@@ -866,6 +866,18 @@ def test_the_tz_database_source_degrades_to_qts_own_lists(qapp, tmp_path):
         _zones_for.cache_clear()
 
 
+def test_general_tab_writes_the_network_line_switch(qapp, tmp_path):
+    cfg = make_cfg(tmp_path)
+    dialog = SettingsDialog(cfg)
+    assert dialog._network_check.isChecked() is False  # off by default
+
+    dialog._network_check.setChecked(True)
+    dialog._on_accept()
+
+    assert dialog.result_cfg.ui.network_info is True
+    assert config_mod.load(dialog.result_cfg.path).ui.network_info is True
+
+
 # --------------------------------------------------------------------------- Alerts tab
 
 

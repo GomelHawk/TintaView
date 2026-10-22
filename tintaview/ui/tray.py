@@ -605,6 +605,9 @@ class TrayApp(QtCore.QObject):
         # the dialog goes on owning after this returns, and the flyout paints straight
         # off these.
         self._cfg.ui.clocks.clocks = [replace(clock) for clock in new_cfg.ui.clocks.clocks]
+        # Same object again: the flyout reserves the line's height on the `set_results`
+        # below and fetches the address the next time it opens.
+        self._cfg.ui.network_info = new_cfg.ui.network_info
         self._cfg.engine.mode = new_cfg.engine.mode
         for status in ("idle", "working", "confirm"):
             setattr(self._cfg.colors, status, getattr(new_cfg.colors, status))

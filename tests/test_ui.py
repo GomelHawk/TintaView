@@ -1126,6 +1126,7 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
             "ui.clocks.enabled": True,
             "ui.clocks.clocks": _clock_list(["Europe/Warsaw", "Asia/Kolkata"], False),
             "ui.clocks.format": "12h",
+            "ui.network_info": True,
         },
     )
 
@@ -1162,6 +1163,8 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     # Copies, not the dialog's own objects — the dialog goes on owning its config.
     assert cfg.ui.clocks.clocks[0] is not new_cfg.ui.clocks.clocks[0]
     assert [c.zone for c in app_instance.flyout._clocks()] == ["Europe/Warsaw", "Asia/Kolkata"]
+    assert cfg.ui.network_info is True
+    assert app_instance.flyout._cfg.ui.network_info is True
 
 
 def test_every_stats_field_is_accounted_for():
@@ -1201,7 +1204,7 @@ def test_every_ui_field_is_accounted_for():
 
     # Written by SettingsDialog and asserted in the mirror test above.
     dialog_writes = {"chime_on_confirm", "chime_custom", "chime_sound", "chime_volume",
-                     "language", "clocks"}
+                     "language", "clocks", "network_info"}
     # Written by the tray itself (menu toggle, flyout collapse), never by the dialog.
     tray_writes = {"keep_awake", "collapsed_agents"}
 
@@ -2384,6 +2387,126 @@ def test_a_card_with_the_band_switched_off_never_arms_the_tick(qapp):
 
     assert not flyout._clock_timer.isActive()
     flyout.hide()
+
+
+# --------------------------------------------------------------------------- network line
+
+
+def _net_cfg(zones=(), enabled=True) -> Config:
+    cfg = _clock_cfg(list(zones), enabled=bool(zones))
+    cfg.ui.network_info = enabled
+    return cfg
+
+
+def _wait_for(predicate, timeout=3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        QtCore.QCoreApplication.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_the_network_line_sits_under_the_clocks_and_pushes_sections_down(qapp):
+    from tintaview.ui.flyout import CONTENT_TOP, NET_BAND_H, TOP_BAR_H, _clock_band_height
+
+    results = _sample_results()
+    plain = Flyout(cfg=_net_cfg(enabled=False))
+    plain.set_results(results)
+    net_only = Flyout(cfg=_net_cfg())
+    net_only.set_results(results)
+    both = Flyout(cfg=_net_cfg(["Europe/Warsaw"]))
+    both.set_results(results)
+
+    assert plain._content_top() == CONTENT_TOP
+    assert net_only._content_top() == CONTENT_TOP + NET_BAND_H
+    assert net_only._net_band_top() == TOP_BAR_H
+    assert both._net_band_top() == TOP_BAR_H + _clock_band_height(both.font())
+    assert both._content_top() == both._net_band_top() + NET_BAND_H + plain._content_top() - TOP_BAR_H
+    assert net_only._layout()[0][0].header_rect.y() == net_only._content_top()
+    assert net_only.height() > plain.height()
+
+
+def test_opening_the_panel_shows_updating_then_the_address(qapp, monkeypatch):
+    from tintaview.core import netinfo
+
+    monkeypatch.setattr(netinfo, "fetch", lambda: netinfo.NetInfo("203.0.113.42", "UA"))
+    flyout = Flyout(cfg=_net_cfg())
+    flyout.set_results(_sample_results())
+
+    flyout.show_near(QtCore.QPoint(400, 400))
+    # The answer is queued to the GUI thread, so until events run the line says
+    # "Updating…" — never a previous open's address.
+    assert flyout._net_loading and flyout._net is None
+    height = flyout.height()
+
+    assert _wait_for(lambda: not flyout._net_loading)
+    assert flyout._net == netinfo.NetInfo("203.0.113.42", "UA")
+    assert flyout.height() == height  # the answer must not resize the card
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)  # must not raise
+    flyout.hide()
+
+    # Every open asks again: the address may have changed with a VPN in between.
+    flyout.show_near(QtCore.QPoint(400, 400))
+    assert flyout._net_loading and flyout._net is None
+    assert _wait_for(lambda: not flyout._net_loading)
+    flyout.hide()
+
+
+def test_an_answer_to_an_earlier_open_is_ignored(qapp):
+    from tintaview.core.netinfo import NetInfo
+
+    flyout = Flyout(cfg=_net_cfg())
+    flyout._net_token = 2
+    flyout._net_loading = True
+
+    flyout._on_net_info(1, NetInfo("198.51.100.1", "DE"))
+    assert flyout._net_loading and flyout._net is None
+
+    flyout._on_net_info(2, NetInfo("203.0.113.42", "PL"))
+    assert not flyout._net_loading
+    assert flyout._net == NetInfo("203.0.113.42", "PL")
+
+
+@pytest.mark.parametrize("info", [None, ("203.0.113.42", ""), ("203.0.113.42", "QQ")])
+def test_the_network_line_renders_every_outcome(qapp, info):
+    """Failure ("unavailable"), an address the service couldn't place, and a code Qt
+    has no name for all have to paint without raising."""
+    from tintaview.core.netinfo import NetInfo
+
+    flyout = Flyout(cfg=_net_cfg(["Europe/Warsaw"]))
+    flyout.set_results({})
+    flyout._net_token = 1
+    flyout._on_net_info(1, NetInfo(*info) if info else None)
+
+    pixmap = QtGui.QPixmap(flyout.size())
+    flyout.render(pixmap)
+    assert not pixmap.isNull()
+
+
+def test_country_names_come_from_the_code(qapp):
+    from tintaview.ui.flyout import _country_name
+
+    assert _country_name("UA") == "Ukraine"
+    assert _country_name("US") == "United States"
+    assert _country_name("QQ") == "QQ"
+
+
+def test_a_switched_off_network_line_never_fetches(qapp, monkeypatch):
+    from tintaview.core import netinfo
+
+    calls: list[int] = []
+    monkeypatch.setattr(netinfo, "fetch", lambda: calls.append(1))
+    flyout = Flyout(cfg=_net_cfg(enabled=False))
+
+    flyout.show_near(QtCore.QPoint(400, 400))
+    QtCore.QCoreApplication.processEvents()
+    flyout.hide()
+
+    assert flyout._net_token == 0
+    assert calls == []
 
 
 # --------------------------------------------------------------------------- second launch / quit

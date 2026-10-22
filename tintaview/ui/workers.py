@@ -109,6 +109,29 @@ class StatsWorker(_GuardedWorker):
         self.results_ready.emit(results)
 
 
+class NetInfoWorker(QtCore.QObject):
+    """Fetches the public IP + country (`core.netinfo`) for the usage panel's network
+    line, emitting `None` on failure so the panel leaves its "Updating…" state either way.
+
+    Deliberately not a `_GuardedWorker`: the request that matters is always the newest
+    one. Dropping it while an older fetch is in flight would put an address from before
+    a VPN switch on screen. Each run carries the caller's token instead, and the caller
+    ignores every answer but the latest; a run is one small GET bounded by its timeout,
+    so letting two overlap costs nothing.
+    """
+
+    ready = QtCore.Signal(int, object)  # (token, NetInfo | None)
+
+    def fetch(self, token: int) -> None:
+        threading.Thread(target=self._run, args=(token,), daemon=True,
+                         name="tv-tray-netinfo").start()
+
+    def _run(self, token: int) -> None:
+        from tintaview.core import netinfo
+
+        self.ready.emit(token, netinfo.fetch())
+
+
 class StateWorker(_GuardedWorker):
     """HTTP fallback path only — see module docstring. Direct `state_payload()`
     reads happen straight on the GUI thread in `TrayApp._poll_state`, since that

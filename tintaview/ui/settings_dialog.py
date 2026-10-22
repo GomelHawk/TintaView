@@ -499,6 +499,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self._trend_check.setToolTip(t("settings.stats_trend.tooltip"))
         form.addRow(self._trend_check)
 
+        self._network_check = QtWidgets.QCheckBox(t("settings.network_info"))
+        self._network_check.setChecked(self._cfg.ui.network_info)
+        self._network_check.setToolTip(t("settings.network_info.tooltip"))
+        form.addRow(self._network_check)  # spanning, same reason as the estimate row
+
         self._update_check = QtWidgets.QCheckBox(t("settings.update_check"))
         self._update_check.setChecked(self._cfg.update.check)
         form.addRow(self._update_check)  # spanning, same reason as the estimate row
@@ -952,6 +957,7 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.stats.poll_seconds = self._poll_spin.value()
         cfg.stats.show_estimate = self._estimate_check.isChecked()
         cfg.stats.show_trend = self._trend_check.isChecked()
+        cfg.ui.network_info = self._network_check.isChecked()
         cfg.stats.alert_enabled = self._usage_alert_check.isChecked()
         cfg.stats.alert_threshold = self._usage_alert_spin.value()
         cfg.stats.alert_command = self._usage_alert_command.text().strip()

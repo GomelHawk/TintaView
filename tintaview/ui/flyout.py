@@ -32,8 +32,10 @@ from tintaview.stats import format as fmt
 from tintaview.ui import icons
 from tintaview.ui.badges import provider_badge
 from tintaview.ui.notify_log import NotifyLog, age_text
+from tintaview.ui.workers import NetInfoWorker
 
 if TYPE_CHECKING:  # pragma: no cover - types only, no runtime import of the stats layer
+    from tintaview.core.netinfo import NetInfo
     from tintaview.stats.model import UsageResult, UsageRow
 
 # --------------------------------------------------------------------------- palette
@@ -117,6 +119,27 @@ CLOCK_TIME_INSET = 4.0  # ditto for a time, which is `_fit_time_font`'s width bu
 #: The vertical divider between two clocks. Fainter than `BORDER`: it separates two
 #: readings of the same kind, so it should be the last thing on the card you notice.
 CLOCK_SEP = QtGui.QColor(255, 255, 255, 26)
+
+
+# --------------------------------------------------------------------------- network line
+
+#: The public IP + country line (`ui.network_info`), under the clocks band. A fixed
+#: height whatever it shows — "Updating…", an address or "unavailable" — so the card
+#: never resizes under the cursor when the answer arrives.
+NET_LINE_H = 18.0
+NET_BAND_PAD = 8.0
+NET_BAND_H = NET_BAND_PAD + NET_LINE_H + NET_BAND_PAD
+NET_CODE_GAP = 6.0  # between the country-code badge and the country name
+
+
+def _country_name(code: str) -> str:
+    """English country name for an ISO alpha-2 code, from Qt's own table — the code
+    itself when Qt doesn't know it. A code badge, not a flag emoji, sits beside it:
+    Windows' emoji font has no flags and draws the two letters instead."""
+    territory = QtCore.QLocale.codeToTerritory(code)
+    if territory == QtCore.QLocale.Country.AnyTerritory:
+        return code
+    return QtCore.QLocale.territoryToString(territory)
 
 
 def _clock_fonts(base: QtGui.QFont) -> tuple[QtGui.QFont, QtGui.QFont]:
@@ -662,6 +685,14 @@ class Flyout(QtWidgets.QWidget):
         self._clock_timer = QtCore.QTimer(self)
         self._clock_timer.setSingleShot(True)
         self._clock_timer.timeout.connect(self._on_clock_tick)
+        # The network line is fetched on every open and at no other time (see
+        # `core/netinfo.py`). `_net_token` numbers the requests so an answer to an
+        # earlier open can't overwrite the current one's.
+        self._net: NetInfo | None = None
+        self._net_loading = False
+        self._net_token = 0
+        self._net_worker = NetInfoWorker(self)
+        self._net_worker.ready.connect(self._on_net_info)
         self.resize(CARD_W, 140)
 
     def event(self, e: QtCore.QEvent) -> bool:
@@ -684,6 +715,7 @@ class Flyout(QtWidgets.QWidget):
         # than waiting for the first tick.
         self.update()
         self._sync_clock_timer()
+        self._refresh_network()
         super().showEvent(e)
 
     def hideEvent(self, e: QtGui.QHideEvent) -> None:
@@ -748,11 +780,19 @@ class Flyout(QtWidgets.QWidget):
             return []
         return [c for c in clocks.clocks[:MAX_CLOCKS] if _zone_valid(c.zone)]
 
-    def _content_top(self) -> float:
-        """y of the first agent section: `CONTENT_TOP`, plus the clocks band if shown."""
+    def _net_band_top(self) -> float:
+        """y of the network line: under the clocks band, or the title bar without one."""
         if not self._clocks():
-            return float(CONTENT_TOP)
-        return CONTENT_TOP + _clock_band_height(self.font())
+            return float(TOP_BAR_H)
+        return TOP_BAR_H + _clock_band_height(self.font())
+
+    def _content_top(self) -> float:
+        """y of the first agent section: `CONTENT_TOP`, plus the clocks band and the
+        network line if shown."""
+        top = self._net_band_top() + SECTION_GAP
+        if self._cfg.ui.network_info:
+            top += NET_BAND_H
+        return top
 
     def _sync_clock_timer(self) -> None:
         if self.isVisible() and self._clocks():
@@ -763,6 +803,25 @@ class Flyout(QtWidgets.QWidget):
     def _on_clock_tick(self) -> None:
         self.update()
         self._sync_clock_timer()
+
+    # --- network line --------------------------------------------------------------
+
+    def _refresh_network(self) -> None:
+        """Show "Updating…" and ask for the current address — on every open, since the
+        previous answer may predate a VPN or network switch."""
+        if not self._cfg.ui.network_info:
+            return
+        self._net_token += 1
+        self._net = None
+        self._net_loading = True
+        self._net_worker.fetch(self._net_token)
+
+    def _on_net_info(self, token: int, info: NetInfo | None) -> None:
+        if token != self._net_token:
+            return
+        self._net = info
+        self._net_loading = False
+        self.update()
 
     def set_status(self, status: dict[str, str], tools: dict[str, str] | None = None) -> None:
         """`status`: dict[str, str] of agent key -> effective session status, from
@@ -1014,6 +1073,61 @@ class Flyout(QtWidgets.QWidget):
         p.drawLine(QtCore.QPointF(band.x(), band.bottom()),
                    QtCore.QPointF(band.right(), band.bottom()))
 
+    def _paint_network(self, p: QtGui.QPainter, x: float, w: float) -> None:
+        """The network line: country-code badge and country name on the left, the
+        public IP on the right — or "Updating…" / "unavailable" in their place. Chrome,
+        like the clocks band: a fixed strip, closed off by the same rule underneath."""
+        if not self._cfg.ui.network_info:
+            return
+        top = self._net_band_top()
+        line = QRectF(x, top + NET_BAND_PAD, w, NET_LINE_H)
+        label_font = QtGui.QFont(self.font())
+        label_font.setPointSize(11)
+        info = self._net
+        if info is None:
+            p.setFont(label_font)
+            p.setPen(SUBTLE)
+            key = "flyout.network.updating" if self._net_loading else "flyout.network.unavailable"
+            p.drawText(line, Qt.AlignLeft | Qt.AlignVCenter, t(key))
+        else:
+            # Right half first and a point smaller, as in a usage row: the label gets
+            # what's left and is elided, so a long country name can't run into the IP.
+            ip_font = QtGui.QFont(self.font())
+            ip_font.setPointSize(10)
+            p.setFont(ip_font)
+            p.setPen(SUBTLE)
+            p.drawText(line, Qt.AlignRight | Qt.AlignVCenter, info.ip)
+            left_w = w - QtGui.QFontMetricsF(ip_font).horizontalAdvance(info.ip) - 10
+            name_x = x
+            if info.country:
+                code_font = QtGui.QFont(self.font())
+                code_font.setPointSize(8)
+                code_font.setBold(True)
+                code_metrics = QtGui.QFontMetricsF(code_font)
+                badge_h = code_metrics.height() + 2
+                badge = QRectF(x, line.center().y() - badge_h / 2,
+                               code_metrics.horizontalAdvance(info.country) + 8, badge_h)
+                path = QtGui.QPainterPath()
+                path.addRoundedRect(badge, 3, 3)
+                p.fillPath(path, TRACK)
+                p.setFont(code_font)
+                p.setPen(TEXT)
+                p.drawText(badge, Qt.AlignCenter, info.country)
+                name_x = badge.right() + NET_CODE_GAP
+                name = _country_name(info.country)
+            else:
+                name = t("flyout.network.unknown_country")
+            name_w = max(0.0, x + left_w - name_x)
+            p.setFont(label_font)
+            p.setPen(TEXT)
+            p.drawText(
+                QRectF(name_x, line.y(), name_w, NET_LINE_H), Qt.AlignLeft | Qt.AlignVCenter,
+                QtGui.QFontMetrics(label_font).elidedText(name, Qt.ElideRight, int(name_w)),
+            )
+        p.setPen(QtGui.QPen(BORDER))
+        bottom = top + NET_BAND_H
+        p.drawLine(QtCore.QPointF(x, bottom), QtCore.QPointF(x + w, bottom))
+
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
@@ -1059,6 +1173,7 @@ class Flyout(QtWidgets.QWidget):
         p.drawLine(QtCore.QPointF(x, TOP_BAR_H), QtCore.QPointF(x + w, TOP_BAR_H))
 
         self._paint_clocks(p, x, w)
+        self._paint_network(p, x, w)
 
         if not self._results:
             top = self._content_top()

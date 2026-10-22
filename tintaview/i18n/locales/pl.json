@@ -58,6 +58,9 @@
 
   "flyout.no_agents": "Nie włączono żadnego agenta.",
   "flyout.no_usage_data": "Brak danych o zużyciu.",
+  "flyout.network.updating": "Aktualizowanie…",
+  "flyout.network.unavailable": "Adres IP niedostępny",
+  "flyout.network.unknown_country": "Nieznany kraj",
 
   "settings.title": "Ustawienia TintaView",
   "settings.tab.general": "Ogólne",
@@ -86,6 +89,8 @@
   "settings.stats_estimate.tooltip": "Odtwarza liczbę tokenów i przybliżony koszt z transkrypcji agenta, pod jego oficjalnymi wierszami. API zużycia podają tylko procenty, nigdy liczby. Wyłączenie pomija też skanowanie transkrypcji.",
   "settings.stats_trend": "Pokazuj tempo zużycia limitów",
   "settings.stats_trend.tooltip": "Dodaje wiersz szacujący, kiedy limit się wyczerpie w tempie z ostatniej godziny lub dwóch. Pojawia się tylko wtedy, gdy zużycie rośnie, i wymaga najpierw kilku odczytów historii.",
+  "settings.network_info": "Pokazuj publiczny adres IP i kraj w panelu użycia",
+  "settings.network_info.tooltip": "Przy każdym otwarciu panelu pyta Cloudflare o publiczny adres IP tego komputera i jego kraj, i pokazuje je pod zegarami.",
   "settings.escalate": "Przypominaj, dopóki nie odpowiem",
   "settings.escalate.hint": "Powtarza dźwięk i powiadomienie, dopóki nie odpowiesz.",
   "settings.escalate.after": "Przypominaj co",

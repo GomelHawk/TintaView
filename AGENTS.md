@@ -108,6 +108,7 @@ tintaview/
   cli.py  __main__.py
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
              request.py  proc.py  keepawake.py
+             netinfo.py                                  # public IP + country, panel-open only
              mcp.py                                      # the notify_user MCP server
   engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
              ghub_sidecar.py  ghub_worker.py             # python.exe painter for pythonw trays
@@ -161,12 +162,12 @@ TintaView has **two** places a user changes settings, and they overlap on purpos
   install/diff, autostart, WSL split, platform detection, interface language, and
   every engine's device-level knobs (OpenRGB host/port, G HUB `dll_path`, per-engine
   device-type lists). It does not edit `stats.*`, `escalation.*`, `notify.*`, the
-  sound settings or `ui.clocks` — those live in the popup only.
+  sound settings, `ui.clocks` or `ui.network_info` — those live in the popup only.
 - `ui/settings_dialog.py` — the in-process Qt popup opened from the tray's
   "Settings…" menu item (`TrayApp._open_settings` in `ui/tray.py`). Covers the
   knobs worth reaching often without a terminal, one tab each: General (enabled
   agents/providers + their drag-reorderable order, interface language, usage-poll
-  interval, `stats.show_estimate`, update-check), Alerts (escalation and
+  interval, `stats.show_estimate`, `ui.network_info`, update-check), Alerts (escalation and
   `notify.command`), Sound, Clocks, and Lighting (engine mode and the three status
   colours, with a reset-to-defaults button). It hands
   off to the console wizard via its "Open Full Setup Wizard (Terminal)…" button, and by

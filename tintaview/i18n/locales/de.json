@@ -58,6 +58,9 @@
 
   "flyout.no_agents": "Keine Agenten aktiviert.",
   "flyout.no_usage_data": "Keine Verbrauchsdaten.",
+  "flyout.network.updating": "Wird aktualisiert…",
+  "flyout.network.unavailable": "IP-Adresse nicht verfügbar",
+  "flyout.network.unknown_country": "Unbekanntes Land",
 
   "settings.title": "TintaView-Einstellungen",
   "settings.tab.general": "Allgemein",
@@ -86,6 +89,8 @@
   "settings.stats_estimate.tooltip": "Rekonstruiert Tokens und ungefähre Kosten aus den Transkripten des Agenten, unter dessen offiziellen Zeilen. Die Verbrauchs-APIs liefern nur Prozentwerte, nie Zählwerte. Ausgeschaltet entfällt auch der Transkript-Scan.",
   "settings.stats_trend": "Verbrauchstempo für Nutzungslimits anzeigen",
   "settings.stats_trend.tooltip": "Ergänzt eine Zeile, die im Tempo der letzten ein bis zwei Stunden schätzt, wann ein Limit aufgebraucht ist. Sie erscheint nur, während der Verbrauch tatsächlich steigt, und braucht erst einige Abfragen Verlauf.",
+  "settings.network_info": "Öffentliche IP-Adresse und Land im Nutzungsfenster anzeigen",
+  "settings.network_info.tooltip": "Fragt bei jedem Öffnen des Fensters Cloudflare nach der öffentlichen IP-Adresse dieses Computers und ihrem Land und zeigt beides unter den Uhren an.",
   "settings.escalate": "Weiter erinnern, bis ich antworte",
   "settings.escalate.hint": "Wiederholt Ton und Benachrichtigung, bis du antwortest.",
   "settings.escalate.after": "Erinnern alle",

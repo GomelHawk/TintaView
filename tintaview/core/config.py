@@ -339,6 +339,10 @@ class UIConfig:
     #: Only the *interface*: whatever an agent's own API reports is quoted as it arrived.
     language: str = "en"
     clocks: ClocksConfig = field(default_factory=ClocksConfig)
+    #: The usage panel's public IP + country line, under the clocks band. Off by
+    #: default: each time the panel opens it asks a third party (Cloudflare) for the
+    #: address — see `core/netinfo.py`.
+    network_info: bool = False
 
 
 @dataclass
