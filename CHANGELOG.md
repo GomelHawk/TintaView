@@ -4,6 +4,14 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.9.4 — 2026-10-22
+
+- **Your public IP address and country in the usage panel**, on a line under the clocks:
+  for example, "[UA] Ukraine" with the address beside it. It is off by default: turn it on
+  in **Settings… → General → Show public IP address and country in the usage panel**. It
+  refreshes each time you open the panel and shows "Updating…" until the answer arrives.
+  The address comes from Cloudflare, and nothing is fetched while the panel is closed.
+
 ## 0.9.3 — 2026-10-12
 
 - **The cost estimate in the usage panel now knows Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5.**
