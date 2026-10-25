@@ -31,6 +31,7 @@ from tintaview.stats.model import UsageProvider, UsageResult, UsageRow
 from tintaview.stats.providers import claude as claude_mod
 from tintaview.stats.providers import codex as codex_mod
 from tintaview.stats.providers import copilot as copilot_mod
+from tintaview.stats.providers import cursor as cursor_mod
 from tintaview.stats.providers import jetbrains as jetbrains_mod
 from tintaview.stats.providers.claude import ClaudeUsageProvider
 from tintaview.stats.providers.codex import CodexUsageProvider
@@ -1051,6 +1052,47 @@ class TestCursor:
         result = CursorUsageProvider().fetch(AgentConfig(state_db=str(bad_db)))
         assert not result.ok
         assert result.error  # some clear message, not an exception
+
+    # Both spendLimitUsage shapes captured from a live response on the same account,
+    # first with a fixed $50 on-demand limit, then switched to unlimited.
+    PLAN = {"autoPercentUsed": 2.02, "apiPercentUsed": 100, "includedSpend": 2000}
+    FIXED = {"totalSpend": 145, "individualLimit": 5000, "individualUsed": 145,
+             "individualRemaining": 4855, "limitType": "user"}
+    UNLIMITED = {"totalSpend": 145, "individualUsed": 145, "limitType": "user"}
+
+    def test_on_demand_with_a_fixed_limit_is_a_bar_of_used_over_limit(self):
+        rows = cursor_mod._parse_usage({"planUsage": self.PLAN, "spendLimitUsage": self.FIXED})
+        assert [r.label for r in rows] == ["Cursor Models", "Other Models", "On-Demand"]
+        on_demand = rows[-1]
+        assert on_demand.kind == "credits"
+        assert on_demand.right == "$1.45 / $50.00"
+        assert on_demand.pct == pytest.approx(2.9)
+        assert not on_demand.show_pct
+
+    def test_on_demand_unlimited_shows_the_spend_and_no_limit(self):
+        rows = cursor_mod._parse_usage({"planUsage": self.PLAN, "spendLimitUsage": self.UNLIMITED})
+        on_demand = rows[-1]
+        assert on_demand.label == "On-Demand"
+        assert on_demand.kind == "info"  # no bar: there is no cap to fill
+        assert on_demand.right == "$1.45 spent"
+        assert not on_demand.show_pct
+
+    @pytest.mark.parametrize("spend", [
+        None,
+        {"individualUsed": 145, "individualLimit": 5000, "limitType": "team"},  # unseen shape
+        {"individualUsed": 0, "individualLimit": 0, "limitType": "user"},  # on-demand off
+        {"individualLimit": 5000, "limitType": "user"},
+    ])
+    def test_no_on_demand_row_without_a_recognised_user_limit(self, spend):
+        payload = {"planUsage": self.PLAN}
+        if spend is not None:
+            payload["spendLimitUsage"] = spend
+        assert [r.label for r in cursor_mod._parse_usage(payload)] == ["Cursor Models", "Other Models"]
+
+    def test_on_demand_alone_is_not_a_recognised_payload(self):
+        """Without the plan's own quotas the response is still one the parser doesn't
+        recognise; an On-Demand row must not make it look like a successful read."""
+        assert cursor_mod._parse_usage({"spendLimitUsage": self.FIXED}) == []
 
     def test_unrecognised_response_shape_is_an_error_not_an_exception(self, tmp_path, monkeypatch):
         db_path = tmp_path / "state.vscdb"

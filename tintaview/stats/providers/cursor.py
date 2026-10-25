@@ -212,6 +212,9 @@ def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
         planUsage.includedSpend    -> cents of API usage the plan includes
         billingCycleEnd            -> epoch millis, shared by both quotas
 
+    Plus the On-Demand row from `spendLimitUsage` when there are plan rows to sit under
+    (see `_on_demand_row`).
+
     Returns [] for a response carrying neither percentage, which the caller reports as an
     unrecognised payload — deliberately not a row of zeroes, which would look like real
     "you have used nothing" data.
@@ -242,7 +245,53 @@ def _parse_usage(payload: dict[str, Any]) -> list[UsageRow]:
     if api is not None:
         rows.append(api)
 
+    if rows:
+        on_demand = _on_demand_row(payload.get("spendLimitUsage"))
+        if on_demand is not None:
+            rows.append(on_demand)
     return rows
+
+
+def _cents(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _on_demand_row(spend: Any) -> UsageRow | None:
+    """On-demand spend beyond the plan — Cursor's own "On-Demand · $1.45 / $50" card.
+
+    Both shapes captured from a live response on the same account, all values in cents:
+
+        fixed limit:  {"individualUsed": 145, "individualLimit": 5000,
+                       "individualRemaining": 4855, "limitType": "user", ...}
+        unlimited:    {"individualUsed": 145, "limitType": "user", ...}
+
+    Unlimited simply omits the limit, so it gets an info row with the spend alone — no
+    bar and no limit wording, because there is no cap to be measured against. Only
+    `limitType == "user"` has been seen; a team's pooled limit has not, so any other
+    type is skipped rather than guessed at, as is a limit of zero (on-demand off).
+    """
+    if not isinstance(spend, dict) or spend.get("limitType") != "user":
+        return None
+    used = _cents(spend.get("individualUsed"))
+    if used is None:
+        return None
+    label = t("usage.cursor.on_demand")
+    used_text = f"${used / 100:,.2f}"
+    if "individualLimit" not in spend:
+        return UsageRow(label=label, pct=0.0,
+                         right=t("usage.cursor.on_demand_unlimited", used=used_text),
+                         show_pct=False, severity="normal", kind="info")
+    limit = _cents(spend.get("individualLimit"))
+    if not limit or limit <= 0:
+        return None
+    pct = min(100.0, used / limit * 100)
+    severity = "critical" if pct >= 90 else "warning" if pct >= 75 else "normal"
+    return UsageRow(label=label, pct=pct,
+                     right=t("usage.cursor.on_demand_limited", used=used_text,
+                             limit=f"${limit / 100:,.2f}"),
+                     show_pct=False, severity=severity, kind="credits")
 
 
 # --------------------------------------------------------------------------- provider

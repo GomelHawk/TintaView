@@ -4,6 +4,15 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.9.5 — 2026-10-25
+
+- **Cursor's on-demand spending in the usage panel.** A new **On-Demand** row under
+  "Other Models" shows what you've spent beyond your plan this billing cycle. With a
+  monthly limit set, it reads like Cursor's own usage page, for example "$1.45 / $50.00",
+  with a bar that turns amber and then red as you near the limit. With an unlimited limit,
+  it shows only the amount spent, for example "$1.45 spent". The row isn't shown for team
+  spending limits yet.
+
 ## 0.9.4 — 2026-10-22
 
 - **Your public IP address and country in the usage panel**, on a line under the clocks:
