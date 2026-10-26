@@ -12,11 +12,15 @@ write atomically, stay idempotent, and only ever touch what TintaView wrote:
 | Claude | ``~/.claude/settings.json`` | ``permissions.allow`` entry ``mcp__tintaview__notify_user`` |
 | Codex  | ``~/.codex/config.toml`` | ``[mcp_servers.tintaview]`` and its ``tools`` table   |
 | Cursor | ``~/.cursor/mcp.json``   | ``mcpServers.tintaview``                              |
+| Junie  | ``~/.junie/mcp/mcp.json`` | ``mcpServers.tintaview``                             |
 
 The allow entry and Codex's ``approval_mode = "approve"`` exist because the call comes
 at the end of a long task, when nobody is watching: a tool that stops to ask permission
 to send the notification defeats the notification. Cursor's own approval setting lives
-in its UI and is not touched.
+in its UI and is not touched. Junie CLI asks before an MCP tool runs unless
+``~/.junie/allowlist.json`` allows it; that file's ``mcpTools`` rule format has not been
+verified against a live run, so it is not written (and the prompt is said, not hidden).
+The same ``~/.junie/mcp/mcp.json`` is what Junie's docs say the IDE plugin reads too.
 
 ``~/.claude.json`` is Claude Code's whole state file, not a config the user writes; it
 is re-serialised exactly as Claude writes it (2-space JSON, no ASCII escaping, the same
@@ -27,6 +31,10 @@ The launcher written is the interpreter that runs TintaView plus ``-m
 tintaview.core.mcp <agent>``. In a WSL-split install it is the *Windows* ``python.exe``
 under its ``/mnt/c/…`` path, so the in-distro agent starts it through WSL interop and
 it reaches the Windows-side daemon on loopback.
+
+Cursor's IDE and Junie CLI also run on the Windows half of a split, each reading its own
+Windows-profile file, so `windows_side` gives the second registration there: the Windows
+home and the plain Windows interpreter, not the distro's ``/mnt/c/…`` path.
 """
 
 from __future__ import annotations
@@ -64,7 +72,7 @@ COPILOT_APPROVAL_NOTE = (
     "first prompt, or start Copilot with --allow-tool='tintaview(notify_user)'.")
 
 #: Agents that can be registered. Stats-only providers have no agent to call a tool.
-SUPPORTED = ("claude", "codex", "copilot", "cursor")
+SUPPORTED = ("claude", "codex", "copilot", "cursor", "junie")
 
 
 def console_python(executable: str | None = None) -> str:
@@ -99,6 +107,21 @@ def agent_home(cfg: Any, adapter: Any) -> Path:
         else adapter.default_home()
 
 
+def windows_side(adapter: Any) -> tuple[Path, str] | None:
+    """`(home, python)` for the registration on this machine's own profile, or None.
+
+    Only for the agents in `wsl.WINDOWS_SIDE_AGENTS` that `wsl.windows_side_applies` (they
+    are installed on Windows), and only meaningful on the Windows half of a WSL split —
+    callers gate on that. The home is the adapter's own default, i.e. the Windows profile
+    there, and the interpreter is this one, never the distro-side ``/mnt/c/…`` spelling.
+    """
+    from . import wsl
+
+    if adapter.key not in SUPPORTED or not wsl.windows_side_applies(adapter):
+        return None
+    return adapter.default_home(), console_python()
+
+
 def wsl_python(distro: str) -> str:
     """This Windows interpreter as the distro sees it (``/mnt/c/…/python.exe``)."""
     from . import wsl
@@ -127,6 +150,8 @@ def config_paths(agent_key: str, home: Path) -> list[Path]:
         return [home / "mcp.json"]
     if agent_key == "copilot":
         return [home / "mcp-config.json"]
+    if agent_key == "junie":
+        return [home / "mcp" / "mcp.json"]
     return []
 
 
@@ -224,6 +249,15 @@ def plan_install(agent_key: str, home: Path, python: str) -> list[HookPlan]:
 
         return [_json_plan(agent_key, config_paths(agent_key, home)[0], add_cursor, [
             note, "Cursor may ask you to approve the tool the first time it runs."])]
+    if agent_key == "junie":
+        def add_junie(data: dict) -> None:
+            servers = data.get("mcpServers")
+            servers = dict(servers) if isinstance(servers, dict) else {}
+            servers[SERVER_KEY] = dict(entry)
+            data["mcpServers"] = servers
+
+        return [_json_plan(agent_key, config_paths(agent_key, home)[0], add_junie, [
+            note, "Junie asks you to approve the tool the first time it runs."])]
     if agent_key == "copilot":
         def add_copilot(data: dict) -> None:
             servers = data.get("mcpServers")
@@ -306,7 +340,7 @@ def plan_uninstall(agent_key: str, home: Path) -> list[HookPlan]:
         state, settings = config_paths(agent_key, home)
         return [_json_plan(agent_key, state, drop_server, []),
                 _json_plan(agent_key, settings, disallow, [])]
-    if agent_key in ("cursor", "copilot"):
+    if agent_key in ("cursor", "copilot", "junie"):
         return [_json_plan(agent_key, config_paths(agent_key, home)[0], drop_server, [])]
     if agent_key == "codex":
         import tomlkit
@@ -378,7 +412,8 @@ def _auto_approved(agent_key: str, home: Path) -> bool:
         tools = entry.get("tools") if hasattr(entry, "get") else None
         tool = tools.get(mcp_server.TOOL_NAME) if hasattr(tools, "get") else None
         return hasattr(tool, "get") and tool.get("approval_mode") == "approve"
-    # Cursor: its approval setting is in its own UI, not a file of ours. Copilot: no
+    # Cursor: its approval setting is in its own UI, not a file of ours. Junie: its
+    # allowlist.json rule format is unverified, so nothing is written. Copilot: no
     # user-level setting pre-approves one MCP tool (see COPILOT_APPROVAL_NOTE).
     return True
 

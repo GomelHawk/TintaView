@@ -105,7 +105,7 @@ def test_agent_list_includes_stats_only_providers(qapp, tmp_path):
     dialog = SettingsDialog(cfg)
     # Hook-backed agents plus the stats-only providers (agents_base.STATS_ONLY_AGENTS) —
     # missing the latter here was the exact bug found and fixed in this feature.
-    assert set(agent_keys(dialog)) == {"claude", "codex", "cursor", "jetbrains", "copilot"}
+    assert set(agent_keys(dialog)) == {"claude", "codex", "cursor", "jetbrains", "copilot", "junie"}
 
 
 def test_agent_list_orders_enabled_agents_first(qapp, tmp_path):
@@ -114,7 +114,7 @@ def test_agent_list_orders_enabled_agents_first(qapp, tmp_path):
     dialog = SettingsDialog(cfg)
     keys = agent_keys(dialog)
     assert keys[:2] == ["cursor", "claude"]
-    assert set(keys[2:]) == {"codex", "jetbrains", "copilot"}
+    assert set(keys[2:]) == {"codex", "jetbrains", "copilot", "junie"}
 
 
 def test_agent_list_check_state_matches_enabled_agents(qapp, tmp_path):

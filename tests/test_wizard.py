@@ -998,6 +998,9 @@ def windows_profile(tmp_path, monkeypatch):
     """A fake Windows profile and install prefix: nothing here is a real user's path."""
     profile = tmp_path / "profile"
     profile.mkdir()
+    # Both Windows-side agents are installed on this fake Windows machine.
+    for dotdir in (".cursor", ".junie"):
+        (profile / dotdir).mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: profile))
     hook_bin = tmp_path / "prefix" / "bin" / "tv-hook.cmd"
     monkeypatch.setattr(config_mod, "hook_bin_path", lambda: hook_bin)
@@ -1019,7 +1022,9 @@ def test_hook_sides_cover_the_windows_profile_for_every_windows_side_agent(wsl_m
         if adapter.key in wsl_mod.WINDOWS_SIDE_AGENTS:
             assert [s.label for s in sides] == ["WSL", "Windows"]
             windows = sides[1]
-            assert windows.adapter.hooks_config_path() == profile / ".cursor" / "hooks.json"
+            # Under the Windows profile, in the agent's own config file.
+            rel = adapter.hooks_config_path("user").relative_to(adapter.default_home())
+            assert windows.adapter.hooks_config_path() == profile / adapter.default_home().name / rel
             assert windows.hook_bin == hook_bin
             assert str(sides[0].adapter.hooks_config_path()).startswith("\\\\wsl.localhost\\Ubuntu")
         else:
@@ -1061,18 +1066,18 @@ def test_hook_status_does_not_let_one_good_side_hide_a_missing_one(wsl_mod, wind
 def test_windows_side_plans_target_the_profile_and_only_windows_side_agents(wsl_mod, windows_profile):
     profile, hook_bin = windows_profile
 
-    plans = wsl_mod.windows_side_plans(["claude", "cursor", "codex", "jetbrains"])
+    plans = wsl_mod.windows_side_plans(["claude", "cursor", "codex", "junie", "jetbrains"])
 
-    assert list(plans) == ["cursor"]
+    assert sorted(plans) == ["cursor", "junie"]
     plan = plans["cursor"]
     assert plan.path == profile / ".cursor" / "hooks.json"
+    assert plans["junie"].path == profile / ".junie" / "config.json"
     assert plan.action == "create"
     assert str(hook_bin).replace("\\", "\\\\") in plan.after or str(hook_bin) in plan.after
 
 
 def test_windows_side_plan_refuses_an_unparseable_file_instead_of_overwriting(wsl_mod, windows_profile):
     profile, _ = windows_profile
-    (profile / ".cursor").mkdir()
     (profile / ".cursor" / "hooks.json").write_text("{not json", encoding="utf-8")
 
     plan = wsl_mod.windows_side_plans(["cursor"])["cursor"]
@@ -1111,3 +1116,44 @@ def test_wizard_split_step_applies_the_windows_side_plan_after_the_distro(
     commands = [e["command"] for entries in written["hooks"].values() for e in entries]
     assert commands and all(HOOK_SENTINEL in c and c.startswith(str(hook_bin)) for c in commands)
     assert "on Windows" in capsys.readouterr().out
+
+
+def test_windows_side_is_skipped_for_an_agent_not_installed_on_windows(wsl_mod, windows_profile):
+    """Someone who runs Junie only inside the distro must not get a Windows `.junie` made."""
+    from tintaview.agents import base as agents_base
+
+    profile, _ = windows_profile
+    (profile / ".junie").rmdir()
+
+    assert sorted(wsl_mod.windows_side_plans(["cursor", "junie"])) == ["cursor"]
+    assert wsl_mod.windows_side_keys(["junie", "cursor", "claude"]) == ["cursor"]
+    assert [s.label for s in wsl_mod.hook_sides(Config(), agents_base.get("junie"), _split_check(wsl_mod))] == ["WSL"]
+
+
+def test_notify_tool_step_registers_cursor_and_junie_on_both_sides_of_a_split(
+    wsl_mod, windows_profile, monkeypatch, tmp_path
+):
+    from tintaview.install import mcp as mcp_install
+
+    profile, _ = windows_profile
+    distro = tmp_path / "distro"
+    homes = {}
+    for key, dotdir in (("cursor", ".cursor"), ("junie", ".junie")):
+        (distro / dotdir).mkdir(parents=True)
+        homes[key] = str(distro / dotdir)
+    monkeypatch.setattr(mcp_install, "wsl_python", lambda d: "/mnt/c/py/python.exe")
+    monkeypatch.setattr(mcp_install, "console_python", lambda executable=None: r"C:\py\python.exe")
+    monkeypatch.setattr(wsl_mod, "agent_homes_unc", lambda d: homes)
+    cfg = Config()
+    cfg.enabled_agents = ["cursor", "junie"]
+    env = _env(detect.MODE_WSL_SPLIT, detect.PLATFORM_WINDOWS, "Ubuntu")
+
+    wizard._step_notify_tool(cfg, env, assume_yes=True)
+
+    def command(path):
+        return json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["tintaview"]["command"]
+
+    assert command(distro / ".cursor" / "mcp.json") == "/mnt/c/py/python.exe"
+    assert command(distro / ".junie" / "mcp" / "mcp.json") == "/mnt/c/py/python.exe"
+    assert command(profile / ".cursor" / "mcp.json") == r"C:\py\python.exe"
+    assert command(profile / ".junie" / "mcp" / "mcp.json") == r"C:\py\python.exe"

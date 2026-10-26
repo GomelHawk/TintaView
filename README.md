@@ -10,7 +10,7 @@ idle, **yellow** while it's working, and **red, blinking** when it needs you to 
 no agent session is running, devices return to their previous lighting and the tray shows
 the plain TintaView logo. Click the tray icon for a usage panel (5-hour /
 weekly limits, credits, or token totals, depending on the agent). Works with
-**Claude Code**, **Codex CLI**, **Cursor** and **GitHub Copilot CLI**; drives **Razer Chroma**, **Logitech G
+**Claude Code**, **Codex CLI**, **Cursor**, **GitHub Copilot CLI** and **Junie CLI**; drives **Razer Chroma**, **Logitech G
 HUB** or **OpenRGB** devices; runs on **Windows, WSL, Linux and macOS**. The usage panel
 also has a card for **JetBrains AI Assistant** — it doesn't light up (see below), but its
 usage shows up alongside the others.
@@ -26,6 +26,9 @@ usage shows up alongside the others.
 | **Codex CLI** | Real event (`PermissionRequest`) | Commands only: Codex's Plan-mode multiple-choice questions fire no `PermissionRequest`, so they don't show as waiting. Hooks are version-gated — see [Troubleshooting](docs/TROUBLESHOOTING.md#codex-hooks-not-firing). Windows-native Codex (not under WSL) falls back to the `notify` program, which only reports idle. |
 | **Cursor** | **Heuristic, not a real event.** Cursor has no "waiting for approval" hook, so TintaView guesses: if a tool starts and nothing else happens for `stall_seconds` (default 8s), it's treated as a stall and turns the light red. This can occasionally be wrong in either direction — see [Troubleshooting](docs/TROUBLESHOOTING.md#cursor-never-goes-red). |
 | **GitHub Copilot CLI** | Real event (`Notification` for a permission prompt or a question) | TintaView's hooks go in a file of their own, `~/.copilot/hooks/tintaview.json`. Needs a recent Copilot CLI (tested on 1.0.94+). In a WSL-split install the hooks go inside the distro, so it's the Copilot you run in WSL that lights up. |
+| **Junie CLI** | **Not detected.** Session start/end and "working" work; approval and question prompts don't. Junie auto-approves an action when its `PermissionRequest` hook exits cleanly, so TintaView deliberately doesn't use that hook — the light stays on "working" while Junie waits for you. | Junie's hooks are Early Access and only the interactive CLI and `junie "task"` fire them: a Junie running inside a JetBrains IDE isn't seen. Hooks go in `~/.junie/config.json`; the rest of that file is left alone. |
+
+Cursor and Junie CLI can be installed on both Windows and WSL. In a WSL-split install TintaView writes their hooks on **both** sides (each Windows-side one only if the agent is installed on Windows), and `tintaview doctor` reports each side separately.
 
 **JetBrains AI Assistant** is not in that table — it gets no lighting or session
 tracking, only a usage card (see [Usage stats](#usage-stats)): it's an IDE plugin with no
@@ -420,7 +423,7 @@ example above works unchanged in both places.
 ## Notify me when it's done
 
 Start a long task and add *"notify me via phone when it's done"* — nothing else. Claude Code,
-Codex and Cursor each see a `notify_user` tool from TintaView in every session, and call it
+Codex, Cursor and Junie CLI each see a `notify_user` tool from TintaView in every session, and call it
 when the task finishes with a sentence of their own ("Migration finished: 142 tables, no
 errors."). The tray shows it as a notification, and **Settings… → Alerts → When an agent
 notifies me** takes a command for everything past the desktop — the Telegram one above works
@@ -451,10 +454,15 @@ each file and a confirmation per agent:
 | Claude Code | `mcpServers.tintaview` in `~/.claude.json`, and `mcp__tintaview__notify_user` in `permissions.allow` of `~/.claude/settings.json` |
 | Codex CLI | `[mcp_servers.tintaview]` in `~/.codex/config.toml`, with `approval_mode = "approve"` for the tool |
 | Cursor | `mcpServers.tintaview` in `~/.cursor/mcp.json` |
+| Junie CLI | `mcpServers.tintaview` in `~/.junie/mcp/mcp.json` (Junie's docs say the IDE plugin reads the same file) |
+
+Cursor and Junie CLI can be installed on both Windows and WSL; in a WSL-split install the
+wizard registers the tool on **both** sides (the Windows one only if the agent is installed
+on Windows), and `tintaview doctor` reports each side separately.
 
 The permission entries are there because the call comes at the end of a long task, when
-nobody may be around to approve it. Cursor keeps its approval setting in its own UI, so it
-may ask the first time. New sessions pick the tool up; one already open doesn't.
+nobody may be around to approve it. Cursor keeps its approval setting in its own UI and Junie
+asks before running an MCP tool, so either may ask the first time. New sessions pick the tool up; one already open doesn't.
 
 It needs the tray: a headless TintaView has nothing to show the message with, and the tool
 tells the agent so — as it does when TintaView isn't running at all — so the agent can say
@@ -511,7 +519,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `notify.command` | *(none)* | Shell command run once for every message an agent sends with the `notify_user` tool — see [Notify me when it's done](#notify-me-when-its-done). `TINTAVIEW_STATUS` is `notify`; `TINTAVIEW_MESSAGE`, `TINTAVIEW_AGENTS` and `TINTAVIEW_CWD` say what and who, and the question variables are empty. The tray notification appears either way. Output and exit code ignored, a failure logged. Also on the **Alerts** tab in **Settings…**. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
-| `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot`; a UNC path in a WSL-split install. |
+| `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot` / `~/.junie`; a UNC path in a WSL-split install. |
 | `agents.<key>.confirm_detection` | `event` | `event` (a real hook fires) or `stall` (heuristic — Cursor's default). |
 | `agents.<key>.stall_seconds` | `8.0` | Only used when `confirm_detection = "stall"`. |
 | `agents.cursor.state_db` | *(auto-detected)* | Path to Cursor's `state.vscdb`; empty auto-detects the platform default. |

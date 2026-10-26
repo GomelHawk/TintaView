@@ -754,9 +754,9 @@ def _step_hooks_native(cfg: config_mod.Config, assume_yes: bool) -> dict[str, bo
 
 def _step_hooks_wsl_split(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> dict:
     result = _step_hooks_distro(cfg, env, assume_yes)
-    # Cursor's IDE runs on Windows and reads this machine's `~/.cursor/hooks.json`, not the
-    # distro's, so it gets its own plan (`wsl.WINDOWS_SIDE_AGENTS`), shown and confirmed
-    # like any other — the distro half above stays for a `cursor-agent` run inside it.
+    # Cursor's IDE and Junie CLI also live on Windows and read this machine's own config
+    # (`~/.cursor/hooks.json`, `~/.junie/config.json`), not the distro's, so each gets its
+    # own plan (`wsl.windows_side_applies`), shown and confirmed like any other.
     for key, plan in result.get("windows_plans", {}).items():
         adapter = agents_base.get(key)
         name = adapter.display_name if adapter else key
@@ -857,8 +857,22 @@ def _step_notify_tool(cfg: config_mod.Config, env: Environment, assume_yes: bool
             plans = mcp_install.plan_install(key, home, python)
         except (OSError, ValueError) as exc:
             print(f"\n--- {adapter.display_name} ---\n  Could not read its config: {exc}")
+        else:
+            _confirm_and_apply_notify_tool(adapter.display_name, plans, assume_yes)
+        if not split:
             continue
-        _confirm_and_apply_notify_tool(adapter.display_name, plans, assume_yes)
+        # Cursor's IDE and Junie CLI also live on Windows, with their own MCP file there
+        # and the plain Windows interpreter (not the distro's /mnt/c spelling).
+        windows = mcp_install.windows_side(adapter)
+        if windows is None:
+            continue
+        w_home, w_python = windows
+        try:
+            w_plans = mcp_install.plan_install(key, w_home, w_python)
+        except (OSError, ValueError) as exc:
+            print(f"\n--- {adapter.display_name} (Windows) ---\n  Could not read its config: {exc}")
+            continue
+        _confirm_and_apply_notify_tool(f"{adapter.display_name} (Windows)", w_plans, assume_yes)
 
 
 def _confirm_and_apply_notify_tool(name: str, plans: list[hooks_mod.HookPlan],
@@ -923,8 +937,8 @@ def _step_verify(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
             print(f"Couldn't install the hook script inside {env.distro}: {exc}")
             print("Fix that and re-run setup, or install it by hand — see docs/TROUBLESHOOTING.md.")
             return 1
-        if any(k in wsl_mod.WINDOWS_SIDE_AGENTS for k in cfg.enabled_agents):
-            # The Windows-side hooks (Cursor) call this machine's own `tv-hook.cmd`.
+        if wsl_mod.windows_side_keys(cfg.enabled_agents):
+            # The Windows-side hooks (Cursor, Junie) call this machine's own `tv-hook.cmd`.
             print(f"Hook script installed at {install_hook_script(cfg, env)}.")
         print(
             "Live verification across the Windows/WSL boundary isn't automated — start a "

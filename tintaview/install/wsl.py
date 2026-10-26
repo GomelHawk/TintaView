@@ -400,13 +400,38 @@ def check_adapter(cfg: Any, adapter: Any, check: HookCheck) -> Any:
     return resolved
 
 
-#: Agents whose hooks are read on the *Windows* half of a split as well. Cursor's IDE runs
-#: on Windows and reaches a distro workspace over `\\\\wsl.localhost\\...`, so it loads
-#: `<Windows home>\\.cursor\\hooks.json` and never the distro's own file (measured: its hooks
-#: log said "No user hooks configuration found" for a split install that had written only the
-#: distro's). The distro file still serves a `cursor-agent` run inside the distro, so these
-#: agents are installed and checked on both sides.
-WINDOWS_SIDE_AGENTS = frozenset({"cursor"})
+#: Agents that can also live on the *Windows* half of a split, with hooks of their own there.
+#: Cursor's IDE runs on Windows and reaches a distro workspace over `\\\\wsl.localhost\\...`, so
+#: it loads `<Windows home>\\.cursor\\hooks.json` and never the distro's own file (measured: its
+#: hooks log said "No user hooks configuration found" for a split install that had written only
+#: the distro's). Junie CLI installs natively on Windows *and* in the distro, each reading its
+#: own `~/.junie/config.json`. The distro file still serves a CLI run inside the distro. Such an
+#: agent is installed and checked on both sides — the Windows one only where the agent is
+#: actually installed on Windows (`windows_side_applies`).
+WINDOWS_SIDE_AGENTS = frozenset({"cursor", "junie"})
+
+
+def windows_side_applies(adapter: Any) -> bool:
+    """Does `adapter` need hooks on this machine's own (Windows) profile too?
+
+    `adapter.detect()` is `default_home().exists()`, and on the Windows half of a split
+    `default_home()` is the Windows profile — so this is "the agent is installed on
+    Windows", and a user who only runs it inside the distro never gets a Windows-side
+    config file created for them.
+    """
+    return adapter.key in WINDOWS_SIDE_AGENTS and bool(adapter.detect())
+
+
+def windows_side_keys(keys: list[str]) -> list[str]:
+    """The subset of agent `keys` that `windows_side_applies` to, in order."""
+    from ..agents import base as agents_base
+
+    out = []
+    for key in keys:
+        adapter = agents_base.get(key)
+        if adapter is not None and windows_side_applies(adapter):
+            out.append(key)
+    return out
 
 
 class HookSide(NamedTuple):
@@ -436,7 +461,7 @@ def hook_sides(cfg: Any, adapter: Any, check: HookCheck, scope: str = "user") ->
     to whichever side the project is on, and outside a split there is one side.
     """
     sides = [HookSide("WSL", check_adapter(cfg, adapter, check), check.hook_bin)]
-    if scope == "user" and check.distro and adapter.key in WINDOWS_SIDE_AGENTS:
+    if scope == "user" and check.distro and windows_side_applies(adapter):
         sides.append(
             HookSide("Windows", windows_side_adapter(adapter), config_mod.hook_bin_path())
         )
@@ -473,7 +498,7 @@ def windows_side_plans(agent_keys: list[str]) -> dict[str, Any]:
     plans: dict[str, Any] = {}
     for key in agent_keys:
         adapter = agents_base.get(key)
-        if adapter is None or key not in WINDOWS_SIDE_AGENTS:
+        if adapter is None or not windows_side_applies(adapter):
             continue
         try:
             plans[key] = hooks_mod.plan_install(

@@ -169,4 +169,4 @@ def _load_builtins() -> None:
     # Unconditional, not "only while the registry is empty": importing one adapter module
     # directly (`from tintaview.agents.claude import ...`) registers just that one, and an
     # emptiness check then never loaded the rest. Re-importing is a dict lookup.
-    from . import claude, codex, copilot, cursor  # noqa: F401  (import registers them)
+    from . import claude, codex, copilot, cursor, junie  # noqa: F401  (import registers them)

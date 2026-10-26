@@ -131,7 +131,7 @@ def refresh_if_outdated(cfg: config_mod.Config, env: Environment | None = None) 
             _write_local_script(Path(check.hook_bin), script)
         log.info("refreshed the outdated hook script %s", check.hook_bin)
         refreshed = True
-    if check.distro and any(k in wsl.WINDOWS_SIDE_AGENTS for k in cfg.enabled_agents):
+    if check.distro and wsl.windows_side_keys(cfg.enabled_agents):
         # A split install also has this machine's own script, for the Windows-side agents.
         local = config_mod.hook_bin_path()
         if script_state(local) == SCRIPT_OUTDATED:

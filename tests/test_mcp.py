@@ -405,3 +405,49 @@ def test_a_hand_formatted_file_is_announced_as_reformatted(tmp_path):
     hooks_mod.apply(plan)  # ours now: 2-space already, so no note the second time round
     (again,) = mcp_install.plan_install("cursor", home, "/other/python")
     assert not any("reformatted" in note for note in again.notes)
+
+
+def test_junie_registration_lives_in_mcp_subdir_and_keeps_the_users_servers(tmp_path):
+    """Junie (CLI and, per its docs, the IDE plugin) reads `~/.junie/mcp/mcp.json`."""
+    home = _home(tmp_path, "junie")
+    path = home / "mcp" / "mcp.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"mcpServers": {"Context7": {"url": "https://x/mcp"}}}, indent=2))
+
+    plans = mcp_install.plan_install("junie", home, PY)
+    assert [p.path for p in plans] == [path]
+    _apply(plans)
+    servers = json.loads(path.read_text())["mcpServers"]
+    assert servers["Context7"] == {"url": "https://x/mcp"}
+    assert servers["tintaview"] == {"command": PY, "args": ["-m", "tintaview.core.mcp", "junie"]}
+    assert mcp_install.status("junie", home, PY) == hooks_mod.STATUS_INSTALLED
+    assert mcp_install.plan_install("junie", home, PY)[0].action == hooks_mod.ACTION_NOOP
+
+    _apply(mcp_install.plan_uninstall("junie", home))
+    assert json.loads(path.read_text()) == {"mcpServers": {"Context7": {"url": "https://x/mcp"}}}
+
+
+def test_junie_registration_creates_the_missing_mcp_directory(tmp_path):
+    home = _home(tmp_path, "junie")
+
+    _apply(mcp_install.plan_install("junie", home, PY))
+
+    assert (home / "mcp" / "mcp.json").is_file()
+
+
+def test_windows_side_gives_the_windows_home_and_plain_python(tmp_path, monkeypatch):
+    """Not the distro's /mnt/c spelling, and only where the agent is installed on Windows."""
+    from tintaview.agents import base as agents_base
+    from tintaview.install import wsl
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(mcp_install, "console_python", lambda executable=None: r"C:\py\python.exe")
+    (tmp_path / ".cursor").mkdir()
+
+    cursor = agents_base.get("cursor")
+    assert mcp_install.windows_side(cursor) == (tmp_path / ".cursor", r"C:\py\python.exe")
+    assert mcp_install.windows_side(agents_base.get("junie")) is None  # no ~/.junie
+    assert mcp_install.windows_side(agents_base.get("claude")) is None  # not a Windows-side agent
+    # Derived from the one set, so a third agent cannot be added there and forgotten here.
+    for key in wsl.WINDOWS_SIDE_AGENTS:
+        assert key in mcp_install.SUPPORTED

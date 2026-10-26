@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from tintaview.agents import claude, codex, copilot, cursor
+from tintaview.agents import claude, codex, copilot, cursor, junie
 from tintaview.agents.base import HOOK_SENTINEL, all_agents, get
 from tintaview.core import events
 
@@ -41,7 +41,7 @@ HOOK_COMMAND = f"{TV_HOOK_SH} claude"  # a stand-in for the installed stable pat
 
 def test_all_agents_registers_exactly_the_builtins():
     keys = {a.key for a in all_agents()}
-    assert keys == {"claude", "codex", "copilot", "cursor"}
+    assert keys == {"claude", "codex", "copilot", "cursor", "junie"}
 
 
 def test_get_returns_none_for_unknown_key():
@@ -480,3 +480,34 @@ def test_tv_hook_cmd_ignores_an_inherited_token_env_var(capturing_server):
     assert result.returncode == 0
     assert received == ["/v1/event/idle?agent=claude&sid=default"]
     assert "supersecret" not in "".join(received)
+
+
+def test_junie_hooks_are_claude_shaped_and_never_bind_permission_request():
+    """Junie auto-approves an action when its PermissionRequest hook exits 0 without a
+    decision, and `tv-hook` always exits 0 — so that event must never be bound. And
+    `matcher` is a regex there: Claude's "*" would be invalid, omitting it matches all."""
+    adapter = junie.JunieAdapter()
+    native = adapter.render_hooks(HOOK_COMMAND)
+
+    assert set(native) == {"hooks"}
+    assert set(native["hooks"]) == {
+        "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "Stop", "StopFailure",
+    }
+    assert "PermissionRequest" not in native["hooks"]
+    assert all(b.event != "confirm" for b in adapter.bindings)
+    for entries in native["hooks"].values():
+        for entry in entries:
+            assert "matcher" not in entry
+            assert entry["hooks"][0]["type"] == "command"
+    assert native["hooks"]["Stop"][0]["hooks"][0]["command"] == f"{HOOK_COMMAND} idle"
+    assert native["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"{HOOK_COMMAND} working"
+
+
+def test_junie_config_path_is_the_user_file_at_every_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    adapter = junie.JunieAdapter()
+
+    assert adapter.hooks_config_path("user") == tmp_path / ".junie" / "config.json"
+    # A project's own .junie/config.json hooks are ignored by Junie, so it is never written.
+    assert adapter.hooks_config_path("project", tmp_path / "proj") == adapter.hooks_config_path()
+    assert adapter.session_id_field == "session_id"

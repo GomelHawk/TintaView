@@ -112,7 +112,7 @@ tintaview/
              mcp.py                                      # the notify_user MCP server
   engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
              ghub_sidecar.py  ghub_worker.py             # python.exe painter for pythonw trays
-  agents/    base.py  claude.py  codex.py  copilot.py  cursor.py   # hook manifest + paths per agent
+  agents/    base.py  claude.py  codex.py  copilot.py  cursor.py  junie.py   # hook manifest + paths per agent
   stats/     providers/{claude,codex,cursor,jetbrains,copilot}.py
              cache.py  model.py  service.py  format.py   # format.py = shared row wording
              _scan.py                                    # shared transcript walk + memo
@@ -377,6 +377,7 @@ OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in p
 | Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag and the notify tool's `[mcp_servers.tintaview]`) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
 | Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`/`postToolUse`, `beforeShellExecution`/`afterShellExecution` | none → stall heuristic |
 | GitHub Copilot CLI | `~/.copilot/hooks/tintaview.json` — a file of our own (`{"version": 1, …}`), never the user's | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `Notification` + matchers `permission_prompt` and `elicitation_dialog` |
+| Junie CLI | `~/.junie/config.json` (Claude-shaped nested hooks; the rest of the file is untouched) | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse` (→ `working`, no tool-end exists) | none — `PermissionRequest` is **never bound** (see below); `Stop`/`StopFailure` → idle |
 
 A summary, not the contract: each adapter's `bindings()` is the source of truth, and two details
 don't fit the columns. Cursor binds **both** the generic tool pair *and* the shell-execution pair
@@ -410,6 +411,21 @@ arrived for every auto-approved tool call. `SessionEnd` fired on `/exit` on 1.0.
 *every turn* (`reason: complete`) on the 1.0.94 Windows build; the next prompt reopens the
 session, so the only cost is a moment with no Copilot dot in the panel. A non-zero exit from a
 `preToolUse` hook *denies* the tool in Copilot, one more reason `tv-hook` always exits 0.
+
+**Junie CLI** (`agents/junie.py`), measured on 26.9.22 with a stdin-dumping hook and then end to
+end through the real CLI: every event carries `session_id`/`cwd`/`project_path` (so `tv-hook`
+needs nothing Junie-specific); there is **no PostToolUse**, so `PreToolUse` is `working`, not
+`tool-start` (a tool name nothing clears would read "busy with Bash" while the model thinks);
+`PreToolUse` fires for `submit` too; a `PreToolUse` `matcher` is a **regex**, so Claude's `"*"` is
+invalid and the matcher is omitted. **`PermissionRequest` must not be bound:** Junie's docs say a
+hook that exits 0 without a blocking decision *auto-approves* the action and skips the dialog,
+and `tv-hook` always exits 0 — so binding it would approve every command the user is meant to
+see. Approvals and questions are therefore not detected until the dialog can be observed without
+being answered (unmeasured: whether a `PermissionRequest` hook can print a decision that leaves
+the dialog up). A Junie inside a JetBrains IDE (ACP/server host) fires no hooks yet, per its docs.
+`StopFailure` → `idle` was not triggered when measuring. Junie CLI installs on Windows *and* in the
+distro, so it is a Windows-side agent too (below); the Windows-side hook command running a
+`tv-hook.cmd` under Junie's Windows shell is **not verified**.
 
 JetBrains AI Assistant is deliberately absent from this table — see
 [Statistics](#statistics) for why it is stats-only with no `agents/` adapter.
@@ -532,14 +548,25 @@ variables empty). The agent only ever sends text — the command and any token i
 - **Registration follows the hook merge's rules** (`install/mcp.py`, plans are `HookPlan`s
   and go through `hooks.apply`): diff, one confirmation per agent, backup, atomic write,
   idempotent, and only TintaView's own keys — `mcpServers.tintaview` (Claude's
-  `~/.claude.json`, Cursor's `~/.cursor/mcp.json`), `[mcp_servers.tintaview]` (Codex), and
+  `~/.claude.json`, Cursor's `~/.cursor/mcp.json`, Junie's `~/.junie/mcp/mcp.json`),
+  `[mcp_servers.tintaview]` (Codex), and
   the one Claude `permissions.allow` rule `mcp__tintaview__notify_user`. Uninstall
   (`tintaview hooks uninstall`) removes exactly those and leaves a file byte-identical to
   before (verified against real `~/.claude.json` and `~/.codex/config.toml`).
 - **The tool must not ask permission.** It is called when a long task ends, often to
   someone who walked away, so Claude gets the allow rule and Codex
   `tools.notify_user.approval_mode = "approve"`. Cursor's approval lives in its UI and is
-  not touched.
+  not touched. Junie CLI asks before an MCP tool unless `~/.junie/allowlist.json` allows it,
+  but that file's `mcpTools` rule format (a `prefix` like `"github-server:"`) was never
+  verified against a live run, so nothing is written — measured in a batch run, which does not
+  stop to ask.
+- **Cursor and Junie are registered on both sides of a WSL split** (`mcp.windows_side`, the
+  same `wsl.windows_side_applies` gate as their hooks): the distro's file with the `/mnt/c/…`
+  interpreter, and this machine's own file with the plain Windows interpreter. `doctor`'s
+  NOTIFY TOOL section reports each side. Measured through the real Junie CLI 26.9.22: it loads
+  `tintaview` from an `mcp.json`, lists `notify_user`, calls it, and the daemon receives
+  `POST /v1/notify?agent=junie`. A launcher that cannot start (a venv without the package) shows
+  up in Junie's log only as "Timeout while waiting for client tintaview to start".
 - **`~/.claude.json` is Claude Code's live state file**, beside `~/.claude` rather than in
   it (`claude_state_path`). It is re-serialised exactly as Claude writes it — 2-space,
   `ensure_ascii=False`, no trailing newline — so the diff is only our lines, and
@@ -933,16 +960,18 @@ neither has anything to do with where the hooks actually are. Two rules, both le
   stale. Those relative paths are named once in `install.wsl` (`REMOTE_HOOK_BIN_REL` /
   `REMOTE_HOOK_ENV_REL`); don't spell them out a second time anywhere else.
 
-**Cursor has a third case: the IDE runs on Windows, the project is in the distro.** Measured
+**Cursor and Junie CLI have a third case: they also live on the Windows half.** Cursor's IDE runs on Windows, the project is in the distro. Measured
 (Cursor's own `cursor.hooks` log): it loads `<Windows home>\.cursor\hooks.json` and reports "No
 user hooks configuration found" when only the distro's file exists — a split install that wrote
-just the distro's hooks never fired once. So `wsl.WINDOWS_SIDE_AGENTS` (Cursor) are installed
-and checked on **both** sides: `wsl.hook_sides()` returns the distro file and the Windows-profile
+just the distro's hooks never fired once; Junie CLI is installed natively on Windows and in the
+distro, each reading its own `~/.junie/config.json`. So `wsl.WINDOWS_SIDE_AGENTS` are installed
+and checked on **both** sides — the Windows one only when `wsl.windows_side_applies` (the agent is
+installed on Windows, so nobody gets a Windows config file for an agent they only run in WSL): `wsl.hook_sides()` returns the distro file and the Windows-profile
 file (`Path.home()` on the Windows half — no username or drive is ever written down) with
 `tv-hook.cmd`, `hook_status` reports the most actionable of the sides, the wizard shows a second
 diff, `doctor` reports each side and the Windows script, and the startup refresh keeps that
-script current. The distro file stays for a `cursor-agent` run inside the distro. Add an agent
-to that set only if its host process measurably reads the Windows profile.
+script current. The distro file stays for a CLI run inside the distro. Add an agent to that set
+only if it measurably reads the Windows profile.
 
 `mode` is `wsl-split` on **both** sides — gate on `env.is_windows_side` too, since inside the
 distro these are all ordinary local files. A distro that can't be reached (stopped, `wsl.exe`

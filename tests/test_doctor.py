@@ -1229,3 +1229,33 @@ def test_sound_section(tmp_path, capsys):
     assert "does not exist" in out
     assert "not WAV, OGG or MP3" in out
     assert reporter.warns == 2 and reporter.fails == 0
+
+
+def test_wsl_split_notify_tool_reports_the_windows_side_of_cursor_and_junie(
+        tmp_path, monkeypatch, capsys):
+    """Cursor's IDE and Junie CLI also read this machine's own profile: a registration
+    that exists only inside the distro must show as missing on the Windows side."""
+    from tintaview.install import mcp as mcp_install
+
+    unc_root, home, env = _fake_distro(tmp_path, monkeypatch)
+    distro_python = "/mnt/c/py/python.exe"
+    win_python = str(tmp_path / "winpy" / "python.exe")
+    monkeypatch.setattr(mcp_install, "wsl_python", lambda distro: distro_python)
+    monkeypatch.setattr(mcp_install, "console_python", lambda executable=None: win_python)
+    profile = tmp_path / "profile"
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: profile))
+    homes = {}
+    for key in ("cursor", "junie"):
+        (profile / f".{key}").mkdir(parents=True)
+        distro_home = unc_root / "home" / "dev" / f".{key}"
+        distro_home.mkdir(parents=True)
+        _register(key, distro_home, distro_python)  # the distro side only
+        homes[key] = AgentConfig(home=str(distro_home))
+    cfg = _write_config(enabled_agents=["cursor", "junie"], agents=homes)
+    reporter = D._Reporter(verbose=True)
+
+    D._check_notify_tool(reporter, cfg, env, home)
+
+    out = capsys.readouterr().out
+    assert out.count("(Windows): not registered") == 2, out
+    assert reporter.warns == 2 and reporter.fails == 0

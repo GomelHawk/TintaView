@@ -305,3 +305,29 @@ def test_copilot_install_round_trip_in_its_own_file(tmp_path, monkeypatch):
     assert H.status(adapter, hook_bin) == H.STATUS_MISSING
     assert not [p for p in target.parent.iterdir()
                 if p.suffix == ".json" and p.name != "tintaview.json"]
+
+
+def test_junie_install_keeps_the_rest_of_config_json_and_the_users_own_hooks(tmp_path, monkeypatch):
+    """`~/.junie/config.json` also holds Junie's other settings and the user's own hooks:
+    only TintaView's entries are added, re-running is a no-op, and uninstall puts the
+    file's meaning back exactly."""
+    from tintaview.agents.junie import JunieAdapter
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    adapter = JunieAdapter()
+    target = tmp_path / ".junie" / "config.json"
+    target.parent.mkdir()
+    mine = {"matcher": "Bash", "hooks": [{"type": "command", "command": "~/mine.sh"}]}
+    original = {"model": "some-model", "hooks": {"PreToolUse": [mine]}}
+    target.write_text(json.dumps(original), encoding="utf-8")
+    hook_bin = Path("/home/me/.tintaview/bin/tv-hook.sh")
+
+    H.apply(H.plan_install(adapter, hook_bin))
+    after = json.loads(target.read_text(encoding="utf-8"))
+    assert after["model"] == "some-model"
+    assert mine in after["hooks"]["PreToolUse"]
+    assert H.status(adapter, hook_bin) == H.STATUS_INSTALLED
+    assert H.plan_install(adapter, hook_bin).action == H.ACTION_NOOP
+
+    H.apply(H.plan_uninstall(adapter))
+    assert json.loads(target.read_text(encoding="utf-8")) == original

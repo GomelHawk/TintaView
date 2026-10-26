@@ -517,12 +517,12 @@ def _check_hook_script(
 
 
 def _check_windows_hook_script(reporter: _Reporter, cfg: Config, split_home: object) -> None:
-    """In a WSL split, the Windows-side agents (`wsl.WINDOWS_SIDE_AGENTS`, i.e. Cursor)
+    """In a WSL split, the Windows-side agents (`wsl.windows_side_keys`: Cursor, Junie)
     call this machine's own `tv-hook.cmd`, which the checks above deliberately don't look
     for. Silent when no such agent is enabled or the distro is unreachable."""
     from . import wsl
 
-    if split_home is None or not any(k in wsl.WINDOWS_SIDE_AGENTS for k in cfg.enabled_agents):
+    if split_home is None or not wsl.windows_side_keys(cfg.enabled_agents):
         return
     hook_bin = config_mod.hook_bin_path()
     if not hook_bin.exists():
@@ -740,6 +740,58 @@ def _check_agent_hooks(
 # --------------------------------------------------------------------------- 6b. notify tool
 
 
+def _report_notify_state(
+    reporter: _Reporter, name: str, key: str, home: Path, python: str, remote: bool, fix: str
+) -> None:
+    """One agent's notify-tool registration on one side of the install. `remote`: the
+    registered interpreter is spelled for the distro (`/mnt/c/...`), so it can't be tested."""
+    from . import hooks as hooks_mod
+    from . import mcp as mcp_install
+
+    path = mcp_install.config_paths(key, home)[0]
+    try:
+        state = mcp_install.status(key, home, python)
+    except Exception as exc:  # noqa: BLE001
+        reporter.warn("NOTIFY TOOL", f"{name}: could not check ({exc})",
+                      f"run `{fix}` to register it again")
+        return
+    if state == hooks_mod.STATUS_INSTALLED:
+        reporter.ok("NOTIFY TOOL", f"{name}: registered ({path})")
+    elif state == hooks_mod.STATUS_MISSING:
+        reporter.warn(
+            "NOTIFY TOOL", f"{name}: not registered — agents can't notify you",
+            f"optional: run `{fix}` so \"notify me when it's done\" works",
+        )
+    elif state == hooks_mod.STATUS_PARTIAL:
+        reporter.warn(
+            "NOTIFY TOOL", f"{name}: registered, but each call will ask for approval",
+            f"run `{fix}` to add the approval setting back",
+        )
+    elif state == hooks_mod.STATUS_UNREADABLE:
+        reporter.warn(
+            "NOTIFY TOOL", f"{name}: {path} could not be read or parsed",
+            "check the file's permissions and that it is valid — nothing is "
+            "registered or removed until it can be read",
+        )
+    else:  # stale-path
+        registered = mcp_install.registered_launcher(key, home) or {}
+        command = str(registered.get("command") or "")
+        # From a split's Windows side a distro-side `/mnt/c/...` path can't be tested, and the
+        # wizard wrote it from this very interpreter: a mismatch there is always an
+        # old install.
+        gone = remote or not Path(command).exists()
+        if gone:
+            reporter.fail(
+                "NOTIFY TOOL", f"{name}: registered for a Python that no longer "
+                f"exists ({command})", f"run `{fix}` to point it at {python}",
+            )
+        else:
+            reporter.warn(
+                "NOTIFY TOOL", f"{name}: registered for another TintaView ({command})",
+                f"run `{fix}` to point it at this one ({python})",
+            )
+
+
 def _check_notify_tool(
     reporter: _Reporter, cfg: Config, env: Environment, split_home: object = _UNRESOLVED
 ) -> None:
@@ -754,7 +806,6 @@ def _check_notify_tool(
     it. A distro that can't be reached reports nothing, as for the hooks.
     """
     from ..agents import base as agents_base
-    from . import hooks as hooks_mod
     from . import mcp as mcp_install
 
     keys = [k for k in cfg.enabled_agents if k in mcp_install.SUPPORTED]
@@ -780,51 +831,18 @@ def _check_notify_tool(
         adapter = agents_base.get(key)
         if adapter is None:
             continue
-        name = adapter.display_name
-        home = mcp_install.agent_home(cfg, adapter)
-        path = mcp_install.config_paths(key, home)[0]
-        fix = fix_cmd.format(key=key)
-        try:
-            state = mcp_install.status(key, home, python)
-        except Exception as exc:  # noqa: BLE001
-            reporter.warn("NOTIFY TOOL", f"{name}: could not check ({exc})",
-                          f"run `{fix}` to register it again")
-            continue
-        if state == hooks_mod.STATUS_INSTALLED:
-            reporter.ok("NOTIFY TOOL", f"{name}: registered ({path})")
-        elif state == hooks_mod.STATUS_MISSING:
-            reporter.warn(
-                "NOTIFY TOOL", f"{name}: not registered — agents can't notify you",
-                f"optional: run `{fix}` so \"notify me when it's done\" works",
+        _report_notify_state(
+            reporter, adapter.display_name, key, mcp_install.agent_home(cfg, adapter),
+            python, split, fix_cmd.format(key=key),
+        )
+        windows = mcp_install.windows_side(adapter) if split else None
+        if windows is not None:
+            # Cursor's IDE and Junie CLI also read this machine's own profile.
+            w_home, w_python = windows
+            _report_notify_state(
+                reporter, f"{adapter.display_name} (Windows)", key, w_home, w_python,
+                False, fix_cmd.format(key=key),
             )
-        elif state == hooks_mod.STATUS_PARTIAL:
-            reporter.warn(
-                "NOTIFY TOOL", f"{name}: registered, but each call will ask for approval",
-                f"run `{fix}` to add the approval setting back",
-            )
-        elif state == hooks_mod.STATUS_UNREADABLE:
-            reporter.warn(
-                "NOTIFY TOOL", f"{name}: {path} could not be read or parsed",
-                "check the file's permissions and that it is valid — nothing is "
-                "registered or removed until it can be read",
-            )
-        else:  # stale-path
-            registered = mcp_install.registered_launcher(key, home) or {}
-            command = str(registered.get("command") or "")
-            # From a split's Windows side a `/mnt/c/...` path can't be tested, and the
-            # wizard wrote it from this very interpreter: a mismatch there is always an
-            # old install.
-            gone = split or not Path(command).exists()
-            if gone:
-                reporter.fail(
-                    "NOTIFY TOOL", f"{name}: registered for a Python that no longer "
-                    f"exists ({command})", f"run `{fix}` to point it at {python}",
-                )
-            else:
-                reporter.warn(
-                    "NOTIFY TOOL", f"{name}: registered for another TintaView ({command})",
-                    f"run `{fix}` to point it at this one ({python})",
-                )
 
 
 # --------------------------------------------------------------------------- 7. stats
