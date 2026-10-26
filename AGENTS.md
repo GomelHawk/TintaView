@@ -377,7 +377,7 @@ OpenRGB and Synapse / G HUB fight over the same devices; the wizard says so in p
 | Codex CLI | `~/.codex/hooks.json` (never their `config.toml`, except the feature flag and the notify tool's `[mcp_servers.tintaview]`) | `SessionStart` / `SessionEnd` | same | `PermissionRequest` (first-class) |
 | Cursor | `~/.cursor/hooks.json` (`{"version": 1, …}`) | `sessionStart` / `sessionEnd` | `beforeSubmitPrompt`, `preToolUse`/`postToolUse`, `beforeShellExecution`/`afterShellExecution` | none → stall heuristic |
 | GitHub Copilot CLI | `~/.copilot/hooks/tintaview.json` — a file of our own (`{"version": 1, …}`), never the user's | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `Notification` + matchers `permission_prompt` and `elicitation_dialog` |
-| Junie CLI | `~/.junie/config.json` (Claude-shaped nested hooks; the rest of the file is untouched) | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse` (→ `working`, no tool-end exists) | none — `PermissionRequest` is **never bound** (see below); `Stop`/`StopFailure` → idle |
+| Junie CLI | `~/.junie/config.json` (Claude-shaped nested hooks; the rest of the file is untouched) | `SessionStart` / `SessionEnd` | `UserPromptSubmit`, `PreToolUse` on every tool *but* the question (→ `working`, no tool-end exists) | `PreToolUse` matched `AskUserQuestion` → `confirm`; `PermissionRequest` is **never bound** (see below); `Stop`/`StopFailure` → idle |
 
 A summary, not the contract: each adapter's `bindings()` is the source of truth, and two details
 don't fit the columns. Cursor binds **both** the generic tool pair *and* the shell-execution pair
@@ -412,18 +412,37 @@ arrived for every auto-approved tool call. `SessionEnd` fired on `/exit` on 1.0.
 session, so the only cost is a moment with no Copilot dot in the panel. A non-zero exit from a
 `preToolUse` hook *denies* the tool in Copilot, one more reason `tv-hook` always exits 0.
 
-**Junie CLI** (`agents/junie.py`), measured on 26.9.22 with a stdin-dumping hook and then end to
-end through the real CLI: every event carries `session_id`/`cwd`/`project_path` (so `tv-hook`
+**Junie CLI** (`agents/junie.py`), measured on 26.9.22 (batch, with a stdin-dumping hook, then end
+to end through the real CLI) and 26.10.20 (interactive — it auto-updates, and only the TUI has
+questions and dialogs): every event carries `session_id`/`cwd`/`project_path` (so `tv-hook`
 needs nothing Junie-specific); there is **no PostToolUse**, so `PreToolUse` is `working`, not
 `tool-start` (a tool name nothing clears would read "busy with Bash" while the model thinks);
 `PreToolUse` fires for `submit` too; a `PreToolUse` `matcher` is a **regex**, so Claude's `"*"` is
-invalid and the matcher is omitted. **`PermissionRequest` must not be bound:** Junie's docs say a
-hook that exits 0 without a blocking decision *auto-approves* the action and skips the dialog,
-and `tv-hook` always exits 0 — so binding it would approve every command the user is meant to
-see. Approvals and questions are therefore not detected until the dialog can be observed without
-being answered (unmeasured: whether a `PermissionRequest` hook can print a decision that leaves
-the dialog up). A Junie inside a JetBrains IDE (ACP/server host) fires no hooks yet, per its docs.
-`StopFailure` → `idle` was not triggered when measuring. Junie CLI installs on Windows *and* in the
+invalid. **A question is `PreToolUse` with `tool_name: "AskUserQuestion"`** (measured interactively: the hook
+fires 22 ms before the question is drawn, its `tool_input` has `questions[].options[].title`, and
+**nothing fires when it is answered** — the next `PreToolUse`/`Stop` 5-6 s later is what clears it). It is bound to
+`confirm` by a second `PreToolUse` entry; `matcher` is a **full-match regex** (measured: `sub` does
+not match `submit`; alternation and `^(?!x$).*` work) and entries run in config order, so the
+general `working` entry is `^(?!AskUserQuestion$).*` — a matcher-less one would land on the same
+event and undo the question. `core/request.py` reads an option's `title` as well as `label`, and names `project_path`, not `cwd`
+(Junie runs its hooks from `~/.junie`, so the Telegram message said "waiting for you in ~/.junie").
+**`PermissionRequest` must only ever be bound async** (`HookBinding.run_async` writes
+`"async": true`; a test pins it). Junie's docs say a *synchronous* hook that exits 0 without a
+blocking decision **auto-approves** the action and skips the dialog, and `tv-hook` always exits 0.
+Measured on 26.10.20, same prompt (read `/etc/hostname`), two runs: with a plain capture hook
+**no dialog appeared** (the log has no "Requesting human"); with `"async": true` the dialog
+appeared and the hook still ran, 28 ms after `PreToolUse`. So the async binding detects an
+approval dialog without answering it; like a question, nothing fires when it is answered and the
+next `PreToolUse`/`Stop` clears it (~4-5 s). That read's payload was `tool_name: "Edit"`,
+`permission_reason: "touch_file"`, an **empty** `tool_input` (Junie logs "Failed to serialize
+action for PermissionRequest hook" for that action type), so its message says only "Edit" — a
+command or MCP-tool dialog was **not** captured. `echo hi` raises no dialog at all. Junie also
+fires two `SessionStart`s at TUI startup (`startup`, then `clear` with a *new* session id) and
+ends only the second, so the first lingers until the watchdog. A Junie inside a JetBrains IDE (ACP/server host) fires no hooks yet, per its docs.
+`hooks.status` compares each event's entries by matcher and trailing TintaView event (not just
+event names, not the path or timeout), so an install made before a binding gained a matcher reads
+`partial` and the startup check prompts for a refresh — checked against real installs, where only
+Junie's old entry differed. `StopFailure` → `idle` was not triggered when measuring. Junie CLI installs on Windows *and* in the
 distro, so it is a Windows-side agent too (below); the Windows-side hook command running a
 `tv-hook.cmd` under Junie's Windows shell is **not verified**.
 
@@ -567,6 +586,13 @@ variables empty). The agent only ever sends text — the command and any token i
   `tintaview` from an `mcp.json`, lists `notify_user`, calls it, and the daemon receives
   `POST /v1/notify?agent=junie`. A launcher that cannot start (a venv without the package) shows
   up in Junie's log only as "Timeout while waiting for client tintaview to start".
+  Junie's project `.junie/mcp/mcp.json` **overrides** the user one ("Conflict: using project
+  mcp.json — ignoring user mcp.json"). A WSL Junie started with its cwd exactly the Windows
+  home (`/mnt/c/Users/<you>`) therefore reads the *Windows* user file as its project file, tries
+  to exec `C:\...\python.exe` and fails (`Exec failed, error: 2`), and hides the distro file
+  too. Measured on 26.9.22; from any real project directory both sides connect (Windows log:
+  `STARTED, 1 tools`, and `tv-hook.cmd junie session-start` exits 0). Not fixable in the file —
+  one launcher string cannot run on both OSes — so it is documented, not worked around.
 - **`~/.claude.json` is Claude Code's live state file**, beside `~/.claude` rather than in
   it (`claude_state_path`). It is re-serialised exactly as Claude writes it — 2-space,
   `ensure_ascii=False`, no trailing newline — so the diff is only our lines, and
@@ -796,6 +822,30 @@ its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catal
   look artificially healthy. The raw-units-to-"credits" display scale (`CREDIT_SCALE` in the
   provider) is reverse-engineered from a live widget reading, not documented by JetBrains — see
   the provider's module docstring before changing it.
+  **PhpStorm 2026.3 stopped refreshing `AIAssistantQuotaManager2.xml`** (frozen at install day:
+  0.13 used and a refill on 15 Oct while the IDE showed 9.36 left and 14 Nov), so the live balance
+  is read from `options/other.xml` (`AIHubNotificationManager.lastTariffQuotaAvailable` /
+  `lastTopUpQuotaAvailable`, *available* amounts in the same raw units — both matched the widget
+  exactly) and whichever file is newer wins. That file has no maximum or date, so those come from
+  the newest quota file and a past `nextRefill` is **rolled forward by `tariff.duration`**
+  (`_period`; Oct 15 + 30 d is the Nov 14 the IDE showed). Figures written before the current
+  period began get `UsageResult.notice`, never passing as current; with no maximum known the row
+  says "N left" with no bar. Never hard-code the 10.00.
+  **Junie CLI spend is counted in the same figure, not on a line of its own** — the maintainer asked
+  for exactly that (it is one account and one credit pool; a second line was built first and
+  removed). `stats/junie_usage.py` sums sessions' `summary.json` `modelUsage[].cost` (main agent +
+  subagents) whose `settings.json` `model.providerCode` is `jetbrains-ai` (`proxy:…`/BYOK are not
+  this account) over every Junie home — the configured one (the distro's UNC path in a split) and
+  the adapter default (the Windows profile). `cost` is in the card's credits (measured: PhpStorm
+  0.64 used vs 0.53 recorded by Junie, the rest being usage with no local record). Only spend
+  **after the source file's mtime** is added (`_with_spend`, taken off the monthly allowance, shown
+  with a `~`): the IDE's balance already includes everything synced before it wrote the figure, so
+  adding more would double-count. Approximate by construction — a session spanning that moment is
+  counted whole, and `other.xml`'s mtime moves for any property, not only a quota refresh, so spend
+  can also be undercounted. Never added to stale-period figures; `stats.show_estimate` off gives the
+  IDE's pure number. Only sessions from a Junie new enough to write `summary.json` carry a cost. A
+  bare `JetBrainsUsageProvider()` reads no Junie at all (tests must not touch the real
+  `~/.junie`); `StatsService` wires `session_roots(cfg)`.
 - **GitHub Copilot CLI** — a hook-driven agent too (`agents/copilot.py`, see
   [Agents and the hook layer](#agents-and-the-hook-layer)); this provider only covers usage.
   Deliberately no live quota percentage: GitHub's real "X% used, resets in Nd" figure comes from an

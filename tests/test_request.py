@@ -93,6 +93,21 @@ def test_codexs_question_tool_has_no_multi_select_flag():
     )
 
 
+def test_junies_question_names_its_options_by_title():
+    """Measured on Junie CLI 26.9.22: `AskUserQuestion` over `PreToolUse`, options carry
+    `title` and `description` (no `label`), and a question has no `multiSelect`."""
+    req = parse(_fixture("junie_pre_tool_use_ask_user_question.json"))
+
+    assert req.tool == "AskUserQuestion"
+    assert req.sid == "session-261026-185234-q9cb"
+    # Junie's `cwd` is its own `~/.junie`; the folder to name is `project_path`.
+    assert req.cwd == "/home/me/project"
+    assert req.detail == (
+        "Which policy approach should be adopted to achieve the best overall outcome "
+        "for society? — Option A / Option B"
+    )
+
+
 @pytest.mark.parametrize("name", sorted(p.name for p in FIXTURES.glob("*.json")))
 def test_every_captured_payload_yields_its_session(name):
     assert parse(_fixture(name)).sid == _payload(name)["session_id"]

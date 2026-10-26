@@ -240,6 +240,8 @@
   "usage.jetbrains.credits_used": "zużyto {used} / {maximum}",
   "usage.jetbrains.credits_available": "dostępne kredyty: {available}",
   "usage.jetbrains.credits_and_date": "{credits} · {date}",
+  "usage.jetbrains.credits_left": "zostało {left}",
+  "usage.jetbrains.stale_period": "Limit z poprzedniego okresu – otwórz AI Assistant w IDE, aby go odświeżyć.",
   "usage.jetbrains.error.not_found": "Nie znaleziono JetBrains AI Assistant (żadne IDE nie zsynchronizowało jeszcze limitu).",
   "usage.jetbrains.error.unreadable": "Zużycie JetBrains AI jest niedostępne (nie można odczytać pliku limitu).",
   "usage.jetbrains.error.no_quota": "Zużycie JetBrains AI jest niedostępne (brak aktywnego limitu).",

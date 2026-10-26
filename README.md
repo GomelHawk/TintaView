@@ -26,7 +26,7 @@ usage shows up alongside the others.
 | **Codex CLI** | Real event (`PermissionRequest`) | Commands only: Codex's Plan-mode multiple-choice questions fire no `PermissionRequest`, so they don't show as waiting. Hooks are version-gated — see [Troubleshooting](docs/TROUBLESHOOTING.md#codex-hooks-not-firing). Windows-native Codex (not under WSL) falls back to the `notify` program, which only reports idle. |
 | **Cursor** | **Heuristic, not a real event.** Cursor has no "waiting for approval" hook, so TintaView guesses: if a tool starts and nothing else happens for `stall_seconds` (default 8s), it's treated as a stall and turns the light red. This can occasionally be wrong in either direction — see [Troubleshooting](docs/TROUBLESHOOTING.md#cursor-never-goes-red). |
 | **GitHub Copilot CLI** | Real event (`Notification` for a permission prompt or a question) | TintaView's hooks go in a file of their own, `~/.copilot/hooks/tintaview.json`. Needs a recent Copilot CLI (tested on 1.0.94+). In a WSL-split install the hooks go inside the distro, so it's the Copilot you run in WSL that lights up. |
-| **Junie CLI** | **Not detected.** Session start/end and "working" work; approval and question prompts don't. Junie auto-approves an action when its `PermissionRequest` hook exits cleanly, so TintaView deliberately doesn't use that hook — the light stays on "working" while Junie waits for you. | Junie's hooks are Early Access and only the interactive CLI and `junie "task"` fire them: a Junie running inside a JetBrains IDE isn't seen. Hooks go in `~/.junie/config.json`; the rest of that file is left alone. |
+| **Junie CLI** | Real events: a question Junie asks you (`AskUserQuestion`) and an approval dialog (`PermissionRequest`) both turn the light red; it clears with Junie's next step, a few seconds after you answer. The message for an approval dialog can be sparse (Junie doesn't always say what it is asking). | Junie's hooks are Early Access and only the interactive CLI and `junie "task"` fire them: a Junie running inside a JetBrains IDE isn't seen. Hooks go in `~/.junie/config.json`; the rest of that file is left alone. |
 
 Cursor and Junie CLI can be installed on both Windows and WSL. In a WSL-split install TintaView writes their hooks on **both** sides (each Windows-side one only if the agent is installed on Windows), and `tintaview doctor` reports each side separately.
 
@@ -231,10 +231,16 @@ agent:
   release with no warning; when it does, the panel just says usage is unavailable —
   lighting is unaffected either way.
 - **JetBrains AI Assistant** — entirely local, no network call and no hooks. TintaView
-  reads the same quota cache (`AIAssistantQuotaManager2.xml`) the IDE's own AI Assistant
-  status-bar widget uses. Quota is account-wide but each installed IDE only syncs its
-  own copy when it last talked to JetBrains, so TintaView uses whichever IDE's copy was
-  updated most recently.
+  reads the balance the IDE keeps on disk (the quota cache `AIAssistantQuotaManager2.xml`,
+  and, in PhpStorm 2026.3 and later, the live balance in `options/other.xml`, which the
+  quota cache no longer follows). Quota is account-wide but each installed IDE writes its
+  own copy when it last talked to JetBrains, so TintaView uses whichever was updated most
+  recently. Junie CLI bills to the same account, so what it has spent since the IDE last
+  wrote its balance (summed over its Windows and WSL session folders) is counted in the
+  same figure, which then shows a `~` (turn the estimates off in Settings to see only the
+  IDE's own number). Only sessions billed to your JetBrains account count — not a
+  bring-your-own-key run — and only sessions Junie recorded a cost for. If the IDE's
+  figures are from before the current period began, a line says so and nothing is added.
 - **GitHub Copilot CLI** — entirely local, no network call. There's no official
   percentage here: GitHub's real quota comes from an internal endpoint that needs a
   token out of the OS credential store via a two-step exchange, which TintaView

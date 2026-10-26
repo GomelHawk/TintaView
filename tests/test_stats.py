@@ -1166,6 +1166,13 @@ def _write_quota_file(path: Path, **overrides: str) -> Path:
 
 
 class TestJetBrains:
+    @pytest.fixture(autouse=True)
+    def _clock_before_the_fixtures_refill(self, monkeypatch):
+        """The fixture's refill is 2026-08-16; without a pinned clock it would roll forward
+        by whole periods to whatever "now" is, and these tests would age."""
+        monkeypatch.setattr(jetbrains_mod, "_now",
+                            lambda: datetime(2026, 8, 1, tzinfo=UTC).timestamp())
+
     def test_success_parses_both_quotas(self, tmp_path):
         path = _write_quota_file(tmp_path / "AIAssistantQuotaManager2.xml")
         result = JetBrainsUsageProvider().fetch(AgentConfig(quota_path=str(path)))

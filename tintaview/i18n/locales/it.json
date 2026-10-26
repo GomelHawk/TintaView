@@ -239,6 +239,8 @@
   "usage.jetbrains.credits_used": "{used} / {maximum} usati",
   "usage.jetbrains.credits_available": "{available} crediti disponibili",
   "usage.jetbrains.credits_and_date": "{credits} · {date}",
+  "usage.jetbrains.credits_left": "{left} rimasti",
+  "usage.jetbrains.stale_period": "Quota del periodo precedente: apri AI Assistant in un IDE per aggiornarla.",
   "usage.jetbrains.error.not_found": "JetBrains AI Assistant non trovato (nessun IDE ha ancora sincronizzato una quota).",
   "usage.jetbrains.error.unreadable": "Utilizzo di JetBrains AI non disponibile (file della quota illeggibile).",
   "usage.jetbrains.error.no_quota": "Utilizzo di JetBrains AI non disponibile (nessuna quota attiva).",

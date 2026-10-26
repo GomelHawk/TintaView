@@ -482,25 +482,54 @@ def test_tv_hook_cmd_ignores_an_inherited_token_env_var(capturing_server):
     assert "supersecret" not in "".join(received)
 
 
-def test_junie_hooks_are_claude_shaped_and_never_bind_permission_request():
-    """Junie auto-approves an action when its PermissionRequest hook exits 0 without a
-    decision, and `tv-hook` always exits 0 — so that event must never be bound. And
-    `matcher` is a regex there: Claude's "*" would be invalid, omitting it matches all."""
+def test_junie_hooks_are_claude_shaped_and_bind_permission_request_only_async():
+    """Junie auto-approves an action when its *synchronous* PermissionRequest hook exits 0
+    without a decision (measured: no dialog at all), and `tv-hook` always exits 0 — so that
+    event may only ever be written with `"async": true`, which ignores the verdict and leaves
+    the dialog up (measured). And `matcher` is a full-match regex: Claude's "*" is invalid."""
     adapter = junie.JunieAdapter()
     native = adapter.render_hooks(HOOK_COMMAND)
 
     assert set(native) == {"hooks"}
     assert set(native["hooks"]) == {
-        "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "Stop", "StopFailure",
+        "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
+        "Stop", "StopFailure",
     }
-    assert "PermissionRequest" not in native["hooks"]
-    assert all(b.event != "confirm" for b in adapter.bindings)
+    permission = native["hooks"]["PermissionRequest"]
+    assert permission, "approval dialogs are detected through this event"
+    for entry in permission:
+        assert entry["hooks"][0].get("async") is True, "a sync one would approve every action"
+    # ...and no other event is async: those must stay synchronous.
+    for event, entries in native["hooks"].items():
+        if event != "PermissionRequest":
+            assert not any(e["hooks"][0].get("async") for e in entries), event
     for entries in native["hooks"].values():
         for entry in entries:
-            assert "matcher" not in entry
+            assert entry.get("matcher") != "*"
             assert entry["hooks"][0]["type"] == "command"
     assert native["hooks"]["Stop"][0]["hooks"][0]["command"] == f"{HOOK_COMMAND} idle"
-    assert native["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"{HOOK_COMMAND} working"
+
+
+def test_junie_question_is_the_only_confirm_and_the_working_hook_skips_it():
+    """Both entries sit on PreToolUse and run in config order, so a matcher-less `working`
+    would land on the question too and undo the `confirm`. The two must partition the tools."""
+    import re
+
+    native = junie.JunieAdapter().render_hooks(HOOK_COMMAND)
+    by_event = {
+        entry["hooks"][0]["command"].rsplit(" ", 1)[1]: entry.get("matcher")
+        for entry in native["hooks"]["PreToolUse"]
+    }
+
+    assert set(by_event) == {"working", "confirm"}
+    # The two ways Junie waits for you: the question (PreToolUse, by name) and an approval dialog.
+    assert sorted(b.native_event for b in junie.JunieAdapter().bindings
+                  if b.event == "confirm") == ["PermissionRequest", "PreToolUse"]
+    assert by_event["confirm"] == "AskUserQuestion"
+    # Junie full-matches the regex against the tool name.
+    for tool in ("AskUserQuestion", "Bash", "submit", "answer", "AskUserQuestions", "Edit"):
+        hits = {ev for ev, m in by_event.items() if re.fullmatch(m, tool)}
+        assert hits == ({"confirm"} if tool == "AskUserQuestion" else {"working"}), tool
 
 
 def test_junie_config_path_is_the_user_file_at_every_scope(tmp_path, monkeypatch):

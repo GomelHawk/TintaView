@@ -239,6 +239,8 @@
   "usage.jetbrains.credits_used": "{used} / {maximum} used",
   "usage.jetbrains.credits_available": "{available} credits available",
   "usage.jetbrains.credits_and_date": "{credits} · {date}",
+  "usage.jetbrains.credits_left": "{left} left",
+  "usage.jetbrains.stale_period": "Quota from before the last renewal — open an IDE's AI Assistant to refresh it.",
   "usage.jetbrains.error.not_found": "JetBrains AI Assistant not found (no IDE has synced a quota yet).",
   "usage.jetbrains.error.unreadable": "JetBrains AI usage unavailable (quota file unreadable).",
   "usage.jetbrains.error.no_quota": "JetBrains AI usage unavailable (no active quota).",

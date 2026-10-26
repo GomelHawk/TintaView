@@ -240,6 +240,8 @@
   "usage.jetbrains.credits_used": "{used} / {maximum} verbraucht",
   "usage.jetbrains.credits_available": "{available} Credits verfügbar",
   "usage.jetbrains.credits_and_date": "{credits} · {date}",
+  "usage.jetbrains.credits_left": "{left} übrig",
+  "usage.jetbrains.stale_period": "Kontingent aus dem letzten Zeitraum – AI Assistant in einer IDE öffnen, um es zu aktualisieren.",
   "usage.jetbrains.error.not_found": "JetBrains AI Assistant nicht gefunden (noch keine IDE hat ein Kontingent synchronisiert).",
   "usage.jetbrains.error.unreadable": "JetBrains-AI-Verbrauch nicht verfügbar (Kontingentdatei nicht lesbar).",
   "usage.jetbrains.error.no_quota": "JetBrains-AI-Verbrauch nicht verfügbar (kein aktives Kontingent).",

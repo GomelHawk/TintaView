@@ -215,6 +215,32 @@ def test_status_reports_missing_partial_installed_and_stale(cfg_file: Path):
     assert H.status(adapter, Path("/somewhere/else/tv-hook.sh")) == H.STATUS_STALE_PATH
 
 
+def test_status_notices_entries_that_differ_from_what_this_version_writes(tmp_path, monkeypatch):
+    """An install made before Junie's question hook existed has a matcher-less `working` on
+    `PreToolUse` and no `confirm`: same events, same path — and it must not read `installed`,
+    or the tray's startup check never tells anyone to refresh it."""
+    from tintaview.agents.junie import JunieAdapter
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    adapter = JunieAdapter()
+    target = adapter.hooks_config_path()
+    target.parent.mkdir()
+    old = adapter.render_hooks(f"{HOOK_BIN} junie")
+    old["hooks"]["PreToolUse"] = [{"hooks": [{"type": "command",
+                                              "command": f"{HOOK_BIN} junie working"}]}]
+    target.write_text(json.dumps(old), encoding="utf-8")
+
+    assert H.status(adapter, HOOK_BIN) == H.STATUS_PARTIAL
+
+    H.apply(H.plan_install(adapter, HOOK_BIN))
+    assert H.status(adapter, HOOK_BIN) == H.STATUS_INSTALLED
+    # A different timeout is not drift: only matchers and events are compared.
+    data = json.loads(target.read_text())
+    data["hooks"]["Stop"][0]["hooks"][0]["timeout"] = 99
+    target.write_text(json.dumps(data), encoding="utf-8")
+    assert H.status(adapter, HOOK_BIN) == H.STATUS_INSTALLED
+
+
 def test_status_reports_unreadable_for_corrupt_json(cfg_file: Path):
     """Corrupt JSON is `unreadable`, never `missing`.
 

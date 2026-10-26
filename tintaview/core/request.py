@@ -138,7 +138,7 @@ def _salvage(text: str) -> HookRequest:
     """A payload cut off at `MAX_BODY_BYTES` (or otherwise broken): keep the session id
     and the tool's name, which every agent writes before the large ``tool_input``."""
     found: dict[str, str] = {}
-    for name in (*_SID_FIELDS, "agent_id", "tool_name", "message", "cwd"):
+    for name in (*_SID_FIELDS, "agent_id", "tool_name", "message", "cwd", "project_path"):
         match = re.search(_FLAT_FIELD.format(name=name), text)
         if match:
             found[name] = match.group(1)
@@ -147,7 +147,9 @@ def _salvage(text: str) -> HookRequest:
 
 def _from_payload(payload: dict) -> HookRequest:
     sid, actor = _sid(payload), _actor(payload)
-    cwd = clean(payload.get("cwd"), 500)
+    # Junie runs its hooks from `~/.junie` and says so in `cwd`; the project it is working in
+    # is `project_path` (measured: a Telegram message read "waiting for you in ~/.junie").
+    cwd = clean(payload.get("project_path") or payload.get("cwd"), 500)
     tool = clean(payload.get("tool_name"), 100)
     tool_input = payload.get("tool_input")
     if not tool:
@@ -200,10 +202,11 @@ def _describe_questions(tool_input: dict) -> str:
         text = question.get("question") or question.get("prompt") or ""
         if question.get("multiSelect") or question.get("allowMultiple"):
             text = f"{text} {t('request.pick_any')}"
+        # `label` (Claude, Codex) or `title` (Junie's `AskUserQuestion`).
         labels = " / ".join(
-            str(option.get("label", ""))
+            str(option.get("label") or option.get("title"))
             for option in question.get("options") or []
-            if isinstance(option, dict) and option.get("label")
+            if isinstance(option, dict) and (option.get("label") or option.get("title"))
         )
         line = f"{text} — {labels}" if labels else text
         parts.append(f"{number}/{len(questions)} {line}" if len(questions) > 1 else line)

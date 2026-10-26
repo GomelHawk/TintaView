@@ -240,6 +240,8 @@
   "usage.jetbrains.credits_used": "використано {used} / {maximum}",
   "usage.jetbrains.credits_available": "доступно кредитів: {available}",
   "usage.jetbrains.credits_and_date": "{credits} · {date}",
+  "usage.jetbrains.credits_left": "залишилось {left}",
+  "usage.jetbrains.stale_period": "Квота за минулий період — відкрийте AI Assistant в IDE, щоб оновити її.",
   "usage.jetbrains.error.not_found": "JetBrains AI Assistant не знайдено (жодне IDE ще не синхронізувало квоту).",
   "usage.jetbrains.error.unreadable": "Дані про витрати JetBrains AI недоступні (файл квоти не читається).",
   "usage.jetbrains.error.no_quota": "Дані про витрати JetBrains AI недоступні (активної квоти немає).",

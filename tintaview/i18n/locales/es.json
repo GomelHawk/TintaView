@@ -239,6 +239,8 @@
   "usage.jetbrains.credits_used": "{used} / {maximum} usados",
   "usage.jetbrains.credits_available": "{available} créditos disponibles",
   "usage.jetbrains.credits_and_date": "{credits} · {date}",
+  "usage.jetbrains.credits_left": "quedan {left}",
+  "usage.jetbrains.stale_period": "Cuota del periodo anterior: abre AI Assistant en un IDE para actualizarla.",
   "usage.jetbrains.error.not_found": "No se encontró JetBrains AI Assistant (ningún IDE ha sincronizado una cuota todavía).",
   "usage.jetbrains.error.unreadable": "El uso de JetBrains AI no está disponible (no se puede leer el archivo de cuota).",
   "usage.jetbrains.error.no_quota": "El uso de JetBrains AI no está disponible (no hay ninguna cuota activa).",

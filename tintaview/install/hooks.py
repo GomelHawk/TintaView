@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import shutil
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -161,6 +162,28 @@ def _strip_ours(hooks: dict) -> dict:
     return cleaned
 
 
+def _signature(entry: object) -> tuple:
+    """What an entry *does*, ignoring the hook path and the timeout: its matcher and the
+    TintaView event each of its commands ends in (``… tv-hook junie working`` -> ``working``).
+    Covers the nested shape, the flat one and Copilot's per-shell ``bash``/``powershell``."""
+    commands: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ("command", "bash", "powershell") and isinstance(item, str):
+                    commands.append(item.rsplit(" ", 1)[-1])
+                elif key != "matcher":
+                    walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(entry)
+    matcher = entry.get("matcher") if isinstance(entry, dict) else None
+    return (matcher, tuple(sorted(commands)))
+
+
 def _event_map(rendered: dict) -> dict:
     """Accept either ``{"hooks": {...}}`` or a bare event map from an adapter."""
     inner = rendered.get("hooks")
@@ -289,6 +312,14 @@ def status(
     needle = json.dumps(str(hook_bin))[1:-1]
     if not any(needle in json.dumps(e) for e in ours):
         return STATUS_STALE_PATH
+    # Same events, same path, but not the entries this version writes: a binding gained a
+    # matcher or a second entry on an existing event. Checking event names alone reported
+    # such an install as `installed` forever, so nobody was ever told to refresh it.
+    for event, entries in expected.items():
+        wanted = Counter(_signature(e) for e in entries)
+        have = Counter(_signature(e) for e in hooks.get(event, []) if _is_ours(e))
+        if wanted != have:
+            return STATUS_PARTIAL
     return STATUS_INSTALLED
 
 

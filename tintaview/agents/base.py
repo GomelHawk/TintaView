@@ -29,6 +29,10 @@ class HookBinding:
     event: str  # a tintaview.core.events constant
     matcher: str | None = None  # agent-specific filter, e.g. "permission_prompt"
     timeout: int = 5
+    #: Written as ``"async": true`` on the hook command (Junie only, so far): the agent runs
+    #: it in the background and ignores its verdict. For a permission hook that is the whole
+    #: point — a synchronous one that exits 0 *approves* the action and skips the dialog.
+    run_async: bool = False
 
 
 class AgentAdapter(abc.ABC):
@@ -97,15 +101,14 @@ class NestedHooksAdapter(AgentAdapter):
     def render_hooks(self, hook_command: str) -> dict:
         hooks: dict[str, list[dict]] = {}
         for binding in self.bindings:
-            entry: dict = {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": f"{hook_command} {binding.event}",
-                        "timeout": binding.timeout,
-                    }
-                ]
+            command: dict = {
+                "type": "command",
+                "command": f"{hook_command} {binding.event}",
+                "timeout": binding.timeout,
             }
+            if binding.run_async:
+                command["async"] = True
+            entry: dict = {"hooks": [command]}
             if binding.matcher is not None:
                 entry = {"matcher": binding.matcher, **entry}
             hooks.setdefault(binding.native_event, []).append(entry)

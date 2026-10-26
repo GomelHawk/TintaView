@@ -240,6 +240,8 @@
   "usage.jetbrains.credits_used": "выкарыстана {used} / {maximum}",
   "usage.jetbrains.credits_available": "даступна крэдытаў: {available}",
   "usage.jetbrains.credits_and_date": "{credits} · {date}",
+  "usage.jetbrains.credits_left": "засталося {left}",
+  "usage.jetbrains.stale_period": "Квота за мінулы перыяд — адкрыйце AI Assistant у IDE, каб абнавіць яе.",
   "usage.jetbrains.error.not_found": "JetBrains AI Assistant не знойдзены (ні адно IDE яшчэ не сінхранізавала квоту).",
   "usage.jetbrains.error.unreadable": "Даныя пра выдатак JetBrains AI недаступныя (файл квоты не чытаецца).",
   "usage.jetbrains.error.no_quota": "Даныя пра выдатак JetBrains AI недаступныя (актыўнай квоты няма).",

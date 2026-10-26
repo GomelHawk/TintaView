@@ -21,6 +21,7 @@ from dataclasses import replace
 from tintaview.core.config import Config
 
 from . import format as fmt
+from . import junie_usage
 from .cache import UsageCache
 from .model import UsageProvider, UsageResult
 from .providers.claude import ClaudeUsageProvider
@@ -105,10 +106,18 @@ class StatsService:
         self._cache = cache or UsageCache()
         self._trend = trend or TrendStore()
         self._providers: dict[str, UsageProvider] = (
-            dict(providers) if providers is not None else {key: cls() for key, cls in DEFAULT_PROVIDERS.items()}
+            dict(providers) if providers is not None else self._default_providers()
         )
         self._lock = threading.Lock()
         self._latest: dict[str, UsageResult] = {}
+
+    def _default_providers(self) -> dict[str, UsageProvider]:
+        providers: dict[str, UsageProvider] = {key: cls() for key, cls in DEFAULT_PROVIDERS.items()}
+        # Junie CLI bills to the same JetBrains account as the IDE's AI Assistant, so its
+        # local spend rides on that provider's card (every Junie home, Windows and WSL).
+        providers["jetbrains"] = JetBrainsUsageProvider(
+            junie_roots=lambda: junie_usage.session_roots(self._cfg))
+        return providers
 
     def fetch_all(self, timeout: float = 15.0) -> dict[str, UsageResult]:
         """Fetch every enabled+known agent, one thread each, and return the results.

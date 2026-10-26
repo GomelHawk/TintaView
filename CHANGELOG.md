@@ -4,6 +4,28 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.11.0 — 2026-10-26
+
+- **Junie CLI: a question or an approval now turns the light red.** When Junie asks you a
+  question, or stops for your approval of an action, the tray and your lights go red, and a
+  "notify" message carries the question with its options. It clears a few seconds after you
+  answer. What an approval dialog is asking is sometimes sparse, because Junie doesn't always
+  say. The "waiting for you in …" message now names your project folder, not `~/.junie`.
+- **The JetBrains AI Assistant card now shows the real balance again, with Junie CLI's
+  spend counted in it.** PhpStorm 2026.3 stopped updating the file TintaView read, so the
+  card kept showing last month's figures (for example 0.13 credits used and a renewal that had
+  already passed). It now reads the balance PhpStorm keeps current, so it matches the IDE: for
+  example "0.64 / 10.00 used · 14 Nov" and "44.99 credits available". Junie CLI uses the same
+  account, so what it has spent since the IDE last updated (Windows and WSL together, only
+  sessions billed to your JetBrains account) is added to the same figure, which shows a `~`
+  while it includes that estimate. If the IDE's figures are from before the current period,
+  a note says to open an IDE's AI Assistant to refresh them.
+- **The tray now notices hook entries that are out of date**, not only missing ones, so a
+  later TintaView version that changes what it writes gets offered to you at startup. For
+  Junie this applies to anyone who set it up on 0.10.0: you'll be offered the update, and
+  **Settings… → Open Full Setup Wizard** (or `tintaview setup`) shows the change and asks
+  before it writes anything.
+
 ## 0.10.0 — 2026-10-26
 
 - **Junie CLI is now supported.** The tray and your lights follow a Junie CLI session
