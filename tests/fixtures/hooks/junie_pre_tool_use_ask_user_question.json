@@ -1,0 +1,27 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "session-261026-185234-q9cb",
+  "cwd": "/home/me/.junie",
+  "project_path": "/home/me/project",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "context": "To determine the optimal course of action, choices should be evaluated based on the consequences they produce, aiming to maximize aggregate well-being and minimize total harm.",
+    "questions": [
+      {
+        "allowMultiple": false,
+        "name": "Decision Strategy",
+        "options": [
+          {
+            "description": "Prioritizes interventions that generate the greatest total net benefit and reduce suffering for the largest number of individuals.",
+            "title": "Option A"
+          },
+          {
+            "description": "Distributes resources strictly equally across all groups, even when doing so leads to a lower overall level of net benefit.",
+            "title": "Option B"
+          }
+        ],
+        "question": "Which policy approach should be adopted to achieve the best overall outcome for society?"
+      }
+    ]
+  }
+}
