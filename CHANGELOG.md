@@ -4,6 +4,23 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.10.0 — 2026-10-26
+
+- **Junie CLI is now supported.** The tray and your lights follow a Junie CLI session
+  (working, idle, started, ended), and "notify me when it's done" works there too. Junie
+  can't be seen waiting for your approval or a question: it would approve the action on its
+  own if TintaView listened for that, so the light stays on "working" while Junie waits for
+  you. A Junie running inside a JetBrains IDE isn't seen at all yet, because the IDE sends
+  no hooks. Tick **Junie CLI** in **Settings… → General** and run `tintaview setup` to turn
+  it on.
+- **Cursor on Windows with a project in WSL now reports in.** Its hooks used to be written
+  only inside WSL, where Cursor on Windows never looks, so it never lit anything up. Setup
+  now writes them into your Windows profile as well, and registers the notify tool there.
+  Junie CLI gets the same treatment when it's installed on both Windows and WSL.
+  `tintaview doctor` reports each side separately.
+- **If you already use Cursor on Windows with WSL**, re-run `tintaview setup` once to add
+  the Windows-side hooks and the notify tool; the tray doesn't do it for you.
+
 ## 0.9.5 — 2026-10-25
 
 - **Cursor's on-demand spending in the usage panel.** A new **On-Demand** row under
