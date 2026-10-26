@@ -124,6 +124,11 @@ def test_split_install_also_refreshes_the_windows_side_script_for_cursor(monkeyp
         wsl, "hook_check", lambda cfg, env=None: wsl.HookCheck(remote, "Ubuntu", "/home/me")
     )
     monkeypatch.setattr(hookscript.config_mod, "hook_bin_path", lambda: local)
+    # Cursor counts as installed on Windows only where its profile directory exists; a fake
+    # profile keeps this off the real machine's home (CI has no ~/.cursor).
+    profile = tmp_path / "profile"
+    (profile / ".cursor").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: profile))
     # The distro's own copy is current, so only the Windows one needs rewriting.
     monkeypatch.setattr(wsl, "run_in", lambda *a, **k: hookscript.packaged_script("tv-hook.sh"))
     cfg = Config()
@@ -135,3 +140,7 @@ def test_split_install_also_refreshes_the_windows_side_script_for_cursor(monkeyp
     cfg.enabled_agents = ["claude"]
     local.write_text("@echo off\nREM old\n", encoding="utf-8")
     assert hookscript.refresh_if_outdated(cfg) is False  # no Windows-side agent: left alone
+
+    cfg.enabled_agents = ["cursor"]
+    (profile / ".cursor").rmdir()
+    assert hookscript.refresh_if_outdated(cfg) is False  # not installed on Windows: left alone
