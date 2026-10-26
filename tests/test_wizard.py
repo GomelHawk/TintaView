@@ -988,3 +988,126 @@ def test_missing_hooks_reports_only_what_an_install_can_fix(wsl_mod, monkeypatch
 
     assert wsl_mod.missing_hooks(cfg, env) == ["Codex CLI"]
     assert wsl_mod.missing_hooks(cfg, env, keys=["cursor"]) == []
+
+
+# --------------------------------------------------------------------------- Windows-side agents in a split
+
+
+@pytest.fixture
+def windows_profile(tmp_path, monkeypatch):
+    """A fake Windows profile and install prefix: nothing here is a real user's path."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: profile))
+    hook_bin = tmp_path / "prefix" / "bin" / "tv-hook.cmd"
+    monkeypatch.setattr(config_mod, "hook_bin_path", lambda: hook_bin)
+    return profile, hook_bin
+
+
+def _split_check(wsl_mod):
+    return wsl_mod.HookCheck(wsl_mod.remote_hook_bin("/home/dmitry"), "Ubuntu", "/home/dmitry")
+
+
+def test_hook_sides_cover_the_windows_profile_for_every_windows_side_agent(wsl_mod, windows_profile):
+    from tintaview.agents import base as agents_base
+
+    profile, hook_bin = windows_profile
+    check = _split_check(wsl_mod)
+
+    for adapter in agents_base.all_agents():
+        sides = wsl_mod.hook_sides(Config(), adapter, check)
+        if adapter.key in wsl_mod.WINDOWS_SIDE_AGENTS:
+            assert [s.label for s in sides] == ["WSL", "Windows"]
+            windows = sides[1]
+            assert windows.adapter.hooks_config_path() == profile / ".cursor" / "hooks.json"
+            assert windows.hook_bin == hook_bin
+            assert str(sides[0].adapter.hooks_config_path()).startswith("\\\\wsl.localhost\\Ubuntu")
+        else:
+            assert [s.label for s in sides] == ["WSL"]
+
+
+def test_hook_sides_is_one_side_outside_a_split_or_at_project_scope(wsl_mod, windows_profile):
+    from tintaview.agents import base as agents_base
+
+    cursor = agents_base.get("cursor")
+
+    assert len(wsl_mod.hook_sides(Config(), cursor, wsl_mod.HookCheck(windows_profile[1]))) == 1
+    assert len(wsl_mod.hook_sides(Config(), cursor, _split_check(wsl_mod), scope="project")) == 1
+
+
+def test_hook_status_does_not_let_one_good_side_hide_a_missing_one(wsl_mod, windows_profile, monkeypatch):
+    from tintaview.agents import base as agents_base
+    from tintaview.install import hooks as hooks_mod
+
+    profile, _ = windows_profile
+    windows_file = profile / ".cursor" / "hooks.json"
+    cursor = agents_base.get("cursor")
+    check = _split_check(wsl_mod)
+
+    def answer(wsl_state, windows_state):
+        def fake(adapter, hook_bin, scope="user", project_dir=None):
+            return windows_state if adapter.hooks_config_path() == windows_file else wsl_state
+
+        monkeypatch.setattr(hooks_mod, "status", fake)
+        return wsl_mod.hook_status(Config(), cursor, check)
+
+    assert answer("installed", "installed") == "installed"
+    assert answer("installed", "missing") == "missing"
+    assert answer("missing", "installed") == "missing"
+    assert answer("unreadable", "installed") == "unreadable"
+    assert answer("unreadable", "stale-path") == "stale-path"
+
+
+def test_windows_side_plans_target_the_profile_and_only_windows_side_agents(wsl_mod, windows_profile):
+    profile, hook_bin = windows_profile
+
+    plans = wsl_mod.windows_side_plans(["claude", "cursor", "codex", "jetbrains"])
+
+    assert list(plans) == ["cursor"]
+    plan = plans["cursor"]
+    assert plan.path == profile / ".cursor" / "hooks.json"
+    assert plan.action == "create"
+    assert str(hook_bin).replace("\\", "\\\\") in plan.after or str(hook_bin) in plan.after
+
+
+def test_windows_side_plan_refuses_an_unparseable_file_instead_of_overwriting(wsl_mod, windows_profile):
+    profile, _ = windows_profile
+    (profile / ".cursor").mkdir()
+    (profile / ".cursor" / "hooks.json").write_text("{not json", encoding="utf-8")
+
+    plan = wsl_mod.windows_side_plans(["cursor"])["cursor"]
+
+    assert isinstance(plan, str) and plan.startswith("failed:")
+
+
+def test_install_agent_hooks_plans_the_windows_side_even_when_the_distro_is_unreachable(
+    wsl_mod, windows_profile, monkeypatch
+):
+    def unreachable(distro):
+        raise wsl_mod.WslError("asleep")
+
+    monkeypatch.setattr(wsl_mod, "distro_home", unreachable)
+
+    result = wsl_mod.install_agent_hooks("Ubuntu", ["cursor"], assume_yes=True)
+
+    assert result["route"] == "failed"
+    assert result["windows_plans"]["cursor"].path == windows_profile[0] / ".cursor" / "hooks.json"
+
+
+def test_wizard_split_step_applies_the_windows_side_plan_after_the_distro(
+    wsl_mod, windows_profile, monkeypatch, capsys
+):
+    profile, hook_bin = windows_profile
+    monkeypatch.setattr(wizard, "_step_hooks_distro", lambda cfg, env, assume_yes: {
+        "route": "unc", "plans": {}, "windows_plans": wsl_mod.windows_side_plans(["cursor"]),
+    })
+    cfg = Config()
+    cfg.enabled_agents = ["cursor"]
+    env = _env(detect.MODE_WSL_SPLIT, detect.PLATFORM_WINDOWS, "Ubuntu")
+
+    wizard._step_hooks_wsl_split(cfg, env, assume_yes=True)
+
+    written = json.loads((profile / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
+    commands = [e["command"] for entries in written["hooks"].values() for e in entries]
+    assert commands and all(HOOK_SENTINEL in c and c.startswith(str(hook_bin)) for c in commands)
+    assert "on Windows" in capsys.readouterr().out

@@ -269,6 +269,9 @@ def install_agent_hooks(distro: str, agent_keys: list[str], assume_yes: bool) ->
     one `wsl.exe` call, so this route trades that off against needing nothing extra
     computed from the Windows side. `plans[key]` is the command's own output text.
 
+    `windows_plans` (both routes, and when the distro is unreachable) holds the Windows-side
+    plans for the agents in `WINDOWS_SIDE_AGENTS`, always shown and confirmed by the caller.
+
     Route "unc" (nothing installed in the distro, preferred — it needs nothing installed
     there): plans are computed here against the distro's config files through their UNC
     path and left for the caller to show + apply with `tintaview.install.hooks`, exactly
@@ -279,7 +282,11 @@ def install_agent_hooks(distro: str, agent_keys: list[str], assume_yes: bool) ->
     """
     from ..agents import base as agents_base
 
-    result: dict = {"distro": distro, "route": None, "notes": [], "plans": {}}
+    # The Windows half does not depend on the distro being reachable, so it is planned first.
+    result: dict = {
+        "distro": distro, "route": None, "notes": [], "plans": {},
+        "windows_plans": windows_side_plans(agent_keys),
+    }
 
     try:
         home = distro_home(distro)
@@ -393,11 +400,88 @@ def check_adapter(cfg: Any, adapter: Any, check: HookCheck) -> Any:
     return resolved
 
 
+#: Agents whose hooks are read on the *Windows* half of a split as well. Cursor's IDE runs
+#: on Windows and reaches a distro workspace over `\\\\wsl.localhost\\...`, so it loads
+#: `<Windows home>\\.cursor\\hooks.json` and never the distro's own file (measured: its hooks
+#: log said "No user hooks configuration found" for a split install that had written only the
+#: distro's). The distro file still serves a `cursor-agent` run inside the distro, so these
+#: agents are installed and checked on both sides.
+WINDOWS_SIDE_AGENTS = frozenset({"cursor"})
+
+
+class HookSide(NamedTuple):
+    """One place an agent's hooks live: its config file (via `adapter`) and the hook script
+    those entries must point at."""
+
+    label: str  # "WSL" or "Windows"
+    adapter: Any
+    hook_bin: Path | PurePosixPath
+
+
+def windows_side_adapter(adapter: Any) -> Any:
+    """`adapter` against the Windows user profile, whatever `agents.<key>.home` says.
+
+    No path is spelled out: on the Windows half of a split `adapter.default_home()` is
+    `Path.home() / ".cursor"`, i.e. the profile Windows itself reports, which is exactly
+    where the Windows-side IDE reads. (`configured_adapter` would hand back the distro's
+    UNC home instead — the other side.)
+    """
+    return adapter
+
+
+def hook_sides(cfg: Any, adapter: Any, check: HookCheck, scope: str = "user") -> list[HookSide]:
+    """Every side `adapter`'s hooks must be present on, the distro's first.
+
+    Only a user-scope check in a WSL split has more than one: project-scope files belong
+    to whichever side the project is on, and outside a split there is one side.
+    """
+    sides = [HookSide("WSL", check_adapter(cfg, adapter, check), check.hook_bin)]
+    if scope == "user" and check.distro and adapter.key in WINDOWS_SIDE_AGENTS:
+        sides.append(
+            HookSide("Windows", windows_side_adapter(adapter), config_mod.hook_bin_path())
+        )
+    return sides
+
+
 def hook_status(
     cfg: Any, adapter: Any, check: HookCheck, scope: str = "user", project_dir: Path | None = None
 ) -> str:
-    """`hooks.status()` measured against the right file and the right hook path."""
-    return hooks_mod.status(check_adapter(cfg, adapter, check), check.hook_bin, scope, project_dir)
+    """`hooks.status()` measured against the right file(s) and the right hook path(s).
+
+    With several sides the answer is the most actionable one: a side that needs an
+    install wins over an unreadable one, which wins over `installed` — so one missing
+    side is never hidden by another that is fine.
+    """
+    states = [
+        hooks_mod.status(side.adapter, side.hook_bin, scope, project_dir)
+        for side in hook_sides(cfg, adapter, check, scope)
+    ]
+    for state in states:
+        if state in NEEDS_INSTALL:
+            return state
+    for state in states:
+        if state != hooks_mod.STATUS_INSTALLED:
+            return state
+    return hooks_mod.STATUS_INSTALLED
+
+
+def windows_side_plans(agent_keys: list[str]) -> dict[str, Any]:
+    """Install plans for the Windows half of the agents in `WINDOWS_SIDE_AGENTS`, against
+    this machine's own profile and `tv-hook.cmd`. `{key: HookPlan | "failed: ..."}`."""
+    from ..agents import base as agents_base
+
+    plans: dict[str, Any] = {}
+    for key in agent_keys:
+        adapter = agents_base.get(key)
+        if adapter is None or key not in WINDOWS_SIDE_AGENTS:
+            continue
+        try:
+            plans[key] = hooks_mod.plan_install(
+                windows_side_adapter(adapter), config_mod.hook_bin_path()
+            )
+        except (ValueError, OSError) as exc:
+            plans[key] = f"failed: {exc}"
+    return plans
 
 
 #: The only statuses a hook (re)install can address. `unreadable` and anything newer are

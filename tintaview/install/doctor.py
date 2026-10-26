@@ -516,6 +516,24 @@ def _check_hook_script(
         reporter.ok("HOOK SCRIPT", f"{hook_env} points at {expected_url}{where}")
 
 
+def _check_windows_hook_script(reporter: _Reporter, cfg: Config, split_home: object) -> None:
+    """In a WSL split, the Windows-side agents (`wsl.WINDOWS_SIDE_AGENTS`, i.e. Cursor)
+    call this machine's own `tv-hook.cmd`, which the checks above deliberately don't look
+    for. Silent when no such agent is enabled or the distro is unreachable."""
+    from . import wsl
+
+    if split_home is None or not any(k in wsl.WINDOWS_SIDE_AGENTS for k in cfg.enabled_agents):
+        return
+    hook_bin = config_mod.hook_bin_path()
+    if not hook_bin.exists():
+        reporter.fail(
+            "HOOK SCRIPT", f"{hook_bin} does not exist (needed by the Windows-side agents)",
+            "run `tintaview setup` (or `tintaview hooks install --agent all`) to write it",
+        )
+        return
+    _check_hook_script_current(reporter, hook_bin)
+
+
 def _check_hook_script_current(reporter: _Reporter, hook_bin: Path) -> None:
     """Is the installed `tv-hook` the one this version ships? An upgrade never rewrites
     it; the tray does at startup (`hookscript.refresh_if_outdated`), so an outdated copy
@@ -614,11 +632,64 @@ def _check_codex_flag(reporter: _Reporter, cfg: Config, adapter: AgentAdapter) -
         )
 
 
+def _report_hook_state(
+    reporter: _Reporter, key: str, name: str, adapter: AgentAdapter, hook_bin: Path
+) -> None:
+    """One agent's hooks on one side of the install, reported as ok / warn / fail."""
+    from . import hooks as hooks_mod
+
+    path = adapter.hooks_config_path()
+    try:
+        state = hooks_mod.status(adapter, hook_bin)
+    except Exception as exc:  # noqa: BLE001 - one bad adapter must not sink the report
+        reporter.fail(
+            "AGENT HOOKS", f"{name}: could not check hooks ({exc})",
+            f"run `tintaview hooks status --agent {key}` for details",
+        )
+        return
+
+    if state == hooks_mod.STATUS_INSTALLED:
+        reporter.ok("AGENT HOOKS", f"{name}: installed ({path})")
+    elif state == hooks_mod.STATUS_MISSING:
+        reporter.fail(
+            "AGENT HOOKS", f"{name}: hooks missing ({path})",
+            f"run `tintaview hooks install --agent {key}`",
+        )
+    elif state == hooks_mod.STATUS_PARTIAL:
+        reporter.fail(
+            "AGENT HOOKS", f"{name}: hooks partially installed ({path})",
+            f"run `tintaview hooks install --agent {key}` to fill in the missing events",
+        )
+    elif state == hooks_mod.STATUS_UNREADABLE:
+        # Deliberately not "run hooks install": the file is there and probably fine,
+        # we just could not open or parse it (permissions, a lock, a sleeping distro
+        # behind a UNC path, hand-edited JSON). Installing from here would plan a
+        # CREATE and replace the user's own hooks with only ours.
+        reporter.warn(
+            "AGENT HOOKS",
+            f"{name}: {path} exists but could not be read or parsed",
+            "check the file's permissions and that it is valid JSON — do NOT run "
+            f"`tintaview hooks install --agent {key}` until it can be read, or the "
+            "merge would have nothing of yours to merge into",
+        )
+    elif state == hooks_mod.STATUS_STALE_PATH:
+        reporter.fail(
+            "AGENT HOOKS",
+            f"{name}: hooks point at an old tv-hook path ({path})",
+            f"run `tintaview hooks install --agent {key}` to repoint them at {hook_bin}",
+        )
+    else:
+        reporter.warn(
+            "AGENT HOOKS", f"{name}: unrecognised hook state {state!r} ({path})",
+            f"run `tintaview hooks status --agent {key}` and, if in doubt, "
+            f"`tintaview hooks install --agent {key}`",
+        )
+
+
 def _check_agent_hooks(
     reporter: _Reporter, cfg: Config, env: Environment, split_home: object = _UNRESOLVED
 ) -> None:
     from ..agents import base as agents_base
-    from . import hooks as hooks_mod
     from . import wsl
 
     if not cfg.enabled_agents:
@@ -654,53 +725,13 @@ def _check_agent_hooks(
             )
             continue
 
-        adapter = wsl.check_adapter(cfg, adapter, wsl.HookCheck(hook_bin, env.distro, split_home))
-        path = adapter.hooks_config_path()
-        try:
-            state = hooks_mod.status(adapter, hook_bin)
-        except Exception as exc:  # noqa: BLE001 - one bad adapter must not sink the report
-            reporter.fail(
-                "AGENT HOOKS", f"{adapter.display_name}: could not check hooks ({exc})",
-                f"run `tintaview hooks status --agent {key}` for details",
-            )
-            continue
-
-        if state == hooks_mod.STATUS_INSTALLED:
-            reporter.ok("AGENT HOOKS", f"{adapter.display_name}: installed ({path})")
-        elif state == hooks_mod.STATUS_MISSING:
-            reporter.fail(
-                "AGENT HOOKS", f"{adapter.display_name}: hooks missing ({path})",
-                f"run `tintaview hooks install --agent {key}`",
-            )
-        elif state == hooks_mod.STATUS_PARTIAL:
-            reporter.fail(
-                "AGENT HOOKS", f"{adapter.display_name}: hooks partially installed ({path})",
-                f"run `tintaview hooks install --agent {key}` to fill in the missing events",
-            )
-        elif state == hooks_mod.STATUS_UNREADABLE:
-            # Deliberately not "run hooks install": the file is there and probably fine,
-            # we just could not open or parse it (permissions, a lock, a sleeping distro
-            # behind a UNC path, hand-edited JSON). Installing from here would plan a
-            # CREATE and replace the user's own hooks with only ours.
-            reporter.warn(
-                "AGENT HOOKS",
-                f"{adapter.display_name}: {path} exists but could not be read or parsed",
-                "check the file's permissions and that it is valid JSON — do NOT run "
-                f"`tintaview hooks install --agent {key}` until it can be read, or the "
-                "merge would have nothing of yours to merge into",
-            )
-        elif state == hooks_mod.STATUS_STALE_PATH:
-            reporter.fail(
-                "AGENT HOOKS",
-                f"{adapter.display_name}: hooks point at an old tv-hook path ({path})",
-                f"run `tintaview hooks install --agent {key}` to repoint them at {hook_bin}",
-            )
-        else:
-            reporter.warn(
-                "AGENT HOOKS", f"{adapter.display_name}: unrecognised hook state {state!r} ({path})",
-                f"run `tintaview hooks status --agent {key}` and, if in doubt, "
-                f"`tintaview hooks install --agent {key}`",
-            )
+        base = wsl.HookCheck(hook_bin, env.distro, split_home)
+        sides = wsl.hook_sides(cfg, adapter, base)
+        for side in sides:
+            # The side is named only when there is more than one (Cursor in a split).
+            name = adapter.display_name + (f" ({side.label})" if len(sides) > 1 else "")
+            _report_hook_state(reporter, key, name, side.adapter, side.hook_bin)
+        adapter = sides[0].adapter
 
         if key == "codex":
             _check_codex_flag(reporter, cfg, adapter)
@@ -1003,6 +1034,7 @@ def run_doctor(verbose: bool = False, paint: bool = False,
     # stopped distro made `doctor` sit there for the better part of a minute.
     split_home = _wsl_split_home(env)
     _check_hook_script(reporter, cfg, env, split_home)
+    _check_windows_hook_script(reporter, cfg, split_home)
     _check_agent_hooks(reporter, cfg, env, split_home)
     _check_notify_tool(reporter, cfg, env, split_home)
     _check_keep_awake(reporter, cfg)

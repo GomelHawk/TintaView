@@ -120,17 +120,28 @@ def refresh_if_outdated(cfg: config_mod.Config, env: Environment | None = None) 
     check = wsl.hook_check(cfg, env)
     if check is None:
         return False
+    refreshed = False
     state = script_state(check.hook_bin, check.distro)
-    if state != SCRIPT_OUTDATED:
-        return False
-    name = PurePosixPath(str(check.hook_bin)).name if check.distro else Path(check.hook_bin).name
-    script = packaged_script(name)
-    if check.distro:
-        wsl._write_remote_file(check.distro, str(check.hook_bin), script, executable=True)
-    else:
-        dest = Path(check.hook_bin)
-        dest.write_text(script, encoding="utf-8")
-        if sys.platform != "win32":
-            dest.chmod(dest.stat().st_mode | 0o111)
-    log.info("refreshed the outdated hook script %s", check.hook_bin)
-    return True
+    if state == SCRIPT_OUTDATED:
+        name = PurePosixPath(str(check.hook_bin)).name if check.distro else Path(check.hook_bin).name
+        script = packaged_script(name)
+        if check.distro:
+            wsl._write_remote_file(check.distro, str(check.hook_bin), script, executable=True)
+        else:
+            _write_local_script(Path(check.hook_bin), script)
+        log.info("refreshed the outdated hook script %s", check.hook_bin)
+        refreshed = True
+    if check.distro and any(k in wsl.WINDOWS_SIDE_AGENTS for k in cfg.enabled_agents):
+        # A split install also has this machine's own script, for the Windows-side agents.
+        local = config_mod.hook_bin_path()
+        if script_state(local) == SCRIPT_OUTDATED:
+            _write_local_script(local, packaged_script(local.name))
+            log.info("refreshed the outdated hook script %s", local)
+            refreshed = True
+    return refreshed
+
+
+def _write_local_script(dest: Path, script: str) -> None:
+    dest.write_text(script, encoding="utf-8")
+    if sys.platform != "win32":
+        dest.chmod(dest.stat().st_mode | 0o111)

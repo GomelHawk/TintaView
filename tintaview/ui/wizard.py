@@ -753,6 +753,22 @@ def _step_hooks_native(cfg: config_mod.Config, assume_yes: bool) -> dict[str, bo
 
 
 def _step_hooks_wsl_split(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> dict:
+    result = _step_hooks_distro(cfg, env, assume_yes)
+    # Cursor's IDE runs on Windows and reads this machine's `~/.cursor/hooks.json`, not the
+    # distro's, so it gets its own plan (`wsl.WINDOWS_SIDE_AGENTS`), shown and confirmed
+    # like any other — the distro half above stays for a `cursor-agent` run inside it.
+    for key, plan in result.get("windows_plans", {}).items():
+        adapter = agents_base.get(key)
+        name = adapter.display_name if adapter else key
+        if isinstance(plan, str):
+            print(f"\n--- {name} (Windows) ---\n  {plan}")
+            continue
+        print(f"\n=== {name} on Windows ===")
+        _confirm_and_apply_hooks(plan, assume_yes)
+    return result
+
+
+def _step_hooks_distro(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> dict:
     from ..install import wsl as wsl_mod
 
     if not env.distro:
@@ -907,6 +923,9 @@ def _step_verify(cfg: config_mod.Config, env: Environment, assume_yes: bool) -> 
             print(f"Couldn't install the hook script inside {env.distro}: {exc}")
             print("Fix that and re-run setup, or install it by hand — see docs/TROUBLESHOOTING.md.")
             return 1
+        if any(k in wsl_mod.WINDOWS_SIDE_AGENTS for k in cfg.enabled_agents):
+            # The Windows-side hooks (Cursor) call this machine's own `tv-hook.cmd`.
+            print(f"Hook script installed at {install_hook_script(cfg, env)}.")
         print(
             "Live verification across the Windows/WSL boundary isn't automated — start a "
             "session in your agent inside the distro and watch the tray icon on Windows."

@@ -933,6 +933,17 @@ neither has anything to do with where the hooks actually are. Two rules, both le
   stale. Those relative paths are named once in `install.wsl` (`REMOTE_HOOK_BIN_REL` /
   `REMOTE_HOOK_ENV_REL`); don't spell them out a second time anywhere else.
 
+**Cursor has a third case: the IDE runs on Windows, the project is in the distro.** Measured
+(Cursor's own `cursor.hooks` log): it loads `<Windows home>\.cursor\hooks.json` and reports "No
+user hooks configuration found" when only the distro's file exists — a split install that wrote
+just the distro's hooks never fired once. So `wsl.WINDOWS_SIDE_AGENTS` (Cursor) are installed
+and checked on **both** sides: `wsl.hook_sides()` returns the distro file and the Windows-profile
+file (`Path.home()` on the Windows half — no username or drive is ever written down) with
+`tv-hook.cmd`, `hook_status` reports the most actionable of the sides, the wizard shows a second
+diff, `doctor` reports each side and the Windows script, and the startup refresh keeps that
+script current. The distro file stays for a `cursor-agent` run inside the distro. Add an agent
+to that set only if its host process measurably reads the Windows profile.
+
 `mode` is `wsl-split` on **both** sides — gate on `env.is_windows_side` too, since inside the
 distro these are all ordinary local files. A distro that can't be reached (stopped, `wsl.exe`
 missing) is a normal condition: degrade to the local checks, never report a failure for it.

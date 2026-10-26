@@ -112,3 +112,26 @@ def test_both_packaged_scripts_exist():
     for name in ("tv-hook.sh", "tv-hook.cmd"):
         assert hookscript.packaged_script(name).strip()
         assert Path(hookscript.__file__).parent.parent.joinpath("hooks", name).is_file()
+
+
+def test_split_install_also_refreshes_the_windows_side_script_for_cursor(monkeypatch, tmp_path):
+    """Cursor's Windows-side hooks call this machine's own script; it must not drift."""
+    remote = PurePosixPath("/home/me/.tintaview/bin/tv-hook.sh")
+    local = tmp_path / "bin" / "tv-hook.cmd"
+    local.parent.mkdir(parents=True)
+    local.write_text("@echo off\nREM old\n", encoding="utf-8")
+    monkeypatch.setattr(
+        wsl, "hook_check", lambda cfg, env=None: wsl.HookCheck(remote, "Ubuntu", "/home/me")
+    )
+    monkeypatch.setattr(hookscript.config_mod, "hook_bin_path", lambda: local)
+    # The distro's own copy is current, so only the Windows one needs rewriting.
+    monkeypatch.setattr(wsl, "run_in", lambda *a, **k: hookscript.packaged_script("tv-hook.sh"))
+    cfg = Config()
+    cfg.enabled_agents = ["cursor"]
+
+    assert hookscript.refresh_if_outdated(cfg) is True
+    assert local.read_text(encoding="utf-8") == hookscript.packaged_script("tv-hook.cmd")
+
+    cfg.enabled_agents = ["claude"]
+    local.write_text("@echo off\nREM old\n", encoding="utf-8")
+    assert hookscript.refresh_if_outdated(cfg) is False  # no Windows-side agent: left alone
