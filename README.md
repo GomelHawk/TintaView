@@ -438,8 +438,13 @@ it stay in TintaView's config; the agent only ever sends the text.
 
 Missed the notification? The **bell** in the usage panel's title bar keeps the last 10, newest
 first: hover it for the latest one, click it to read them all in full (and copy them). An orange
-dot on the bell means something arrived since you last looked. They are kept until TintaView
-restarts, or until you press **Clear**.
+dot on the bell — and a white speech bubble on the tray icon — means something arrived since you
+last looked; both go away when you open the list. They are kept until TintaView restarts, or
+until you press **Clear**.
+
+To hear it too, tick **Sound on notification** in the tray menu, or **Settings… → Sound →
+Sound when an agent sends a notification** — the system sound, or a file of your own at its own
+volume, set apart from the confirmation sound.
 
 | Variable | Holds |
 | --- | --- |
@@ -523,6 +528,10 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 | `escalation.after_seconds` | `60` | How long a confirmation must go unanswered before the first reminder, and the interval between reminders after that. |
 | `escalation.command` | *(none)* | Shell command run **once** per unanswered confirmation, after the first reminder — a phone push, a webhook, a smart bulb, anything TintaView deliberately doesn't do itself. Its environment always has `TINTAVIEW_STATUS`, `TINTAVIEW_AGENTS`, `TINTAVIEW_MESSAGE` (a finished sentence with the start of the request), `TINTAVIEW_QUESTION`, `TINTAVIEW_DETAIL` (the whole request — command, file or every question — on one line), `TINTAVIEW_TOOL` and `TINTAVIEW_CWD`, even when empty; see [Reminders you can't miss](#reminders-you-cant-miss), including what that means for secrets. Its output and exit code are ignored, and a failure is logged rather than shown. |
 | `notify.command` | *(none)* | Shell command run once for every message an agent sends with the `notify_user` tool — see [Notify me when it's done](#notify-me-when-its-done). `TINTAVIEW_STATUS` is `notify`; `TINTAVIEW_MESSAGE`, `TINTAVIEW_AGENTS` and `TINTAVIEW_CWD` say what and who, and the question variables are empty. The tray notification appears either way. Output and exit code ignored, a failure logged. Also on the **Alerts** tab in **Settings…**. |
+| `notify.sound` | `false` | Play a sound when an agent sends a notification. Independent of `ui.chime_on_confirm`. Also the tray menu's **Sound on notification**, and on the **Sound** tab in **Settings…**. |
+| `notify.sound_custom` | `false` | Play `notify.sound_file` instead of the system sound. |
+| `notify.sound_file` | *(none)* | Path to a WAV, OGG or MP3 file for the notification sound. If it is missing or can't be played, the system sound plays instead. Kept when `notify.sound_custom` is switched off. |
+| `notify.sound_volume` | `100` | Volume of that file, 0–100 % of the system volume (never louder than it). Doesn't apply to the system sound. |
 | `update.check` | `true` | Whether the tray checks GitHub Releases for a newer version. |
 | `agents.enabled` | `["claude"]` | Which agents TintaView watches, **in display order** — this list's order is also the order sections appear in the tray flyout. The wizard sets this for you, in the order you type the agents' numbers. |
 | `agents.<key>.home` | *(adapter default)* | Agent data directory — empty means `~/.claude` / `~/.codex` / `~/.cursor` / `~/.copilot` / `~/.junie`; a UNC path in a WSL-split install. |

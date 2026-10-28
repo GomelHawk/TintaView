@@ -36,6 +36,7 @@ import copy
 import logging
 import threading
 from functools import cache, lru_cache
+from typing import NamedTuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -244,6 +245,16 @@ def _zones_for(territory: QtCore.QLocale.Country) -> tuple[str, ...]:
     """The IANA ids in one country — one for Poland or India, 29 for the USA (and more
     on a backend that also reports deprecated aliases, as macOS does)."""
     return _zones_by_country().get(territory, ())
+
+
+class _SoundControls(NamedTuple):
+    """One Sound-tab block's widgets — the confirm chime's or the notification's."""
+
+    check: QtWidgets.QCheckBox
+    custom_check: QtWidgets.QCheckBox
+    file: QtWidgets.QLineEdit
+    volume: QtWidgets.QSlider
+    test: QtWidgets.QPushButton
 
 
 class _ClockRow(QtWidgets.QWidget):
@@ -624,27 +635,58 @@ class SettingsDialog(QtWidgets.QDialog):
     # --- Sound tab -----------------------------------------------------------
 
     def _build_sound_tab(self) -> QtWidgets.QWidget:
-        """The confirm chime: on/off, then an optional custom file with its own volume.
+        """Two sounds, one block each: the confirm chime (`ui.chime_*`) and the sound for
+        an agent's `notify_user` message (`notify.sound*`). Same controls, same rules.
 
         Nested the same way as the other tabs' tick boxes: what a box switches on is
         grayed out under it while it is off. The custom-sound controls need *both* boxes,
         so the inner body's enabled state is the conjunction — Qt would gray it with its
-        parent anyway, but the custom box itself must stay live under a ticked chime.
+        parent anyway, but the custom box itself must stay live under a ticked outer box.
         """
         widget = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout(widget)
-        ui = self.result_cfg.ui
+        ui, notify = self.result_cfg.ui, self.result_cfg.notify
 
-        self._chime_check = QtWidgets.QCheckBox(t("settings.chime"))
-        self._chime_check.setChecked(ui.chime_on_confirm)
-        outer.addWidget(self._chime_check)
+        # Both blocks share one player, so a Test button only says Stop while the sound
+        # *it* started is playing; `_test_owner` is the block that started it.
+        self._chime_watching = False
+        self._test_owner: _SoundControls | None = None
+        self._chime_sound = self._sound_block(
+            outer, t("settings.chime"),
+            ui.chime_on_confirm, ui.chime_custom, ui.chime_sound, ui.chime_volume)
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        outer.addWidget(line)
+        self._notify_sound = self._sound_block(
+            outer, t("settings.notify_sound"),
+            notify.sound, notify.sound_custom, notify.sound_file, notify.sound_volume)
+        # Once, under both: it is true of either slider.
+        outer.addWidget(_hint(t("settings.chime.volume.hint")))
+        outer.addStretch(1)
 
-        chime_body = QtWidgets.QWidget()
-        chime_layout = QtWidgets.QVBoxLayout(chime_body)
-        chime_layout.setContentsMargins(20, 0, 0, 0)
-        self._chime_custom_check = QtWidgets.QCheckBox(t("settings.chime.custom"))
-        self._chime_custom_check.setChecked(ui.chime_custom)
-        chime_layout.addWidget(self._chime_custom_check)
+        # The confirm block keeps its old attribute names.
+        c = self._chime_sound
+        self._chime_check, self._chime_custom_check = c.check, c.custom_check
+        self._chime_file, self._chime_volume, self._chime_test = c.file, c.volume, c.test
+        n = self._notify_sound
+        self._notify_sound_check, self._notify_sound_custom_check = n.check, n.custom_check
+        self._notify_sound_file, self._notify_sound_volume = n.file, n.volume
+        self._notify_sound_test = n.test
+        return widget
+
+    def _sound_block(self, outer: QtWidgets.QVBoxLayout, label: str, on: bool,
+                     custom: bool, path: str, volume: int) -> _SoundControls:
+        check = QtWidgets.QCheckBox(label)
+        check.setChecked(on)
+        outer.addWidget(check)
+
+        body = QtWidgets.QWidget()
+        body_layout = QtWidgets.QVBoxLayout(body)
+        body_layout.setContentsMargins(20, 0, 0, 0)
+        custom_check = QtWidgets.QCheckBox(t("settings.chime.custom"))
+        custom_check.setChecked(custom)
+        body_layout.addWidget(custom_check)
 
         custom_body = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(custom_body)
@@ -652,59 +694,56 @@ class SettingsDialog(QtWidgets.QDialog):
         file_row = QtWidgets.QWidget()
         file_layout = QtWidgets.QHBoxLayout(file_row)
         file_layout.setContentsMargins(0, 0, 0, 0)
-        self._chime_file = QtWidgets.QLineEdit(ui.chime_sound)
-        self._chime_file.setPlaceholderText(t("settings.chime.file.placeholder"))
+        file_edit = QtWidgets.QLineEdit(path)
+        file_edit.setPlaceholderText(t("settings.chime.file.placeholder"))
         browse = QtWidgets.QPushButton(t("settings.chime.browse"))
-        browse.clicked.connect(self._browse_chime)
-        file_layout.addWidget(self._chime_file, 1)
+        file_layout.addWidget(file_edit, 1)
         file_layout.addWidget(browse)
         form.addRow(t("settings.chime.file"), file_row)
 
         volume_row = QtWidgets.QWidget()
         volume_layout = QtWidgets.QHBoxLayout(volume_row)
         volume_layout.setContentsMargins(0, 0, 0, 0)
-        self._chime_volume = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self._chime_volume.setRange(0, 100)
-        self._chime_volume.setValue(max(0, min(100, int(ui.chime_volume))))
+        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(max(0, min(100, int(volume))))
         volume_label = QtWidgets.QLabel()
         volume_label.setMinimumWidth(volume_label.fontMetrics().horizontalAdvance("100 %"))
-        self._chime_volume.valueChanged.connect(lambda v: volume_label.setText(f"{v} %"))
-        volume_label.setText(f"{self._chime_volume.value()} %")
-        volume_layout.addWidget(self._chime_volume, 1)
+        slider.valueChanged.connect(lambda v: volume_label.setText(f"{v} %"))
+        volume_label.setText(f"{slider.value()} %")
+        volume_layout.addWidget(slider, 1)
         volume_layout.addWidget(volume_label)
         form.addRow(t("settings.chime.volume"), volume_row)
-        form.addRow(_hint(t("settings.chime.volume.hint")))
 
-        # One button that turns into Stop while the sound plays: a custom chime can be a
+        # One button that turns into Stop while the sound plays: a custom sound can be a
         # whole song, and with only "Test" there was no way to end it.
-        self._chime_test = QtWidgets.QPushButton(t("settings.chime.test"))
-        metrics = self._chime_test.fontMetrics()
-        self._chime_test.setMinimumWidth(32 + max(
+        test = QtWidgets.QPushButton(t("settings.chime.test"))
+        metrics = test.fontMetrics()
+        test.setMinimumWidth(32 + max(
             metrics.horizontalAdvance(t("settings.chime.test")),
             metrics.horizontalAdvance(t("settings.chime.stop"))))  # no jump on switching
-        self._chime_test.clicked.connect(self._test_chime)
-        self._chime_watching = False
         test_row = QtWidgets.QHBoxLayout()  # a button-sized button, not a field-wide bar
-        test_row.addWidget(self._chime_test)
+        test_row.addWidget(test)
         test_row.addStretch(1)
         form.addRow("", test_row)
-        chime_layout.addWidget(custom_body)
-        outer.addWidget(chime_body)
-        outer.addStretch(1)
+        body_layout.addWidget(custom_body)
+        outer.addWidget(body)
+
+        controls = _SoundControls(check, custom_check, file_edit, slider, test)
+        browse.clicked.connect(lambda: self._browse_sound(file_edit))
+        test.clicked.connect(lambda: self._test_sound(controls))
 
         def sync() -> None:
-            chime_body.setEnabled(self._chime_check.isChecked())
-            custom_body.setEnabled(
-                self._chime_check.isChecked() and self._chime_custom_check.isChecked()
-            )
+            body.setEnabled(check.isChecked())
+            custom_body.setEnabled(check.isChecked() and custom_check.isChecked())
 
-        self._chime_check.toggled.connect(sync)
-        self._chime_custom_check.toggled.connect(sync)
+        check.toggled.connect(sync)
+        custom_check.toggled.connect(sync)
         sync()
-        return widget
+        return controls
 
-    def _browse_chime(self) -> None:
-        start = self._chime_file.text().strip()
+    def _browse_sound(self, file_edit: QtWidgets.QLineEdit) -> None:
+        start = file_edit.text().strip()
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             t("settings.chime.browse.title"),
@@ -712,15 +751,19 @@ class SettingsDialog(QtWidgets.QDialog):
             f"{t('settings.chime.browse.filter')} ({' '.join(sound.SOUND_SUFFIXES)})",
         )
         if path:
-            self._chime_file.setText(path)
+            file_edit.setText(path)
 
     def _test_chime(self) -> None:
-        """Play exactly what a confirm would, with the values on screen right now — or,
-        while that is still playing, stop it."""
+        self._test_sound(self._chime_sound)
+
+    def _test_sound(self, controls: _SoundControls) -> None:
+        """Play exactly what the event would, with the values on screen right now — or,
+        while a test sound is still playing, stop it."""
         if sound.is_playing():
             sound.stop()
             return
-        sound.play_chime(True, self._chime_file.text(), self._chime_volume.value())
+        sound.play_chime(True, controls.file.text(), controls.volume.value())
+        self._test_owner = controls
         if not self._chime_watching:
             # The player exists only once something has been played through it.
             sound.on_playing_changed(self._on_chime_state)
@@ -732,7 +775,9 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _show_chime_playing(self, playing: bool) -> None:
         with contextlib.suppress(RuntimeError):  # the dialog may already be gone
-            self._chime_test.setText(t("settings.chime.stop") if playing else t("settings.chime.test"))
+            for controls in (self._chime_sound, self._notify_sound):
+                stop = playing and controls is self._test_owner
+                controls.test.setText(t("settings.chime.stop") if stop else t("settings.chime.test"))
 
     def done(self, result: int) -> None:
         # OK, Cancel and the window's close button all end here: a song being tested
@@ -965,6 +1010,10 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.escalation.after_seconds = self._escalate_spin.value()
         cfg.escalation.command = self._escalate_command.text().strip()
         cfg.notify.command = self._notify_command.text().strip()
+        cfg.notify.sound = self._notify_sound_check.isChecked()
+        cfg.notify.sound_custom = self._notify_sound_custom_check.isChecked()
+        cfg.notify.sound_file = self._notify_sound_file.text().strip()
+        cfg.notify.sound_volume = self._notify_sound_volume.value()
         cfg.update.check = self._update_check.isChecked()
         cfg.ui.clocks.enabled = self._clocks_check.isChecked()
         # Empty slots drop out, so the stored order is the on-screen order with no gaps.

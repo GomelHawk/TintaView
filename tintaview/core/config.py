@@ -379,9 +379,17 @@ class NotifyConfig:
     `command` is where it goes further (a phone push, a webhook), run once per message
     through the shell, detached, output ignored, a failure logged. The command, and any
     token in it, stays in this file: the agent only ever sends the text.
+
+    `sound*` mirror `ui.chime_*` field for field, as a second, independent sound: off by
+    default, the system sound unless `sound_custom` names a file, `sound_volume` for that
+    file only. It has its own tray-menu toggle beside "Sound on confirm".
     """
 
     command: str = ""
+    sound: bool = False
+    sound_custom: bool = False
+    sound_file: str = ""
+    sound_volume: int = 100
 
 
 @dataclass

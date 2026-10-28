@@ -4,6 +4,16 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.12.0 — 2026-10-28
+
+- **A sound when an agent sends you a message.** When an agent sends a "notify me when it's
+  done" message, TintaView can now play a sound: the system sound, or a WAV, OGG or MP3 file
+  of your own at its own volume, separate from the confirmation sound. It's off by default.
+  Turn it on with **Sound on notification** in the tray menu, or in **Settings… → Sound**.
+- **The tray icon shows when a message is waiting.** A small speech bubble appears on the
+  icon when an agent's message arrives, so you can see one came in after the pop-up is gone.
+  It goes away when you open the list under the bell in the usage panel.
+
 ## 0.11.0 — 2026-10-26
 
 - **Junie CLI: a question or an approval now turns the light red.** When Junie asks you a

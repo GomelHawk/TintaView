@@ -993,6 +993,55 @@ def test_sound_tab_writes_every_field_it_shows(qapp, tmp_path):
     assert reloaded.ui.chime_volume == 35
 
 
+def test_notification_sound_block_follows_its_own_boxes_and_saves(qapp, tmp_path):
+    """The second block is independent of the confirm chime: its controls follow its own
+    two boxes, and it writes `notify.sound*`, never `ui.chime_*`."""
+    cfg = make_cfg(tmp_path)
+    cfg.ui.chime_on_confirm = False
+    dialog = SettingsDialog(cfg)
+    custom_controls = (dialog._notify_sound_file, dialog._notify_sound_volume)
+    assert dialog._notify_sound_custom_check.isEnabled() is False
+
+    dialog._notify_sound_check.setChecked(True)
+    dialog._notify_sound_custom_check.setChecked(True)
+    assert all(w.isEnabled() for w in custom_controls)
+    assert dialog._chime_custom_check.isEnabled() is False  # the chime block is untouched
+
+    dialog._notify_sound_file.setText("  /sounds/note.wav  ")
+    dialog._notify_sound_volume.setValue(30)
+    dialog._on_accept()
+
+    reloaded = config_mod.load(dialog.result_cfg.path)
+    assert (reloaded.notify.sound, reloaded.notify.sound_custom) == (True, True)
+    assert (reloaded.notify.sound_file, reloaded.notify.sound_volume) == ("/sounds/note.wav", 30)
+    assert reloaded.ui.chime_on_confirm is False
+
+
+def test_only_the_block_that_started_a_test_says_stop(qapp, tmp_path, monkeypatch):
+    from tintaview.ui import settings_dialog as dialog_mod
+
+    state = {"playing": False}
+    calls: list = []
+    monkeypatch.setattr(dialog_mod.sound, "is_playing", lambda: state["playing"])
+    monkeypatch.setattr(dialog_mod.sound, "on_playing_changed", lambda slot: None)
+
+    def play(*args):
+        calls.append(args)
+        state["playing"] = True
+
+    monkeypatch.setattr(dialog_mod.sound, "play_chime", play)
+    dialog = SettingsDialog(make_cfg(tmp_path))
+    dialog._notify_sound_check.setChecked(True)
+    dialog._notify_sound_custom_check.setChecked(True)
+    dialog._notify_sound_file.setText("/s/note.ogg")
+    dialog._notify_sound_volume.setValue(20)
+
+    dialog._notify_sound_test.click()
+    assert calls == [(True, "/s/note.ogg", 20)]
+    assert dialog._notify_sound_test.text() == "Stop"
+    assert dialog._chime_test.text() == "Test"
+
+
 def test_the_test_button_plays_what_is_on_screen(qapp, tmp_path, monkeypatch):
     from tintaview.ui import settings_dialog as dialog_mod
 

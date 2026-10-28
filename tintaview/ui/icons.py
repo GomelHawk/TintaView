@@ -360,6 +360,77 @@ def keep_awake_icon(icon: QtGui.QIcon) -> QtGui.QIcon:
     return badged
 
 
+#: The "an agent sent you a message" mark: a white speech bubble with three dots, over
+#: the upper right of the tray icon — the keep-awake shield has the lower right, so the
+#: two can show at once. Static, like the shield; it stays until the usage panel's bell
+#: list is opened (`NotifyLog.unread`). The 1 px black outline is for a light taskbar,
+#: where white on near-white otherwise left only the dots; it stays 1 px at every size,
+#: since a scaled one read as a cartoon outline at 250 %.
+BUBBLE_COLOR = (255, 255, 255)
+BUBBLE_DOTS = (40, 40, 40)
+BUBBLE_OUTLINE = (0, 0, 0)
+BUBBLE_FRACTION = 0.52  # bubble width as a share of the icon
+
+_bubble_cache: dict[int, QtGui.QIcon] = {}
+
+
+def _draw_bubble(pm: QtGui.QPixmap, size: int) -> None:
+    """Paint the bubble into `pm`'s upper right, with the same transparent gap around
+    it as the shield, so it stands apart from the spokes on any taskbar colour."""
+    # Inset by half the outline, so the stroke is not cut off where the bubble meets the
+    # icon's top and right edges.
+    w = size * BUBBLE_FRACTION - 1.0
+    h = w * 0.72
+    x, y = size - w - 0.5, 0.5
+    path = QtGui.QPainterPath()
+    path.addRoundedRect(QtCore.QRectF(x, y, w, h), w * 0.22, w * 0.22)
+    tail = QtGui.QPainterPath()
+    tail.moveTo(x + w * 0.18, y + h * 0.75)
+    tail.lineTo(x + w * 0.05, y + h * 1.18)
+    tail.lineTo(x + w * 0.48, y + h * 0.85)
+    tail.closeSubpath()
+    path = path.united(tail)
+    p = QtGui.QPainter(pm)
+    try:
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
+        gap = max(1.0, size * 0.06)
+        p.setPen(QtGui.QPen(Qt.black, gap * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.black)
+        p.drawPath(path)
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+        p.setPen(QtGui.QPen(QtGui.QColor(*BUBBLE_OUTLINE), 1.0, Qt.SolidLine, Qt.RoundCap,
+                            Qt.RoundJoin))
+        p.setBrush(QtGui.QColor(*BUBBLE_COLOR))
+        p.drawPath(path)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QtGui.QColor(*BUBBLE_DOTS))
+        dot = max(0.6, w * 0.075)
+        for fx in (0.28, 0.5, 0.72):
+            p.drawEllipse(QtCore.QPointF(x + w * fx, y + h * 0.47), dot, dot)
+    finally:
+        p.end()
+
+
+def notify_icon(icon: QtGui.QIcon) -> QtGui.QIcon:
+    """`icon` with the speech bubble over it, at every tray size — cached the same way
+    as `keep_awake_icon`, by the source icon's `cacheKey`."""
+    key = icon.cacheKey()
+    cached = _bubble_cache.get(key)
+    if cached is not None:
+        return cached
+    badged = QtGui.QIcon()
+    for px in TRAY_ICON_SIZES:
+        pm = icon.pixmap(px, px)
+        if pm.isNull():
+            continue
+        pm = QtGui.QPixmap(pm)  # never paint into a pixmap the source icon still owns
+        _draw_bubble(pm, px)
+        badged.addPixmap(pm)
+    _bubble_cache[key] = badged
+    return badged
+
+
 def write_brand_png(path: Path, size: int = 256) -> Path | None:
     """Write the brand mark to `path` as a PNG, and return it (None if it couldn't be).
 

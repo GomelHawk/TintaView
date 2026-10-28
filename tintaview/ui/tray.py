@@ -227,6 +227,7 @@ class TrayApp(QtCore.QObject):
         self._tooltip_key: tuple[Any, ...] | None = None
         self._blink_on = True
         self._sound_action: QtGui.QAction | None = None  # set by _build_menu below
+        self._notify_sound_action: QtGui.QAction | None = None  # likewise
         #: Built before the menu, which reads its state for the check mark. Re-applied
         #: from config at startup: unlike "Pause lighting", this toggle is remembered.
         self._keep_awake = KeepAwake()
@@ -294,6 +295,9 @@ class TrayApp(QtCore.QObject):
 
         #: The bell in the usage panel's title bar — see `ui/notify_log.py`.
         self.notify_log = NotifyLog()
+        # The bubble goes on and off with the bell's dot — on a message, and when the
+        # list is opened or cleared — not on the next state poll.
+        self.notify_log.on_change = self._poll_state
         self.flyout = Flyout(
             collapsed=cfg.ui.collapsed_agents,
             on_toggle=self._on_flyout_toggle,
@@ -346,7 +350,7 @@ class TrayApp(QtCore.QObject):
 
         Called again after a language change (see `_apply_settings`) rather than
         retranslating each action in place: the menu is a handful of items with no state
-        beyond the chime check mark, which is re-synced from config either way.
+        beyond the two sound check marks, which are re-synced from config either way.
         """
         menu = QtWidgets.QMenu()
         menu.addAction(t("tray.menu.refresh_usage"), self._stats_worker.fetch)
@@ -358,6 +362,12 @@ class TrayApp(QtCore.QObject):
         # this check mark has to be re-synced after an accept or the menu starts
         # contradicting the dialog.
         self._sound_action = sound_action
+        # The same for `notify.sound`, the Sound tab's second block.
+        notify_sound_action = menu.addAction(t("tray.menu.sound_on_notify"))
+        notify_sound_action.setCheckable(True)
+        notify_sound_action.setChecked(self._cfg.notify.sound)
+        notify_sound_action.toggled.connect(self._set_notify_sound)
+        self._notify_sound_action = notify_sound_action
 
         awake_action = menu.addAction(t("tray.menu.keep_awake"))
         awake_action.setCheckable(True)
@@ -454,8 +464,9 @@ class TrayApp(QtCore.QObject):
         """An agent asked, through the MCP `notify_user` tool, to tell the user something.
 
         A balloon titled with the agent's name, always — the user asked for this one, so
-        unlike a confirm it needs no reminder schedule and no chime — and
-        `notify.command`, once, for the channel the user actually wanted ("via phone").
+        unlike a confirm it needs no reminder schedule — the notification sound if
+        `notify.sound` is on, and `notify.command`, once, for the channel the user
+        actually wanted ("via phone").
         """
         label = _agent_label(agent)
         self.tray.showMessage(label, message, QtWidgets.QSystemTrayIcon.Information, 10000)
@@ -463,6 +474,9 @@ class TrayApp(QtCore.QObject):
         # the message someone who walked away comes back to read.
         self.notify_log.add(NotifyEntry(agent=agent, message=message, cwd=cwd))
         self.flyout.update()
+        notify = self._cfg.notify
+        if notify.sound:
+            sound.play_chime(notify.sound_custom, notify.sound_file, notify.sound_volume)
         command = self._cfg.notify.command.strip()
         if not command:
             return
@@ -487,6 +501,15 @@ class TrayApp(QtCore.QObject):
             save(self._cfg)
         except Exception:
             log.exception("could not persist chime_on_confirm")
+
+    def _set_notify_sound(self, on: bool) -> None:
+        self._cfg.notify.sound = on
+        try:
+            from tintaview.core.config import save
+
+            save(self._cfg)
+        except Exception:
+            log.exception("could not persist notify.sound")
 
     def _set_keep_awake(self, on: bool) -> None:
         """The "Keep awake" menu toggle. The choice is saved even when the platform
@@ -595,6 +618,10 @@ class TrayApp(QtCore.QObject):
         self._cfg.escalation.command = new_cfg.escalation.command
         # Read by `_on_notify_requested` when the next message arrives.
         self._cfg.notify.command = new_cfg.notify.command
+        self._cfg.notify.sound = new_cfg.notify.sound
+        self._cfg.notify.sound_custom = new_cfg.notify.sound_custom
+        self._cfg.notify.sound_file = new_cfg.notify.sound_file
+        self._cfg.notify.sound_volume = new_cfg.notify.sound_volume
         self._cfg.update.check = new_cfg.update.check
         # The flyout holds this very `Config`, so the band picks these up on its next
         # paint — which the `set_results` call further down schedules, along with the
@@ -632,12 +659,15 @@ class TrayApp(QtCore.QObject):
             # survives until the next session opens or closes.
             self._tooltip_key = None
 
-        # The context menu's own copy of chime_on_confirm. Signals blocked so setting the
-        # check mark doesn't re-enter `_set_sound` and save the config a second time.
-        if self._sound_action is not None:
-            self._sound_action.blockSignals(True)
-            self._sound_action.setChecked(self._cfg.ui.chime_on_confirm)
-            self._sound_action.blockSignals(False)
+        # The context menu's own copies of chime_on_confirm and notify.sound. Signals
+        # blocked so setting a check mark doesn't re-enter `_set_sound` /
+        # `_set_notify_sound` and save the config a second time.
+        for action, on in ((self._sound_action, self._cfg.ui.chime_on_confirm),
+                           (self._notify_sound_action, self._cfg.notify.sound)):
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(on)
+                action.blockSignals(False)
 
         # A disabled agent's usage section would otherwise sit in the flyout until the
         # next restart: `_apply_results` merges rather than replaces (deliberately — a
@@ -892,7 +922,8 @@ class TrayApp(QtCore.QObject):
         this the same icon" test and `setIcon` makes the platform shell rebuild the tray
         item either way, so the guard has to live here.
         """
-        key = (*key, self._keep_awake.active)  # the shield is part of what is drawn
+        # The shield and the speech bubble are part of what is drawn.
+        key = (*key, self._keep_awake.active, self.notify_log.unread)
         if key == self._icon_key:
             return
         self._icon_key = key
@@ -900,8 +931,12 @@ class TrayApp(QtCore.QObject):
         self.tray.setIcon(self._badged(build()))
 
     def _badged(self, icon: QtGui.QIcon) -> QtGui.QIcon:
-        """`icon` with the green "Keep awake" shield while the request is actually held —
-        `active`, not the config value, so a refused request never shows a shield."""
+        """`icon` with the speech bubble while an agent's message is unread (the bell's
+        orange dot, on the tray), and the green "Keep awake" shield while the request is
+        actually held — `active`, not the config value, so a refused request never shows
+        a shield."""
+        if self.notify_log.unread:
+            icon = icons.notify_icon(icon)
         return icons.keep_awake_icon(icon) if self._keep_awake.active else icon
 
     def _surface_engine_note(self, payload: dict) -> None:
@@ -960,7 +995,7 @@ class TrayApp(QtCore.QObject):
         """
         now = time.monotonic()
         rgb = self._cfg.colors.rgb("working")
-        key = (rgb, icons.pulse_step(now), self._keep_awake.active)
+        key = (rgb, icons.pulse_step(now), self._keep_awake.active, self.notify_log.unread)
         if key == self._anim_key:
             return
         self._anim_key = key

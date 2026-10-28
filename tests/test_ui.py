@@ -1119,6 +1119,10 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
             "escalation.after_seconds": 120,
             "escalation.command": "notify-send hi",
             "notify.command": "notify-send done",
+            "notify.sound": True,
+            "notify.sound_custom": True,
+            "notify.sound_file": "/sounds/note.wav",
+            "notify.sound_volume": 25,
             "update.check": False,
             "engine.mode": "openrgb",
             "colors.idle": "#010203",
@@ -1148,6 +1152,8 @@ def test_apply_settings_mirrors_every_field_it_can_write(tray_with_controller):
     assert cfg.escalation.after_seconds == 120
     assert cfg.escalation.command == "notify-send hi"
     assert cfg.notify.command == "notify-send done"
+    assert (cfg.notify.sound, cfg.notify.sound_custom) == (True, True)
+    assert (cfg.notify.sound_file, cfg.notify.sound_volume) == ("/sounds/note.wav", 25)
     assert cfg.update.check is False
     assert cfg.engine.mode == "openrgb"
     assert cfg.colors.idle == "#010203"
@@ -1315,6 +1321,26 @@ def test_apply_settings_resyncs_the_sound_menu_item(tray_with_controller):
     app_instance._apply_settings(_accepted_copy(app_instance, **{"ui.chime_on_confirm": True}))
 
     assert app_instance._sound_action.isChecked() is True
+
+
+def test_notification_sound_menu_item_saves_and_resyncs(tray_with_controller, monkeypatch):
+    """Its own check mark for `notify.sound`: ticking it saves, and the dialog changing
+    the same field moves the check mark — without touching the confirm chime."""
+    app_instance, _server = tray_with_controller
+    saved: list = []
+    monkeypatch.setattr("tintaview.core.config.save", lambda cfg: saved.append(cfg.notify.sound))
+    action = app_instance._notify_sound_action
+    assert action.isChecked() is False
+    assert action in app_instance.tray.contextMenu().actions()
+
+    action.setChecked(True)
+    assert app_instance._cfg.notify.sound is True
+    assert saved == [True]
+    assert app_instance._cfg.ui.chime_on_confirm is False
+
+    app_instance._apply_settings(_accepted_copy(app_instance, **{"notify.sound": False}))
+    assert action.isChecked() is False
+    assert saved == [True]  # the resync itself saves nothing
 
 
 def test_apply_settings_resync_does_not_resave_config(tray_with_controller, monkeypatch):
@@ -2973,6 +2999,69 @@ def test_an_agents_notification_balloons_and_runs_the_notify_command(tray, monke
     assert app_instance.flyout.notify_log is app_instance.notify_log
 
 
+def test_an_agents_notification_plays_its_own_sound_only_when_on(tray, monkeypatch):
+    """`notify.sound*`, not the confirm chime's settings — and nothing while it is off."""
+    app_instance, _server = tray
+    calls = []
+    monkeypatch.setattr(tray_mod.sound, "play_chime", lambda *a: calls.append(a))
+    monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage", lambda self, *a, **k: None)
+    cfg = app_instance._cfg
+    cfg.ui.chime_on_confirm, cfg.ui.chime_custom, cfg.ui.chime_sound = True, True, "/s/c.wav"
+
+    app_instance._on_notify_requested("claude", "done", "")
+    assert calls == []
+
+    cfg.notify.sound, cfg.notify.sound_custom = True, True
+    cfg.notify.sound_file, cfg.notify.sound_volume = "/s/note.mp3", 45
+    app_instance._on_notify_requested("claude", "done again", "")
+    assert calls == [(True, "/s/note.mp3", 45)]
+
+
+def test_the_tray_shows_a_bubble_while_a_notification_is_unread(tray, monkeypatch):
+    """On with the bell's dot, at once rather than on the next poll, in every state —
+    and off again when the list is opened or cleared."""
+    app_instance, server = tray
+    monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage", lambda self, *a, **k: None)
+    bubbled: list = []
+    real = tray_mod.icons.notify_icon
+    monkeypatch.setattr(tray_mod.icons, "notify_icon",
+                        lambda icon: bubbled.append(icon) or real(icon))
+    set_icons: list = []
+    real_set = app_instance.tray.setIcon
+    monkeypatch.setattr(app_instance.tray, "setIcon",
+                        lambda icon: set_icons.append(icon) or real_set(icon))
+
+    server.set({"effective": "idle", "count": 1, "agents": {}})
+    app_instance._poll_state()
+    assert bubbled == []
+
+    set_icons.clear()
+    app_instance._on_notify_requested("claude", "done", "")
+    assert len(bubbled) == 1 and len(set_icons) == 1  # repainted by the message itself
+
+    for status in ("working", "confirm"):
+        server.set({"effective": status, "count": 1, "agents": {}})
+        app_instance._poll_state()
+        if status == "working":
+            app_instance._update_anim_icon()
+        if status == "confirm":
+            app_instance._on_blink()
+    assert len(bubbled) >= 4
+
+    bubbled.clear()
+    app_instance.notify_log.mark_seen()  # what opening the bell list does
+    server.set({"effective": "idle", "count": 1, "agents": {}})
+    app_instance._poll_state()
+    assert bubbled == []
+
+    app_instance.notify_log.add(tray_mod.NotifyEntry(agent="codex", message="x"))
+    assert bubbled
+    bubbled.clear()
+    app_instance.notify_log.clear()
+    app_instance._poll_state()
+    assert bubbled == []
+
+
 def test_an_agents_notification_without_a_command_only_balloons(tray, monkeypatch):
     """Neither of the other two commands stands in for `notify.command`."""
     app_instance, _server = tray
@@ -2996,7 +3085,7 @@ def test_every_notify_field_is_accounted_for():
 
     from tintaview.core.config import NotifyConfig
 
-    dialog_writes = {"command"}
+    dialog_writes = {"command", "sound", "sound_custom", "sound_file", "sound_volume"}
     config_file_only: set[str] = set()
     assert {f.name for f in fields(NotifyConfig)} == dialog_writes | config_file_only
 

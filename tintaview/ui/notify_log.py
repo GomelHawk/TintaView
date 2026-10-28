@@ -5,13 +5,15 @@ tray rarely restarts. Ten is enough for two agents finishing in quick succession
 some history, and few enough that the popup never needs more than a short scroll.
 
 The bell has three states, all derived here: no entries (gray), entries all seen
-(white), and something new since the popup was last opened (white with a dot).
+(white), and something new since the popup was last opened (white with a dot). The
+tray icon shows a speech bubble for that last state too, told by `on_change`.
 """
 
 from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from tintaview.i18n import t
@@ -37,6 +39,8 @@ class NotifyLog:
     def __init__(self) -> None:
         self._entries: deque[NotifyEntry] = deque(maxlen=MAX_ENTRIES)
         self._unread = False
+        #: Called whenever `unread` may have changed — the tray repaints its icon.
+        self.on_change: Callable[[], None] | None = None
 
     @property
     def entries(self) -> list[NotifyEntry]:
@@ -49,14 +53,20 @@ class NotifyLog:
 
     def add(self, entry: NotifyEntry) -> None:
         self._entries.appendleft(entry)
-        self._unread = True
+        self._set_unread(True)
 
     def mark_seen(self) -> None:
-        self._unread = False
+        self._set_unread(False)
 
     def clear(self) -> None:
         self._entries.clear()
-        self._unread = False
+        self._set_unread(False)
+
+    def _set_unread(self, unread: bool) -> None:
+        changed = unread != self._unread
+        self._unread = unread
+        if changed and self.on_change is not None:
+            self.on_change()
 
 
 def age_text(at: float, now: float | None = None) -> str:
