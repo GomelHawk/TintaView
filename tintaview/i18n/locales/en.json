@@ -231,6 +231,7 @@
   "usage.cursor.on_demand_unlimited": "{used} spent",
   "usage.cursor.error.not_signed_in": "Not signed in to Cursor — current usage can't be shown. Sign in again to see it.",
   "usage.cursor.error.db_unreadable": "Cursor usage unavailable (state DB locked or unreadable).",
+  "usage.cursor.error.encrypted": "Cursor encrypts its saved login and it can't be read on this system — usage can't be shown.",
   "usage.cursor.error.http": "Cursor usage endpoint HTTP {code}.",
   "usage.cursor.error.unavailable": "Cursor usage unavailable: {detail}",
   "usage.cursor.error.payload": "Cursor usage unavailable (unofficial endpoint changed).",

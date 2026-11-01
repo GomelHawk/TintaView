@@ -9,6 +9,7 @@ urllib.request.urlopen.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -1017,6 +1018,49 @@ class TestCursor:
         assert other_models.reset_at == 0.0
 
         assert self.TOKEN not in caplog.text
+
+    # The shape Cursor writes once `cursor.storage.authTokenEncryptionAtRest` is on
+    # (measured on a live state.vscdb: prefix, then base64 of b"v10" + nonce + ct + tag).
+    ENCRYPTED = cursor_mod.ENCRYPTED_PREFIX + base64.b64encode(
+        b"v10" + b"n" * 12 + b"ciphertext" + b"t" * 16).decode()
+
+    def test_an_encrypted_token_is_decrypted_with_the_key_beside_user(self, tmp_path,
+                                                                      monkeypatch):
+        """The ciphertext itself must never be sent: that is the 401 that made a
+        signed-in Cursor read "Signed out"."""
+        db_path = tmp_path / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+        _make_state_db(db_path, self.ENCRYPTED)
+        seen = {}
+
+        def fake_decrypt(blob, local_state):
+            seen["blob"], seen["local_state"] = blob, local_state
+            return self.TOKEN
+
+        monkeypatch.setattr(cursor_mod.safe_storage, "decrypt", fake_decrypt)
+
+        def fake_urlopen(req, timeout=None):
+            seen["header"] = req.get_header("Authorization")
+            return _FakeResponse(json.dumps({"planUsage": {"autoPercentUsed": 1,
+                                                           "apiPercentUsed": 2}}).encode())
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        result = CursorUsageProvider().fetch(AgentConfig(state_db=str(db_path)))
+        assert result.ok
+        assert seen["header"] == f"Bearer {self.TOKEN}"
+        assert seen["local_state"] == tmp_path / "Cursor" / "Local State"
+        assert seen["blob"].startswith(b"v10")
+
+    def test_an_undecryptable_token_is_not_a_sign_out(self, tmp_path, monkeypatch):
+        """No `Local State` (or not Windows): report it, keep it `transient`, and never
+        send the ciphertext. Signing in again would only encrypt a new token."""
+        db_path = tmp_path / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+        _make_state_db(db_path, self.ENCRYPTED)
+        monkeypatch.setattr(urllib.request, "urlopen",
+                             lambda req, timeout=None: pytest.fail("ciphertext was sent"))
+        result = CursorUsageProvider().fetch(AgentConfig(state_db=str(db_path)))
+        assert not result.ok
+        assert result.error_kind == "transient"
+        assert "encrypts" in result.error
 
     def test_a_dead_session_is_an_auth_failure_but_a_locked_db_is_not(self, tmp_path, monkeypatch):
         """Both come out of the same `_TokenError` branch and must not be classified

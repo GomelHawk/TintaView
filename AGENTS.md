@@ -809,6 +809,25 @@ its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catal
   - Read the token fresh on each poll; never log, cache or persist it; mask it in `doctor` output;
     pin requests to `api2.cursor.sh`.
   - On 401/403 re-read from disk (Cursor refreshes it while signed in).
+  - **The token may be encrypted at rest** (`cursor.storage.authTokenEncryptionAtRest`,
+    seen 2026-11): `cursor-safe-storage:v1:` + base64 of Electron `safeStorage` output
+    (`cursorAuthTokenStorageCodec.js`). `stats/providers/_safe_storage.py` decrypts it on
+    Windows — `v10` + nonce + AES-256-GCM, key from `<Cursor>/Local State`
+    `os_crypt.encrypted_key` under DPAPI — through `ctypes` (crypt32 + CNG), since stdlib
+    has no AES. Linux/macOS are Chromium's POSIX `os_crypt`: AES-128-CBC, IV of 16 spaces,
+    key = PBKDF2-SHA1(password, `saltysalt`) — macOS `v10` with the Keychain item
+    `Cursor Safe Storage` and 1003 iterations; Linux `v11` with the libsecret/KWallet
+    password and 1 iteration, `v10` with `peanuts`. The AES is `stats/providers/_aes.py`
+    (pure Python, decrypt-only, pinned by FIPS-197/SP 800-38A vectors and OpenSSL-made
+    blobs). Cursor encrypts on Linux only with a libsecret or KWallet backend
+    (`nH`/`tH` in its codec); otherwise the token stays plain text. Sending the ciphertext
+    earns a 401 that read as "signed out" while Cursor was open; anything that can't be
+    decrypted is a *transient* `usage.cursor.error.encrypted`, never `auth` — signing in
+    again re-encrypts. Windows verified against a live install; the libsecret/KWallet
+    lookup is measured (Linux Cursor 3.27.22 under WSLg: item "Chromium Safe Storage",
+    `application = Cursor`, found by `secret-tool`), but that build keeps its token plain
+    (`authTokenEncryptionAtRest = false`), so Linux *decryption* of a real token, KWallet
+    and macOS are **not** verified.
   - Degrade to "not signed in" / "usage unavailable" — this can break on any Cursor release and
     must never block the tray or affect lighting.
 - **JetBrains AI Assistant** — stats-only; no adapter in `agents/` at all, since the IDE plugin

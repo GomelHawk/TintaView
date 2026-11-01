@@ -232,6 +232,7 @@
   "usage.cursor.on_demand_unlimited": "Выдаткавана {used}",
   "usage.cursor.error.not_signed_in": "Уход у Cursor не выкананы — актуальнае спажыванне недаступнае. Увайдзіце зноў, каб яго ўбачыць.",
   "usage.cursor.error.db_unreadable": "Даныя пра выдатак Cursor недаступныя (база стану заблакаваная ці не чытаецца).",
+  "usage.cursor.error.encrypted": "Cursor шыфруе захаваны ўваход, і ў гэтай сістэме яго не прачытаць — выкарыстанне паказаць нельга.",
   "usage.cursor.error.http": "Пункт доступу Cursor вярнуў HTTP {code}.",
   "usage.cursor.error.unavailable": "Даныя пра выдатак Cursor недаступныя: {detail}",
   "usage.cursor.error.payload": "Даныя пра выдатак Cursor недаступныя (неафіцыйны пункт доступу змяніўся).",

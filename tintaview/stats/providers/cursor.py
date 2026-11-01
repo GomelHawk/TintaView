@@ -6,6 +6,9 @@ any Cursor release, and the token is a live credential.
 Flow:
   1. Read `cursorAuth/accessToken` from the `ItemTable` of Cursor's `state.vscdb`
      (path is platform-specific; `AgentConfig.state_db` overrides, empty = auto-detect).
+     Newer Cursor encrypts it at rest (`cursor-safe-storage:v1:` + Electron
+     safeStorage); `_safe_storage` decrypts it (Windows: key from Cursor's
+     `Local State`; Linux/macOS: OS keyring). Failure reads "unreadable", never "signed out".
   2. `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage`
      with that token → current-period usage (plan usage in cents, remaining, percent).
   3. On 401/403, re-read the token from disk once and retry — Cursor rotates it while
@@ -26,6 +29,7 @@ Non-negotiable rules (this is a real credential, and the DB is huge and someone 
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -43,6 +47,7 @@ from tintaview.i18n import t
 
 from .. import format as fmt
 from ..model import UsageProvider, UsageResult, UsageRow
+from . import _safe_storage as safe_storage
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +57,14 @@ TOKEN_KEY = "cursorAuth/accessToken"
 
 class _TokenError(Exception):
     """No usable Cursor access token could be read from disk."""
+
+
+class _EncryptedTokenError(_TokenError):
+    """The token is there but encrypted, and could not be decrypted on this machine.
+    Not a sign-out: Cursor is signed in, we just cannot read its login."""
+
+
+ENCRYPTED_PREFIX = "cursor-safe-storage:v1:"
 
 
 # --------------------------------------------------------------------------- state DB
@@ -105,10 +118,29 @@ def _read_token(db_path: Path) -> str:
     try:
         decoded = json.loads(value)
         if isinstance(decoded, str) and decoded:
-            return decoded
+            value = decoded
     except (json.JSONDecodeError, TypeError):
         pass
+    if value.startswith(ENCRYPTED_PREFIX):
+        return _decrypt_token(value, db_path)
     return value
+
+
+def _decrypt_token(value: str, db_path: Path) -> str:
+    """Cursor's at-rest encryption (``cursor.storage.authTokenEncryptionAtRest``):
+    ``ENCRYPTED_PREFIX`` + base64 of Electron ``safeStorage`` output. The key lives in
+    ``Local State`` beside ``User/`` — ``<Cursor>/User/globalStorage/state.vscdb`` →
+    ``<Cursor>/Local State``. Sending the ciphertext as a bearer token earns a 401, which
+    used to read as "signed out" while Cursor was open and signed in."""
+    try:
+        blob = base64.b64decode(value[len(ENCRYPTED_PREFIX):], validate=True)
+    except ValueError as e:
+        raise _EncryptedTokenError(f"malformed encrypted Cursor token: {e}") from e
+    local_state = db_path.parent.parent.parent / "Local State"
+    try:
+        return safe_storage.decrypt(blob, local_state)
+    except safe_storage.SafeStorageError as e:
+        raise _EncryptedTokenError(str(e)) from e
 
 
 # --------------------------------------------------------------------------- RPC
@@ -315,6 +347,11 @@ class CursorUsageProvider(UsageProvider):
         db_path = _resolve_state_db(agent_config)
         try:
             token = _read_token(db_path)
+        except _EncryptedTokenError as e:
+            # Signed in, but unreadable here (not Windows, or DPAPI/AES refused). Not
+            # `auth`: signing in again would encrypt the new token the same way.
+            log.info("cursor token is encrypted and could not be decrypted: %s", e)
+            return UsageResult(agent=self.key, error=t("usage.cursor.error.encrypted"))
         except _TokenError as e:
             log.info("cursor token unavailable: %s", e)  # the exception text, never the token
             if "not found" in str(e) or "not signed in" in str(e):

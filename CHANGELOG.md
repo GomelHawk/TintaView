@@ -4,6 +4,18 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 0.12.1 — 2026-11-01
+
+- **Cursor usage works again on Windows.** Recent Cursor versions encrypt the login they save
+  on your computer, so the Cursor card said "Signed out" and kept showing old figures, even
+  with Cursor open and signed in. TintaView now unlocks that saved login the same way Cursor
+  does, and the card shows your current usage again. You don't need to sign in again or change
+  anything.
+- The same works on Linux (with the GNOME keyring or KWallet) and on macOS. On a Mac, the first
+  time it happens, macOS may ask whether TintaView may use "Cursor Safe Storage" — choose
+  **Always Allow**. If the login can't be unlocked, the card says so instead of wrongly saying
+  you're signed out.
+
 ## 0.12.0 — 2026-10-28
 
 - **A sound when an agent sends you a message.** When an agent sends a "notify me when it's

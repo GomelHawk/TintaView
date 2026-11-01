@@ -231,6 +231,7 @@
   "usage.cursor.on_demand_unlimited": "{used} gastados",
   "usage.cursor.error.not_signed_in": "Sin sesión en Cursor: no se puede mostrar el uso actual. Inicia sesión de nuevo para verlo.",
   "usage.cursor.error.db_unreadable": "El uso de Cursor no está disponible (su base de datos de estado está bloqueada o no se puede leer).",
+  "usage.cursor.error.encrypted": "Cursor cifra su sesión guardada y no se puede leer en este sistema: no se puede mostrar el uso.",
   "usage.cursor.error.http": "El endpoint de uso de Cursor devolvió HTTP {code}.",
   "usage.cursor.error.unavailable": "El uso de Cursor no está disponible: {detail}",
   "usage.cursor.error.payload": "El uso de Cursor no está disponible (su endpoint no oficial ha cambiado).",
