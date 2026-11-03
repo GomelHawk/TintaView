@@ -108,7 +108,7 @@ tintaview/
   cli.py  __main__.py
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
              request.py  proc.py  keepawake.py
-             netinfo.py                                  # public IP + country, panel-open only
+             netinfo.py                                  # public IP + country/city, panel-open only
              mcp.py                                      # the notify_user MCP server
   engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
              ghub_sidecar.py  ghub_worker.py             # python.exe painter for pythonw trays

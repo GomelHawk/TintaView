@@ -60,6 +60,7 @@
   "flyout.no_usage_data": "Sin datos de uso.",
   "flyout.network.updating": "Actualizando…",
   "flyout.network.unavailable": "Dirección IP no disponible",
+  "flyout.network.city_country": "{city}, {country}",
   "flyout.network.unknown_country": "País desconocido",
 
   "settings.title": "Ajustes de TintaView",
@@ -91,7 +92,7 @@
   "settings.stats_trend": "Mostrar el ritmo de consumo de los límites",
   "settings.stats_trend.tooltip": "Añade una línea que estima cuándo se agotará un límite al ritmo de la última hora o dos. Solo aparece mientras el consumo sube, y necesita antes unos cuantos sondeos de historial.",
   "settings.network_info": "Mostrar la IP pública y el país en el panel de uso",
-  "settings.network_info.tooltip": "Cada vez que se abre el panel, consulta a Cloudflare la dirección IP pública de este equipo y su país, y los muestra bajo los relojes.",
+  "settings.network_info.tooltip": "Cada vez que se abre el panel, consulta a ipinfo.io (o a Cloudflare, si ipinfo no responde) la dirección IP pública de este equipo, su país y, si se conoce, su ciudad, y los muestra bajo los relojes.",
   "settings.escalate": "Seguir avisándome hasta que responda",
   "settings.escalate.hint": "Repite el sonido y el aviso hasta que respondas.",
   "settings.escalate.after": "Recordar cada",

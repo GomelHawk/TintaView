@@ -2496,10 +2496,14 @@ def test_an_answer_to_an_earlier_open_is_ignored(qapp):
     assert flyout._net == NetInfo("203.0.113.42", "PL")
 
 
-@pytest.mark.parametrize("info", [None, ("203.0.113.42", ""), ("203.0.113.42", "QQ")])
+@pytest.mark.parametrize("info", [None, ("203.0.113.42", ""), ("203.0.113.42", "QQ"),
+                                  ("203.0.113.42", "PL", "Toruń"),
+                                  ("203.0.113.42", "", "Toruń"),
+                                  ("203.0.113.42", "DE", "Frankfurt am Main " * 3)])
 def test_the_network_line_renders_every_outcome(qapp, info):
-    """Failure ("unavailable"), an address the service couldn't place, and a code Qt
-    has no name for all have to paint without raising."""
+    """Failure ("unavailable"), an address the service couldn't place, a code Qt has
+    no name for, and a city with, without and too long for its country all have to
+    paint without raising."""
     from tintaview.core.netinfo import NetInfo
 
     flyout = Flyout(cfg=_net_cfg(["Europe/Warsaw"]))

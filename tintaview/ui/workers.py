@@ -110,7 +110,7 @@ class StatsWorker(_GuardedWorker):
 
 
 class NetInfoWorker(QtCore.QObject):
-    """Fetches the public IP + country (`core.netinfo`) for the usage panel's network
+    """Fetches the public IP + country/city (`core.netinfo`) for the usage panel's network
     line, emitting `None` on failure so the panel leaves its "Updating…" state either way.
 
     Deliberately not a `_GuardedWorker`: the request that matters is always the newest

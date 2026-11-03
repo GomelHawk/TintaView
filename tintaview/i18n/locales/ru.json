@@ -61,6 +61,7 @@
   "flyout.no_usage_data": "Нет данных о расходе.",
   "flyout.network.updating": "Обновление…",
   "flyout.network.unavailable": "IP-адрес недоступен",
+  "flyout.network.city_country": "{city}, {country}",
   "flyout.network.unknown_country": "Страна неизвестна",
 
   "settings.title": "Настройки TintaView",
@@ -92,7 +93,7 @@
   "settings.stats_trend": "Показывать скорость расхода лимитов",
   "settings.stats_trend.tooltip": "Добавляет строку с оценкой того, когда лимит закончится при темпе последнего часа-двух. Появляется, только пока расход растёт, и требует истории за несколько опросов.",
   "settings.network_info": "Показывать публичный IP-адрес и страну в панели использования",
-  "settings.network_info.tooltip": "При каждом открытии панели запрашивает у Cloudflare публичный IP-адрес этого компьютера и его страну и показывает их под часами.",
+  "settings.network_info.tooltip": "При каждом открытии панели запрашивает у ipinfo.io (или у Cloudflare, если ipinfo не отвечает) публичный IP-адрес этого компьютера, его страну и, если известен, город и показывает их под часами.",
   "settings.escalate": "Напоминать, пока я не отвечу",
   "settings.escalate.hint": "Повторяет звук и уведомление, пока вы не ответите.",
   "settings.escalate.after": "Напоминать каждые",

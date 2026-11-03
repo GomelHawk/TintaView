@@ -4,6 +4,15 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 1.0.0 — 2026-11-03
+
+- **The usage panel's network line now shows your city too**, when it can be worked out: for
+  example "PL Toruń, Poland" beside your IP address. The lookup now goes to ipinfo.io first; if
+  ipinfo doesn't answer, TintaView asks Cloudflare as before and shows the country only. The
+  city is estimated from your IP address, so on a mobile network or a VPN it may be a nearby
+  city or missing. Nothing to change: the line is still switched on with **Settings… →
+  General → Show public IP address and country in the usage panel**.
+
 ## 0.12.1 — 2026-11-01
 
 - **Cursor usage works again on Windows.** Recent Cursor versions encrypt the login they save

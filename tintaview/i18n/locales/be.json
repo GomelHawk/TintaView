@@ -61,6 +61,7 @@
   "flyout.no_usage_data": "Няма даных пра выдатак.",
   "flyout.network.updating": "Абнаўленне…",
   "flyout.network.unavailable": "IP-адрас недаступны",
+  "flyout.network.city_country": "{city}, {country}",
   "flyout.network.unknown_country": "Краіна невядомая",
 
   "settings.title": "Налады TintaView",
@@ -92,7 +93,7 @@
   "settings.stats_trend": "Паказваць хуткасць расходу лімітаў",
   "settings.stats_trend.tooltip": "Дадае радок з ацэнкай таго, калі ліміт скончыцца пры тэмпе апошняй гадзіны-дзвюх. З'яўляецца, толькі пакуль расход расце, і патрабуе гісторыі за некалькі апытанняў.",
   "settings.network_info": "Паказваць публічны IP-адрас і краіну ў панэлі выкарыстання",
-  "settings.network_info.tooltip": "Пры кожным адкрыцці панэлі запытвае ў Cloudflare публічны IP-адрас гэтага камп'ютара і яго краіну і паказвае іх пад гадзіннікамі.",
+  "settings.network_info.tooltip": "Пры кожным адкрыцці панэлі запытвае ў ipinfo.io (або ў Cloudflare, калі ipinfo не адказвае) публічны IP-адрас гэтага камп'ютара, яго краіну і, калі вядомы, горад і паказвае іх пад гадзіннікамі.",
   "settings.escalate": "Нагадваць, пакуль я не адкажу",
   "settings.escalate.hint": "Паўтарае гук і апавяшчэнне, пакуль вы не адкажаце.",
   "settings.escalate.after": "Нагадваць кожныя",

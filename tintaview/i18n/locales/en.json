@@ -60,6 +60,7 @@
   "flyout.no_usage_data": "No usage data.",
   "flyout.network.updating": "Updating…",
   "flyout.network.unavailable": "IP address unavailable",
+  "flyout.network.city_country": "{city}, {country}",
   "flyout.network.unknown_country": "Unknown country",
 
   "settings.title": "TintaView Settings",
@@ -91,7 +92,7 @@
   "settings.stats_trend": "Show burn rate for usage limits",
   "settings.stats_trend.tooltip": "Adds a line estimating when a limit will run out at the pace of the last hour or two. It appears only while usage is actually climbing, and needs a few polls of history first.",
   "settings.network_info": "Show public IP address and country in the usage panel",
-  "settings.network_info.tooltip": "Each time the panel opens, asks Cloudflare for this computer's public IP address and its country, and shows them under the clocks.",
+  "settings.network_info.tooltip": "Each time the panel opens, asks ipinfo.io (or Cloudflare, if ipinfo doesn't answer) for this computer's public IP address, its country and, when known, its city, and shows them under the clocks.",
   "settings.escalate": "Keep reminding me until I answer",
   "settings.escalate.hint": "Repeats the sound and the notification until you answer.",
   "settings.escalate.after": "Remind every",

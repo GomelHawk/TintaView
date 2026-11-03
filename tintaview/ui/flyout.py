@@ -123,7 +123,7 @@ CLOCK_SEP = QtGui.QColor(255, 255, 255, 26)
 
 # --------------------------------------------------------------------------- network line
 
-#: The public IP + country line (`ui.network_info`), under the clocks band. A fixed
+#: The public IP + location line (`ui.network_info`), under the clocks band. A fixed
 #: height whatever it shows — "Updating…", an address or "unavailable" — so the card
 #: never resizes under the cursor when the answer arrives.
 NET_LINE_H = 18.0
@@ -1074,7 +1074,7 @@ class Flyout(QtWidgets.QWidget):
                    QtCore.QPointF(band.right(), band.bottom()))
 
     def _paint_network(self, p: QtGui.QPainter, x: float, w: float) -> None:
-        """The network line: country-code badge and country name on the left, the
+        """The network line: country-code badge, city and country name on the left, the
         public IP on the right — or "Updating…" / "unavailable" in their place. Chrome,
         like the clocks band: a fixed strip, closed off by the same rule underneath."""
         if not self._cfg.ui.network_info:
@@ -1115,8 +1115,10 @@ class Flyout(QtWidgets.QWidget):
                 p.drawText(badge, Qt.AlignCenter, info.country)
                 name_x = badge.right() + NET_CODE_GAP
                 name = _country_name(info.country)
+                if info.city:
+                    name = t("flyout.network.city_country", city=info.city, country=name)
             else:
-                name = t("flyout.network.unknown_country")
+                name = info.city or t("flyout.network.unknown_country")
             name_w = max(0.0, x + left_w - name_x)
             p.setFont(label_font)
             p.setPen(TEXT)

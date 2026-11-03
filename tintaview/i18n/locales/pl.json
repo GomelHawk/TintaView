@@ -61,6 +61,7 @@
   "flyout.no_usage_data": "Brak danych o zużyciu.",
   "flyout.network.updating": "Aktualizowanie…",
   "flyout.network.unavailable": "Adres IP niedostępny",
+  "flyout.network.city_country": "{city}, {country}",
   "flyout.network.unknown_country": "Nieznany kraj",
 
   "settings.title": "Ustawienia TintaView",
@@ -92,7 +93,7 @@
   "settings.stats_trend": "Pokazuj tempo zużycia limitów",
   "settings.stats_trend.tooltip": "Dodaje wiersz szacujący, kiedy limit się wyczerpie w tempie z ostatniej godziny lub dwóch. Pojawia się tylko wtedy, gdy zużycie rośnie, i wymaga najpierw kilku odczytów historii.",
   "settings.network_info": "Pokazuj publiczny adres IP i kraj w panelu użycia",
-  "settings.network_info.tooltip": "Przy każdym otwarciu panelu pyta Cloudflare o publiczny adres IP tego komputera i jego kraj, i pokazuje je pod zegarami.",
+  "settings.network_info.tooltip": "Przy każdym otwarciu panelu pyta ipinfo.io (lub Cloudflare, jeśli ipinfo nie odpowiada) o publiczny adres IP tego komputera, jego kraj i, jeśli jest znane, miasto, i pokazuje je pod zegarami.",
   "settings.escalate": "Przypominaj, dopóki nie odpowiem",
   "settings.escalate.hint": "Powtarza dźwięk i powiadomienie, dopóki nie odpowiesz.",
   "settings.escalate.after": "Przypominaj co",
