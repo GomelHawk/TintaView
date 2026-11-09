@@ -15,6 +15,7 @@ from __future__ import annotations
 import http.server
 import os
 import signal
+import sys
 import threading
 
 import pytest
@@ -188,3 +189,17 @@ def test_restart_passes_the_config_through_so_quit_can_be_used(monkeypatch):
     cfg = Config()
     assert R.restart_if_running(cfg) is True
     assert seen == [(4242, cfg)]
+
+
+def test_the_relaunched_tray_does_not_keep_the_wizards_terminal(monkeypatch):
+    """The wizard runs in a terminal window the user then closes; a relaunched tray still
+    holding that pty would write to a dead terminal from then on."""
+    seen: dict = {}
+    monkeypatch.setattr(R.subprocess, "Popen", lambda argv, **kw: seen.update(kw))
+    assert R._launch() is True
+    if sys.platform == "win32":
+        assert seen["creationflags"] & 0x00000008
+    else:
+        assert seen["start_new_session"] is True
+        for stream in ("stdin", "stdout", "stderr"):
+            assert seen[stream] is R.subprocess.DEVNULL

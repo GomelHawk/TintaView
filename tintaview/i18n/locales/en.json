@@ -6,6 +6,7 @@
     "other": "{count} active sessions"
   },
 
+  "tray.menu.show_usage": "Show usage",
   "tray.menu.refresh_usage": "Refresh usage",
   "tray.menu.sound_on_confirm": "Sound on confirm",
   "tray.menu.sound_on_notify": "Sound on notification",
@@ -31,7 +32,7 @@
 
   "tray.no_system_tray": "No system tray available on this platform.",
   "tray.settings.open_failed": "Could not open Settings. Run `tintaview setup` in a terminal instead; see the log for details.",
-  "tray.wizard.terminal_hint": "Run this in a terminal to change settings:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Run this in a terminal to change settings:\n\n    {command}",
   "tray.wizard.open_failed": "Could not open the setup wizard. Run `tintaview setup` in a terminal instead; see the log for details.",
 
   "tray.update.balloon_body": "Version {latest} is available — you have {current}. Use \"Check for updates\" in the tray menu to install it.",

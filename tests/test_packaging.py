@@ -210,3 +210,53 @@ def test_install_sh_exits_zero_from_a_local_checkout(sh: str):
     """
     assert '[ -n "$WORKDIR" ] && rm -rf' not in sh
     assert 'if [ -n "$WORKDIR" ]; then' in sh
+
+
+def test_install_sh_requires_ensurepip_not_just_venv(sh: str):
+    """Debian/Ubuntu ship `ensurepip` in python3.X-venv; `-m venv --help` passes without it.
+
+    Checking only `venv` let `python3 -m venv` fail halfway on a stock Ubuntu and leave a
+    venv with no pip. The CI job `smoke-install-distro-python` runs the real thing.
+    """
+    assert "import venv, ensurepip" in sh
+    assert "apt install python$FIRST_VER-venv" in sh
+
+
+def test_both_installers_rebuild_a_venv_without_pip(sh: str, ps1: str):
+    """A venv is only reused when its pip works — a pip-less one is rebuilt, not inherited.
+
+    Reusing on "python3 exists" alone made every re-run of install.sh fail with
+    "No module named pip", even after the missing package was installed.
+    """
+    assert '"$VENV_PY" -m pip --version' in sh
+    assert '-m venv --clear "$VENV_DIR"' in sh
+    assert "& $VenvPython -m pip --version" in ps1
+
+
+def test_install_sh_does_everything_install_ps1_does(sh: str, ps1: str):
+    """Step-for-step parity (AGENTS.md, "Every supported OS gets everything").
+
+    Ubuntu users got none of these: no menu entry, no wizard, no running tray, and a
+    "Next: run 'tintaview setup'" that answered "command not found" because
+    ~/.local/bin was not on PATH yet.
+    """
+    # The applications entry: Start Menu <-> XDG .desktop <-> ~/Applications/*.app
+    assert "Get-StartMenuShortcutPath" in ps1
+    assert "$APPS_DIR/tintaview.desktop" in sh
+    assert '$HOME/Applications/$APP_NAME.app' in sh
+    # ...removed again on uninstall.
+    assert 'rm -f "$APP_DESKTOP_PATH"' in sh
+    # The wizard at the end, skippable the same way.
+    assert "TINTAVIEW_NO_WIZARD" in ps1 and "TINTAVIEW_NO_WIZARD" in sh
+    assert '"$LAUNCHER" setup </dev/tty' in sh
+    # The tray started at the end.
+    assert 'nohup "$LAUNCHER"' in sh
+    # Never a bare command the user's PATH may not have yet.
+    assert "Next: run 'tintaview setup'" not in sh
+    assert 'RUN_HINT="$LAUNCHER"' in sh
+
+
+def test_the_updater_never_runs_the_wizard():
+    """`-Silent` on Windows; TINTAVIEW_NO_WIZARD for install.sh."""
+    update_py = (REPO_ROOT / "tintaview" / "install" / "update.py").read_text(encoding="utf-8")
+    assert '"TINTAVIEW_NO_WIZARD": "1"' in update_py

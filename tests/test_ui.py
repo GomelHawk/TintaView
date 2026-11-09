@@ -3151,3 +3151,65 @@ def test_posix_shells_get_the_agents_text_untouched():
     value = 'grep "a" x.txt & echo hi'
 
     assert tray_mod._cmd_safe(value, windows=False) == value
+
+
+# --------------------------------------------------------------------------- every OS
+
+
+def test_the_menu_opens_the_usage_panel_on_every_desktop(tray):
+    """GNOME's AppIndicator opens the menu on every click, never `activated(Trigger)`, so
+    a left click alone left the usage panel unreachable on Ubuntu. The menu's first item
+    opens it, on every platform."""
+    app_instance, _ = tray
+    first = app_instance.tray.contextMenu().actions()[0]
+    assert first.text() == "Show usage"
+    try:
+        first.trigger()
+        assert app_instance.flyout.isVisible()
+    finally:
+        app_instance.flyout.hide()
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_the_setup_wizard_gets_a_terminal_window_on_every_platform(monkeypatch, platform):
+    """The tray has no terminal of its own (Start Menu, app menu, Launchpad, login), so
+    `Popen` of the text-mode wizard there was invisible on Linux/macOS: it read EOF, took
+    every default and finished by restarting — i.e. closing — the tray."""
+    monkeypatch.setattr(tray_mod.shutil, "which",
+                        lambda name: f"/usr/bin/{name}" if name == "gnome-terminal" else None)
+    command = ["/venv/bin/python", "-m", "tintaview", "setup"]
+    argv = tray_mod._terminal_argv(command, platform=platform)
+    assert argv is not None
+    if platform == "win32":
+        assert argv == command  # CREATE_NEW_CONSOLE at the call site
+    elif platform == "darwin":
+        assert argv[0] == "osascript"
+        assert 'tell application "Terminal" to do script' in argv[2]
+        assert "/venv/bin/python -m tintaview setup" in argv[2]
+    else:
+        assert argv[:2] == ["/usr/bin/gnome-terminal", "--"]
+        assert argv[-4:] == command
+
+
+def test_no_terminal_emulator_means_a_hint_with_the_full_command(monkeypatch):
+    monkeypatch.setattr(tray_mod.shutil, "which", lambda name: None)
+    assert tray_mod._terminal_argv(["python", "-m", "tintaview", "setup"],
+                                   platform="linux") is None
+    assert tray_mod._setup_hint(["/venv/bin/python", "-m", "tintaview"]) == (
+        "/venv/bin/python -m tintaview setup"
+    )
+
+
+def test_the_wizard_is_never_run_inside_the_tray_process(monkeypatch, qapp):
+    """Its last step restarts the running tray — this process — so in-process it
+    would end by quitting the app it was opened from."""
+    import tintaview.ui.wizard as wizard_mod
+
+    monkeypatch.setattr(wizard_mod, "run_wizard",
+                        lambda *a, **k: pytest.fail("ran the wizard in-process"))
+    launched: list[list[str]] = []
+    monkeypatch.setattr(tray_mod, "_terminal_argv", lambda command, platform=None: command)
+    monkeypatch.setattr(tray_mod.subprocess, "Popen",
+                        lambda argv, **kw: launched.append(argv))
+    tray_mod.run_console_setup()
+    assert launched and launched[0][-1] == "setup"

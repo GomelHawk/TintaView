@@ -170,6 +170,70 @@ jobs:
           test ! -d "$TV_PREFIX" || { echo "$TV_PREFIX survived the uninstall"; exit 1; }
           test -f "$TINTAVIEW_HOME/hook.env" || { echo "the uninstall took the config with it"; exit 1; }
 
+      # The desktop install a user actually gets (the steps above are --headless): the app
+      # has to land in the applications menu (Linux .desktop, macOS ~/Applications/*.app,
+      # the twins of install.ps1's Start Menu shortcut) and leave it again on uninstall.
+      - name: A desktop install adds TintaView to the applications menu
+        run: |
+          sh packaging/install.sh --prefix "$TV_PREFIX" --no-autostart --no-wizard
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ENTRY="$HOME/Applications/TintaView.app/Contents/MacOS/TintaView"
+          else
+            ENTRY="$HOME/.local/share/applications/tintaview.desktop"
+          fi
+          test -x "$ENTRY" || test -f "$ENTRY" || { echo "no applications entry at $ENTRY"; exit 1; }
+          "$TV_PREFIX/venv/bin/python" -I -c "import PySide6.QtWidgets"
+          curl -fsS http://127.0.0.1:8777/quit >/dev/null 2>&1 || true
+          sh packaging/install.sh --prefix "$TV_PREFIX" --uninstall
+          test ! -e "$ENTRY" || { echo "the uninstall left $ENTRY behind"; exit 1; }
+
+  # The jobs above use actions/setup-python, whose Python always has `ensurepip`. A
+  # Debian/Ubuntu *system* Python does not until `python3.X-venv` is installed, and
+  # install.sh used to fail halfway there, leave a pip-less venv behind and then reuse it
+  # on every later run ("No module named pip") even after the package went in. This job
+  # replays exactly that on the distro's own python3: the clear error first, then the
+  # repair of the broken venv once the package is installed.
+  smoke-install-distro-python:
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    timeout-minutes: 15
+    steps:
+      - name: System Python only, no python3-venv
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq python3 curl git ca-certificates
+          useradd -m tv
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Copy the checkout to an unprivileged user
+        run: |
+          cp -r "$GITHUB_WORKSPACE" /home/tv/src
+          chown -R tv /home/tv/src
+          su tv -c "git config --global --add safe.directory /home/tv/src"
+
+      - name: Leave a pip-less venv, as a failed earlier run did
+        run: |
+          su tv -c "mkdir -p ~/.local/share/tintaview && python3 -m venv ~/.local/share/tintaview/venv" || true
+          test -x /home/tv/.local/share/tintaview/venv/bin/python3
+
+      - name: Without python3-venv the installer names the package to install
+        run: |
+          if su tv -c "cd ~/src && sh packaging/install.sh --no-autostart --headless" 2> err.txt; then
+            echo "install.sh succeeded with no ensurepip"; exit 1
+          fi
+          cat err.txt
+          grep -q "apt install python3.12-venv" err.txt
+
+      - name: With python3-venv the broken venv is rebuilt and the install succeeds
+        run: |
+          apt-get install -y -qq python3.12-venv
+          su tv -c "cd ~/src && sh packaging/install.sh --no-autostart --headless"
+          su tv -c "~/.local/share/tintaview/venv/bin/python3 -m pip --version"
+          su tv -c "~/.local/share/tintaview/venv/bin/python3 -m tintaview --version"
+
   # The Windows twin. Its own job rather than a third matrix leg: every step is a
   # different shell, a different path layout and a different uninstall contract —
   # `install.ps1` removes only the venv it created, because on Windows the install prefix

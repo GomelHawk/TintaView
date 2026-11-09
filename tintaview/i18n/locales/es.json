@@ -6,6 +6,7 @@
     "other": "{count} sesiones activas"
   },
 
+  "tray.menu.show_usage": "Mostrar uso",
   "tray.menu.refresh_usage": "Actualizar el uso",
   "tray.menu.sound_on_confirm": "Sonido al pedir confirmación",
   "tray.menu.sound_on_notify": "Sonido al recibir una notificación",
@@ -31,7 +32,7 @@
 
   "tray.no_system_tray": "En esta plataforma no hay bandeja del sistema disponible.",
   "tray.settings.open_failed": "No se pudieron abrir los ajustes. Ejecuta `tintaview setup` en un terminal; consulta el registro para más detalles.",
-  "tray.wizard.terminal_hint": "Ejecuta esto en un terminal para cambiar los ajustes:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Ejecuta esto en un terminal para cambiar los ajustes:\n\n    {command}",
   "tray.wizard.open_failed": "No se pudo abrir el asistente de configuración. Ejecuta `tintaview setup` en un terminal; consulta el registro para más detalles.",
 
   "tray.update.balloon_body": "La versión {latest} ya está disponible — tienes la {current}. Usa «Buscar actualizaciones» en el menú de la bandeja para instalarla.",

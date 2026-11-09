@@ -25,6 +25,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -109,18 +111,6 @@ def _agent_label(key: str) -> str:
         return key.replace("_", " ").title() or key
 
 
-def _stdin_is_interactive() -> bool:
-    """Can this process actually prompt the user where they are looking?
-
-    False under `pythonw.exe` (no console at all) and when stdin is a pipe or closed.
-    Only a real terminal makes the in-process, text-mode wizard a sane thing to run.
-    """
-    try:
-        return bool(sys.stdin) and sys.stdin.isatty()
-    except (AttributeError, ValueError, OSError):
-        return False
-
-
 def _console_command() -> list[str] | None:
     """Argv prefix that runs TintaView under a *console* interpreter, or None.
 
@@ -140,46 +130,95 @@ def _console_command() -> list[str] | None:
     return [str(exe), "-m", "tintaview"]
 
 
+#: Terminal emulators tried on Linux, in order, each with the argv prefix that makes it run
+#: a command: the desktop defaults first (Ubuntu 25.10+ ships Ptyxis, earlier GNOME
+#: Terminal; KDE Konsole; XFCE; GNOME Console), then the Debian alternative, then xterm.
+_LINUX_TERMINALS: tuple[tuple[str, ...], ...] = (
+    ("ptyxis", "--"),
+    ("gnome-terminal", "--"),
+    ("konsole", "-e"),
+    ("xfce4-terminal", "-x"),
+    ("kgx", "--"),
+    ("x-terminal-emulator", "-e"),
+    ("xterm", "-e"),
+)
+
+#: Keeps the wizard's window open after it exits, so its last lines can be read.
+_HOLD_SCRIPT = '"$@"; printf "\\nPress Enter to close this window. "; read _'
+
+
+def _terminal_argv(command: list[str], platform: str | None = None) -> list[str] | None:
+    """Argv that runs `command` in a *new terminal window*, or None if none can be found.
+
+    Every platform gets one: Windows a new console (via `CREATE_NEW_CONSOLE` at the call
+    site, so `command` as is), macOS Terminal.app, Linux the first terminal emulator on
+    PATH. The tray is started from a menu or at login with no terminal of its own, so a
+    plain `Popen` of a text-mode program there is invisible and dies on its first prompt.
+    """
+    platform = platform or sys.platform
+    if platform == "win32":
+        return command
+    if platform == "darwin":
+        line = " ".join(shlex.quote(part) for part in command)
+        return [
+            "osascript",
+            "-e", f'tell application "Terminal" to do script {_applescript_str(line)}',
+            "-e", 'tell application "Terminal" to activate',
+        ]
+    held = ["sh", "-c", _HOLD_SCRIPT, "sh", *command]
+    for name, *flag in _LINUX_TERMINALS:
+        exe = shutil.which(name)
+        if exe:
+            return [exe, *flag, *held]
+    return None
+
+
+def _applescript_str(text: str) -> str:
+    """`text` as an AppleScript string literal."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def run_console_setup() -> None:
-    """Open the full setup wizard — in a console of its own, not in this process.
+    """Open the full setup wizard in a terminal window of its own — on every platform.
 
     The wizard is a deliberately text-mode `print`/`input` flow (see
-    `tintaview.ui.wizard`), and the tray runs windowed: at login it is launched by
-    `pythonw.exe`, which has no console at all. Calling `run_wizard()` in-process
-    therefore hits `input()` with no stdin, and the exception escapes the Qt slot and
-    takes the whole tray down — the menu item just made the app vanish. It would also
-    block the GUI thread for as long as the user took to answer.
-
-    So: run it from a terminal if this process has one (a dev run from a shell), and
-    otherwise spawn the *console* interpreter with a console of its own. Called by
-    `TrayApp._open_settings` once the settings dialog has closed asking for it — either
-    via its "Open Full Setup Wizard (Terminal)…" button or its "hooks aren't installed"
-    prompt (see `SettingsDialog.launch_wizard`).
+    `tintaview.ui.wizard`), and the tray runs windowed: started from the Start Menu, the
+    applications menu, Launchpad or at login, it has no terminal at all. It is never run
+    in-process, even from a tray that does have one: it would block the GUI thread for as
+    long as the user took to answer, and its last step restarts the running tray — this
+    very process. Called by `TrayApp._open_settings` once the settings dialog has closed
+    asking for it (see `SettingsDialog.launch_wizard`).
     """
     try:
-        if _stdin_is_interactive():
-            from tintaview.ui.wizard import run_wizard
-
-            run_wizard()
-            return
-
         command = _console_command()
-        if command is None:
+        argv = _terminal_argv([*command, "setup"]) if command is not None else None
+        if argv is None:
             QtWidgets.QMessageBox.information(
-                None, "TintaView", t("tray.wizard.terminal_hint"),
+                None, "TintaView",
+                t("tray.wizard.terminal_hint", command=_setup_hint(command)),
             )
             return
 
         kwargs: dict[str, object] = {}
         if sys.platform == "win32":
             # Without this the child inherits "no console" from pythonw.exe and dies
-            # on its first prompt exactly as the in-process call did.
+            # on its first prompt.
             kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-        subprocess.Popen([*command, "setup"], **kwargs)  # type: ignore[arg-type]
+        else:
+            kwargs["start_new_session"] = True
+            kwargs["stdin"] = subprocess.DEVNULL
+        subprocess.Popen(argv, **kwargs)  # type: ignore[arg-type]
     except Exception:
         # A failure to open the wizard must never kill the tray.
         log.exception("could not open the setup wizard")
         QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.wizard.open_failed"))
+
+
+def _setup_hint(command: list[str] | None) -> str:
+    """The exact command to type when no terminal could be opened for the user."""
+    if not command:
+        return "tintaview setup"
+    return " ".join(shlex.quote(part) for part in [*command, "setup"])
 
 
 class TrayApp(QtCore.QObject):
@@ -353,6 +392,12 @@ class TrayApp(QtCore.QObject):
         beyond the two sound check marks, which are re-synced from config either way.
         """
         menu = QtWidgets.QMenu()
+        # The usage panel's way in on every desktop. A left click on the icon opens it
+        # where the shell reports that click (Windows, KDE, X11 trays), but GNOME's
+        # AppIndicator opens this menu on *every* click, so without an item the panel
+        # could not be reached there at all.
+        menu.addAction(t("tray.menu.show_usage"), self._show_usage_panel)
+        menu.addSeparator()
         menu.addAction(t("tray.menu.refresh_usage"), self._stats_worker.fetch)
         sound_action = menu.addAction(t("tray.menu.sound_on_confirm"))
         sound_action.setCheckable(True)
@@ -1266,6 +1311,10 @@ class TrayApp(QtCore.QObject):
         # first), don't immediately reopen it — treat the click as "close".
         if time.monotonic() - self.flyout.hidden_at < CLICK_REOPEN_GUARD_S:
             return
+        self._show_usage_panel()
+
+    def _show_usage_panel(self) -> None:
+        """Open the usage panel — from a click on the icon or the menu's "Show usage"."""
         # Show cached data immediately; only re-fetch if it's stale.
         if self._usage_results:
             self.flyout.set_results(self._usage_results)

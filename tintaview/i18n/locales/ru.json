@@ -7,6 +7,7 @@
     "many": "{count} активных сессий"
   },
 
+  "tray.menu.show_usage": "Показать использование",
   "tray.menu.refresh_usage": "Обновить расход",
   "tray.menu.sound_on_confirm": "Звук при запросе подтверждения",
   "tray.menu.sound_on_notify": "Звук при уведомлении",
@@ -32,7 +33,7 @@
 
   "tray.no_system_tray": "На этой платформе системный трей недоступен.",
   "tray.settings.open_failed": "Не удалось открыть настройки. Запустите `tintaview setup` в терминале; подробности — в журнале.",
-  "tray.wizard.terminal_hint": "Чтобы изменить настройки, выполните в терминале:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Чтобы изменить настройки, выполните в терминале:\n\n    {command}",
   "tray.wizard.open_failed": "Не удалось открыть мастер настройки. Запустите `tintaview setup` в терминале; подробности — в журнале.",
 
   "tray.update.balloon_body": "Доступна версия {latest} — у вас {current}. Чтобы установить её, выберите «Проверить обновления» в меню трея.",

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -364,7 +365,10 @@ def _update_posix(version: str, assets: list[dict[str, Any]]) -> int:
     print(f"Running `{' '.join(argv[1:])}` — it is idempotent and upgrades TintaView in place.")
     print("Config and every agent's hook configuration are untouched by this — the hook path is stable.")
     try:
-        result = subprocess.run(argv, check=False)
+        # No wizard on an update, as `-Silent` on Windows: the config already exists, and
+        # an update started from the tray has no terminal to run it in.
+        env = {**os.environ, "TINTAVIEW_NO_WIZARD": "1"}
+        result = subprocess.run(argv, check=False, env=env)
     except OSError as exc:
         print(f"Could not run the install script: {exc}")
         return 1

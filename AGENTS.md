@@ -41,6 +41,18 @@ agent-made commit has to be unpicked before the work can be reviewed. This holds
 change is finished, tested and obviously correct, and even when a task description sounds like it
 implies a commit; if you think one is warranted, say so and leave it to the maintainer.
 
+**Every supported OS gets everything — Windows, Linux and macOS.** Whatever exists on one
+platform exists on all of them, unless it is inherently tied to one (the G HUB DLL, the
+`pythonw` sidecar, the WSL split). That covers the installers (`install.ps1` ↔ `install.sh`
+step for step: venv repair, menu shortcut / app entry, setup wizard at the end, starting the
+tray, a usable command afterwards), every `sys.platform` branch in the app (a `win32` branch
+with no Linux/macOS answer is a bug, not a gap to list), and the tests and CI jobs that run
+the real path on each OS. Implement and verify all platforms in the same change; never ship
+one and report the rest as "remaining gaps". This rule is written down because it was
+broken: Ubuntu users got a pip-less venv, no applications-menu entry, no wizard,
+`tintaview: command not found`, a Settings→wizard button that only worked on Windows and a
+usage panel GNOME could not open — and uninstalled.
+
 **Never add a feature that wasn't asked for.** Not a menu item, not a checkbox, not a config
 key, not a CLI flag — nothing that changes what the user sees or can switch on. If a change
 seems worth making, say so and stop; adding it is the maintainer's call, exactly like
@@ -986,6 +998,11 @@ Two traps both installers encode (the first is Windows-only):
   is additionally force-reinstalled with `--no-deps` — in `install.ps1` *and* `install.sh`. Without
   that, re-running the installer can't repair a damaged install, and a re-tagged release silently
   keeps the old code while reporting success.
+- An existing venv is reused only if `-m pip --version` works there, otherwise it is rebuilt. Debian/Ubuntu ship
+  `ensurepip` in a separate `python3.X-venv` package, so `install.sh` checks `import venv, ensurepip`
+  (`-m venv --help` passes without it). The old check left a pip-less venv behind, and every
+  later run reused it. `actions/setup-python` always has `ensurepip`, so the `smoke-install-*`
+  jobs could never see this: `smoke-install-distro-python` runs on Ubuntu's own `python3`.
 
 Both installers download the release **wheel** and verify its SHA-256 against the release's
 `SHA256SUMS.txt` before installing, failing closed on a missing or mismatched digest, and are

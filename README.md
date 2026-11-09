@@ -138,15 +138,22 @@ curl -fsSL https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/
 Or, from a local checkout:
 
 ```sh
-sh packaging/install.sh [--prefix DIR] [--no-autostart] [--headless] [--uninstall]
+sh packaging/install.sh [--prefix DIR] [--no-autostart] [--no-wizard] [--headless] [--uninstall]
 ```
 
 - `--prefix DIR` — install location (default `~/.local/share/tintaview`).
 - `--no-autostart` — skip wiring up a login autostart entry.
+- `--no-wizard` — don't launch the setup wizard afterwards.
 - `--headless` — skip the PySide6 tray dependency and register a headless (no-tray)
   autostart entry instead, for servers or WSL-only boxes with no desktop session.
-- `--uninstall` — remove the autostart entry and the install prefix. Your config and
+- `--uninstall` — remove the autostart entry, the applications-menu entry and the install
+  prefix. Your config and
   installed hooks under `~/.tintaview` are left alone on purpose.
+
+Like `install.ps1`, it adds TintaView to your applications menu (Linux) or to
+`~/Applications` (macOS), runs the setup wizard, and starts the tray. On Ubuntu with an
+X11 session the tray also needs `sudo apt install libxcb-cursor0`; the installer says so
+when it is missing.
 
 This script is also how you **update**: re-running it (with the same `--prefix`)
 reinstalls into the existing virtual environment in place — nothing is duplicated, and
@@ -158,8 +165,13 @@ your config and hooks are never touched.
 tintaview setup
 ```
 
-This is the wizard that actually configures anything — the installer only puts files on
-disk. Nothing lights up and no hooks are installed until you've run it.
+This is the wizard that actually configures anything. Both installers run it once at the
+end; run it again any time to change agents, lighting or hooks. Nothing lights up and no
+hooks are installed until it has run.
+
+**On Linux, `~/.local/bin` may not be on your PATH yet** right after the first install
+(Ubuntu adds it at login, only if it already existed). Until you log in again, use the full
+path the installer prints: `~/.local/bin/tintaview setup`.
 
 **On Windows, `tintaview` isn't on your PATH.** The installer keeps it inside its own folder, so
 type the full path wherever this README (or [Troubleshooting](docs/TROUBLESHOOTING.md)) says

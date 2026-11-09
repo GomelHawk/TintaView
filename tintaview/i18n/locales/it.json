@@ -6,6 +6,7 @@
     "other": "{count} sessioni attive"
   },
 
+  "tray.menu.show_usage": "Mostra utilizzo",
   "tray.menu.refresh_usage": "Aggiorna l'utilizzo",
   "tray.menu.sound_on_confirm": "Suono alla richiesta di conferma",
   "tray.menu.sound_on_notify": "Suono alla ricezione di una notifica",
@@ -31,7 +32,7 @@
 
   "tray.no_system_tray": "Su questa piattaforma non è disponibile alcuna area di notifica.",
   "tray.settings.open_failed": "Non è stato possibile aprire le impostazioni. Esegui `tintaview setup` in un terminale; per i dettagli consulta il log.",
-  "tray.wizard.terminal_hint": "Esegui questo comando in un terminale per cambiare le impostazioni:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Esegui questo comando in un terminale per cambiare le impostazioni:\n\n    {command}",
   "tray.wizard.open_failed": "Non è stato possibile aprire la procedura di configurazione. Esegui `tintaview setup` in un terminale; per i dettagli consulta il log.",
 
   "tray.update.balloon_body": "La versione {latest} è disponibile — la tua è la {current}. Usa «Cerca aggiornamenti» nel menu dell'area di notifica per installarla.",

@@ -7,6 +7,7 @@
     "many": "{count} активних сеансів"
   },
 
+  "tray.menu.show_usage": "Показати використання",
   "tray.menu.refresh_usage": "Оновити витрати",
   "tray.menu.sound_on_confirm": "Звук під час запиту підтвердження",
   "tray.menu.sound_on_notify": "Звук під час сповіщення",
@@ -32,7 +33,7 @@
 
   "tray.no_system_tray": "На цій платформі системний лоток недоступний.",
   "tray.settings.open_failed": "Не вдалося відкрити налаштування. Виконайте `tintaview setup` у терміналі; подробиці — у журналі.",
-  "tray.wizard.terminal_hint": "Щоб змінити налаштування, виконайте в терміналі:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Щоб змінити налаштування, виконайте в терміналі:\n\n    {command}",
   "tray.wizard.open_failed": "Не вдалося відкрити майстра налаштування. Виконайте `tintaview setup` у терміналі; подробиці — у журналі.",
 
   "tray.update.balloon_body": "Доступна версія {latest} — у вас {current}. Щоб установити її, виберіть «Перевірити оновлення» в меню лотка.",

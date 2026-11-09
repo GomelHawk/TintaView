@@ -186,7 +186,13 @@ def _launch() -> bool:
         # must not inherit its console window.
         kwargs["creationflags"] = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
+        # The POSIX twin of DETACHED_PROCESS: its own session *and* no inherited stdio.
+        # The wizard runs in a terminal window the user closes afterwards; a tray still
+        # holding that pty would be writing to a dead terminal (EIO) from then on.
         kwargs["start_new_session"] = True
+        kwargs["stdin"] = subprocess.DEVNULL
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
     try:
         subprocess.Popen(command, **kwargs)  # type: ignore[arg-type]
     except OSError as exc:

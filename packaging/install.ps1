@@ -533,11 +533,17 @@ function Invoke-Install {
             New-Item -ItemType Directory -Path $Prefix -Force | Out-Null
         }
 
+        $venvUsable = $false
         if (Test-Path -LiteralPath $VenvPython) {
+            & $VenvPython -m pip --version *> $null
+            $venvUsable = ($LASTEXITCODE -eq 0)
+        }
+        if ($venvUsable) {
             Write-Info "Reusing the existing virtual environment at $VenvDir"
         } else {
-            # A half-built venv (an interrupted previous run) has no usable python.exe and
-            # cannot be repaired by `venv` itself, so start it over rather than inherit it.
+            # A half-built venv (an interrupted previous run) has no usable python.exe or no
+            # pip and cannot be repaired by `venv` itself, so start it over rather than
+            # inherit it -- install.sh does the same.
             if (Test-Path -LiteralPath $VenvDir) {
                 Write-Warn "The virtual environment at $VenvDir is incomplete; recreating it."
                 Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue

@@ -7,6 +7,7 @@
     "many": "{count} aktywnych sesji"
   },
 
+  "tray.menu.show_usage": "Pokaż użycie",
   "tray.menu.refresh_usage": "Odśwież zużycie",
   "tray.menu.sound_on_confirm": "Dźwięk przy prośbie o potwierdzenie",
   "tray.menu.sound_on_notify": "Dźwięk przy powiadomieniu",
@@ -32,7 +33,7 @@
 
   "tray.no_system_tray": "Na tej platformie nie ma dostępnego zasobnika systemowego.",
   "tray.settings.open_failed": "Nie udało się otworzyć ustawień. Uruchom `tintaview setup` w terminalu; szczegóły znajdziesz w logu.",
-  "tray.wizard.terminal_hint": "Uruchom to w terminalu, aby zmienić ustawienia:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Uruchom to w terminalu, aby zmienić ustawienia:\n\n    {command}",
   "tray.wizard.open_failed": "Nie udało się otworzyć kreatora konfiguracji. Uruchom `tintaview setup` w terminalu; szczegóły znajdziesz w logu.",
 
   "tray.update.balloon_body": "Wersja {latest} jest już dostępna — masz {current}. Użyj „Sprawdź aktualizacje” w menu zasobnika, aby ją zainstalować.",

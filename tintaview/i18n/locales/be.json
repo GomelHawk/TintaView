@@ -7,6 +7,7 @@
     "many": "{count} актыўных сесій"
   },
 
+  "tray.menu.show_usage": "Паказаць выкарыстанне",
   "tray.menu.refresh_usage": "Абнавіць выдатак",
   "tray.menu.sound_on_confirm": "Гук пры запросе пацвярджэння",
   "tray.menu.sound_on_notify": "Гук пры паведамленні",
@@ -32,7 +33,7 @@
 
   "tray.no_system_tray": "На гэтай платформе сістэмны трэй недаступны.",
   "tray.settings.open_failed": "Не ўдалося адкрыць налады. Выканайце `tintaview setup` у тэрмінале; падрабязнасці — у журнале.",
-  "tray.wizard.terminal_hint": "Каб змяніць налады, выканайце ў тэрмінале:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Каб змяніць налады, выканайце ў тэрмінале:\n\n    {command}",
   "tray.wizard.open_failed": "Не ўдалося адкрыць чараўнік наладкі. Выканайце `tintaview setup` у тэрмінале; падрабязнасці — у журнале.",
 
   "tray.update.balloon_body": "Даступная версія {latest} — у вас {current}. Каб яе ўстанавіць, выберыце «Праверыць абнаўленні» ў меню трэя.",

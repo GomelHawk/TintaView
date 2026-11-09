@@ -45,10 +45,11 @@ die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 
 usage() {
     cat <<EOF
-Usage: install.sh [--prefix DIR] [--no-autostart] [--headless] [--uninstall]
+Usage: install.sh [--prefix DIR] [--no-autostart] [--no-wizard] [--headless] [--uninstall]
 
   --prefix DIR      Install location (default: $DEFAULT_PREFIX)
   --no-autostart    Do not register a login autostart entry
+  --no-wizard       Do not launch the setup wizard afterwards (env: TINTAVIEW_NO_WIZARD)
   --headless        Skip the PySide6 UI extra; register a headless autostart entry
   --uninstall       Remove the autostart entry and --prefix (config/hooks untouched)
 EOF
@@ -56,6 +57,8 @@ EOF
 
 PREFIX="$DEFAULT_PREFIX"
 AUTOSTART=1
+WIZARD=1
+[ -z "${TINTAVIEW_NO_WIZARD:-}" ] || WIZARD=0
 HEADLESS=0
 UNINSTALL=0
 
@@ -72,6 +75,10 @@ while [ $# -gt 0 ]; do
             ;;
         --no-autostart)
             AUTOSTART=0
+            shift
+            ;;
+        --no-wizard)
+            WIZARD=0
             shift
             ;;
         --headless)
@@ -100,6 +107,12 @@ HOOK_BIN_DIR="$TINTAVIEW_HOME_DIR/bin"
 HOOK_ENV_PATH="$TINTAVIEW_HOME_DIR/hook.env"
 SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
 SYSTEMD_UNIT_PATH="$SYSTEMD_UNIT_DIR/tintaview.service"
+# The applications-menu entry (Linux) -- the twin of install.ps1's Start Menu shortcut.
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+APP_DESKTOP_PATH="$APPS_DIR/tintaview.desktop"
+# ...and its macOS twin: a minimal app bundle in the per-user Applications folder, so
+# TintaView is in Launchpad/Spotlight. Created here, never signed, so no quarantine flag.
+MAC_APP_PATH="$HOME/Applications/$APP_NAME.app"
 
 # --------------------------------------------------------------------------- uninstall
 
@@ -109,7 +122,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
         systemctl --user disable --now tintaview.service >/dev/null 2>&1 || true
     fi
     if [ -x "$VENV_PY" ]; then
-        "$VENV_PY" -c "from tintaview.install import autostart; autostart.disable()" \
+        "$VENV_PY" -I -c "from tintaview.install import autostart; autostart.disable()" \
             >/dev/null 2>&1 || true
     fi
     rm -f "$SYSTEMD_UNIT_PATH"
@@ -120,6 +133,10 @@ if [ "$UNINSTALL" -eq 1 ]; then
 
     info "Removing launcher $LAUNCHER"
     rm -f "$LAUNCHER"
+    rm -f "$APP_DESKTOP_PATH"
+    if [ -f "$MAC_APP_PATH/Contents/MacOS/$APP_NAME" ]; then
+        rm -rf "$HOME/Applications/TintaView.app"
+    fi
 
     info "Removing $PREFIX"
     rm -rf "$PREFIX"
@@ -141,13 +158,30 @@ fi
 
 # --------------------------------------------------------------------------- python3
 
+# A usable interpreter needs `venv` AND `ensurepip`. Debian/Ubuntu ship ensurepip in a
+# separate python3.X-venv package, and `-m venv --help` passes without it -- so checking
+# only that let `python3 -m venv` fail halfway and leave a venv with no pip, which every
+# later run then reused ("No module named pip"). Prefer the newest Python that is
+# complete; remember the newest one found at all, to name its package if none is.
 PY=""
+FIRST_PY=""
 for candidate in python3.14 python3.13 python3.12 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
-        PY="$candidate"
-        break
+        [ -n "$FIRST_PY" ] || FIRST_PY="$candidate"
+        if "$candidate" -c 'import venv, ensurepip' >/dev/null 2>&1; then
+            PY="$candidate"
+            break
+        fi
     fi
 done
+
+if [ -z "$PY" ] && [ -n "$FIRST_PY" ]; then
+    FIRST_VER=$("$FIRST_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+    die "$FIRST_PY ($FIRST_VER) cannot create a virtual environment: its 'venv'/'ensurepip'
+modules are missing. On Debian/Ubuntu they are a separate package:
+  sudo apt install python$FIRST_VER-venv
+Then re-run this script."
+fi
 
 if [ -z "$PY" ]; then
     die "python3 was not found on PATH. Install it first, then re-run this script:
@@ -155,12 +189,6 @@ if [ -z "$PY" ]; then
   Fedora/RHEL:    sudo dnf install python3
   Arch:           sudo pacman -S python
   macOS:          brew install python3   (or: xcode-select --install)"
-fi
-
-if ! "$PY" -m venv --help >/dev/null 2>&1; then
-    die "$PY has no 'venv' module. On Debian/Ubuntu this is a separate package:
-  sudo apt install python3-venv
-Then re-run this script."
 fi
 
 PY_VERSION=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
@@ -339,12 +367,19 @@ fi
 
 # --------------------------------------------------------------------------- venv
 
-if [ -x "$VENV_PY" ]; then
+# A venv is reused only if its pip works. One left by an interrupted run, or by an older
+# install.sh that created it without ensurepip, has a python3 and no pip; `--clear` rebuilds
+# it in place (the venv directory is the installer's own, never user data).
+if [ -x "$VENV_PY" ] && "$VENV_PY" -m pip --version >/dev/null 2>&1; then
     info "Reusing existing virtual environment at $VENV_DIR"
 else
+    if [ -d "$VENV_DIR" ]; then
+        warn "The virtual environment at $VENV_DIR is incomplete (no pip); recreating it."
+    fi
     info "Creating a virtual environment at $VENV_DIR"
     mkdir -p "$PREFIX"
-    "$PY" -m venv "$VENV_DIR"
+    "$PY" -m venv --clear "$VENV_DIR" \
+        || die "Could not create a virtual environment at $VENV_DIR with $PY."
 fi
 
 info "Upgrading pip inside the virtual environment"
@@ -394,7 +429,7 @@ esac
 # --------------------------------------------------------------------------- hook
 
 info "Installing the hook script to $HOOK_BIN_DIR"
-HOOK_SRC=$("$VENV_PY" -c \
+HOOK_SRC=$("$VENV_PY" -I -c \
     "import pathlib, tintaview; print(pathlib.Path(tintaview.__file__).resolve().parent / 'hooks' / 'tv-hook.sh')")
 if [ ! -f "$HOOK_SRC" ]; then
     die "tv-hook.sh was not found inside the installed package at $HOOK_SRC — the install is broken."
@@ -448,14 +483,111 @@ EOF
     fi
 else
     info "Registering autostart"
-    if "$VENV_PY" -c "from tintaview.install import autostart; import sys; sys.exit(0 if autostart.enable() else 1)"; then
+    if "$VENV_PY" -I -c "from tintaview.install import autostart; import sys; sys.exit(0 if autostart.enable() else 1)"; then
         info "Autostart registered"
     else
         warn "Autostart could not be fully configured automatically; run 'tintaview doctor' after setup to check it."
     fi
 fi
 
+# --------------------------------------------------------------------------- app menu
+
+# A headless box has no menu to add to.
+if [ "$(uname -s)" = "Darwin" ] && [ "$HEADLESS" -eq 0 ]; then
+    mkdir -p "$MAC_APP_PATH/Contents/MacOS"
+    cat >"$MAC_APP_PATH/Contents/MacOS/$APP_NAME" <<EOF
+#!/bin/sh
+exec "$LAUNCHER" "\$@"
+EOF
+    chmod +x "$MAC_APP_PATH/Contents/MacOS/$APP_NAME"
+    # LSUIElement: a menu-bar app, no Dock icon -- the same as the tray it starts.
+    cat >"$MAC_APP_PATH/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>$APP_NAME</string>
+  <key>CFBundleIdentifier</key><string>io.github.gomelhawk.tintaview</string>
+  <key>CFBundleExecutable</key><string>$APP_NAME</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+EOF
+    info "Added $APP_NAME to Applications ($MAC_APP_PATH)"
+fi
+
+if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ]; then
+    ICON_PATH=$("$VENV_PY" -I -c \
+        "import pathlib, tintaview; print(pathlib.Path(tintaview.__file__).resolve().parent / 'assets' / 'generated' / 'logo_full.png')")
+    mkdir -p "$APPS_DIR"
+    cat >"$APP_DESKTOP_PATH" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$APP_NAME
+Comment=AI coding agent status and usage in the tray
+Exec=$LAUNCHER
+Icon=$ICON_PATH
+Terminal=false
+Categories=Utility;Development;
+EOF
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
+    fi
+    info "Added $APP_NAME to the applications menu ($APP_DESKTOP_PATH)"
+fi
+
+# Qt 6.5+ cannot load its X11 platform plugin without libxcb-cursor0, which a stock Ubuntu
+# desktop does not install -- the tray then aborts at start on any X11 session (common in
+# VMs). Measured: "xcb-cursor0 or libxcb-cursor0 is needed to load the Qt xcb platform plugin".
+# ldconfig is in /sbin, which is not on every user's PATH.
+LDCONFIG=$(command -v ldconfig 2>/dev/null || echo /sbin/ldconfig)
+if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ] && [ -x "$LDCONFIG" ] \
+        && ! "$LDCONFIG" -p 2>/dev/null | grep -q 'libxcb-cursor\.so\.0'; then
+    warn "libxcb-cursor0 is missing; the tray cannot start on an X11 session without it.
+  Debian/Ubuntu:  sudo apt install libxcb-cursor0
+  Fedora:         sudo dnf install xcb-util-cursor
+  Arch:           sudo pacman -S xcb-util-cursor"
+fi
+
+# --------------------------------------------------------------------------- wizard
+
+# The same step install.ps1 runs. `curl ... | sh` makes stdin the script itself, so the
+# wizard reads the terminal through /dev/tty; with none (CI, `tintaview update` from the
+# tray) it is skipped and the closing message says how to run it. The full launcher path,
+# never a bare `tintaview`: ~/.local/bin is only on PATH if it existed at login, which on a
+# first install it did not -- "tintaview: command not found" right after installing.
+if [ "$WIZARD" -eq 0 ]; then
+    info "Skipping the setup wizard (--no-wizard)"
+elif ( : </dev/tty ) 2>/dev/null; then
+    info "Launching the setup wizard"
+    "$LAUNCHER" setup </dev/tty \
+        || warn "The setup wizard exited with an error. Re-run it any time with: $LAUNCHER setup"
+else
+    info "No terminal to run the setup wizard in; run it yourself with: $LAUNCHER setup"
+fi
+
+# --------------------------------------------------------------------------- start
+
+# Autostart only fires at the next login, so without this the install ends with no tray
+# icon at all -- which reads exactly like a broken install (install.ps1 does the same).
+# macOS always has a GUI session to start into; Linux only with a display.
+if [ "$HEADLESS" -eq 0 ] && { [ "$(uname -s)" = "Darwin" ] || [ -n "${DISPLAY:-}" ] \
+        || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+    if curl -fsS -m 1 http://127.0.0.1:8777/healthz >/dev/null 2>&1; then
+        info "$APP_NAME is already running"
+    else
+        info "Starting $APP_NAME"
+        nohup "$LAUNCHER" >/dev/null 2>&1 &
+    fi
+fi
+
 # --------------------------------------------------------------------------- done
+
+case ":$PATH:" in
+    *":$BIN_DIR:"*) RUN_HINT="tintaview" ;;
+    *) RUN_HINT="$LAUNCHER" ;;
+esac
 
 cat <<EOF
 
@@ -464,5 +596,5 @@ Launcher:  $LAUNCHER
 Hook:      $HOOK_BIN_DIR/tv-hook.sh
 Config:    $TINTAVIEW_HOME_DIR/config.toml (written by 'tintaview setup')
 
-Next: run 'tintaview setup' to choose your agents, lighting engine and install the hooks.
+Change agents, lighting engine or hooks any time with:  $RUN_HINT setup
 EOF

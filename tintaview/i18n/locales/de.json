@@ -6,6 +6,7 @@
     "other": "{count} aktive Sitzungen"
   },
 
+  "tray.menu.show_usage": "Nutzung anzeigen",
   "tray.menu.refresh_usage": "Verbrauch aktualisieren",
   "tray.menu.sound_on_confirm": "Ton bei Bestätigungsanfrage",
   "tray.menu.sound_on_notify": "Ton bei Benachrichtigung",
@@ -32,7 +33,7 @@
 
   "tray.no_system_tray": "Auf dieser Plattform ist kein Infobereich verfügbar.",
   "tray.settings.open_failed": "Die Einstellungen konnten nicht geöffnet werden. Führe `tintaview setup` in einem Terminal aus; Details stehen im Log.",
-  "tray.wizard.terminal_hint": "Führe das in einem Terminal aus, um die Einstellungen zu ändern:\n\n    tintaview setup",
+  "tray.wizard.terminal_hint": "Führe das in einem Terminal aus, um die Einstellungen zu ändern:\n\n    {command}",
   "tray.wizard.open_failed": "Der Einrichtungsassistent konnte nicht geöffnet werden. Führe `tintaview setup` in einem Terminal aus; Details stehen im Log.",
 
   "tray.update.balloon_body": "Version {latest} ist verfügbar – du hast {current}. Über „Nach Updates suchen“ im Infobereich-Menü lässt sie sich installieren.",
