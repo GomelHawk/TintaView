@@ -173,7 +173,17 @@ jobs:
       # The desktop install a user actually gets (the steps above are --headless): the app
       # has to land in the applications menu (Linux .desktop, macOS ~/Applications/*.app,
       # the twins of install.ps1's Start Menu shortcut) and leave it again on uninstall.
+      # What any Ubuntu desktop already has and a bare runner does not -- the same list
+      # the test job installs. Without it the PySide6 import below fails on libEGL.so.1.
+      - name: Qt's system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
       - name: A desktop install adds TintaView to the applications menu
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           sh packaging/install.sh --prefix "$TV_PREFIX" --no-autostart --no-wizard
           if [ "$RUNNER_OS" = "macOS" ]; then
