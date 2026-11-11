@@ -228,10 +228,6 @@ jobs:
     steps:
       - name: System Python only, no python3-venv
         run: |
-          # The Azure mirror GitHub's own Ubuntu images use, reachable from inside its
-          # network; the image's default archive.ubuntu.com did not resolve in one run.
-          sed -i 's#http://archive.ubuntu.com#http://azure.archive.ubuntu.com#; s#http://security.ubuntu.com#http://azure.archive.ubuntu.com#' \
-              /etc/apt/sources.list.d/ubuntu.sources
           # `apt-get update` only *warns* when the mirror can't be reached (exit 0) and the
           # install then fails with "Unable to locate package": retry the pair, not just a
           # download. Seen 2026-11-11: "Could not resolve 'archive.ubuntu.com'" in one run.
