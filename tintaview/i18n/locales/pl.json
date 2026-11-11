@@ -7,7 +7,6 @@
     "many": "{count} aktywnych sesji"
   },
 
-  "tray.menu.show_usage": "Pokaż użycie",
   "tray.menu.refresh_usage": "Odśwież zużycie",
   "tray.menu.sound_on_confirm": "Dźwięk przy prośbie o potwierdzenie",
   "tray.menu.sound_on_notify": "Dźwięk przy powiadomieniu",

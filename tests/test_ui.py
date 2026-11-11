@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import types
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -3156,20 +3157,6 @@ def test_posix_shells_get_the_agents_text_untouched():
 # --------------------------------------------------------------------------- every OS
 
 
-def test_the_menu_opens_the_usage_panel_on_every_desktop(tray):
-    """GNOME's AppIndicator opens the menu on every click, never `activated(Trigger)`, so
-    a left click alone left the usage panel unreachable on Ubuntu. The menu's first item
-    opens it, on every platform."""
-    app_instance, _ = tray
-    first = app_instance.tray.contextMenu().actions()[0]
-    assert first.text() == "Show usage"
-    try:
-        first.trigger()
-        assert app_instance.flyout.isVisible()
-    finally:
-        app_instance.flyout.hide()
-
-
 @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_the_setup_wizard_gets_a_terminal_window_on_every_platform(monkeypatch, platform):
     """The tray has no terminal of its own (Start Menu, app menu, Launchpad, login), so
@@ -3213,3 +3200,96 @@ def test_the_wizard_is_never_run_inside_the_tray_process(monkeypatch, qapp):
                         lambda argv, **kw: launched.append(argv))
     tray_mod.run_console_setup()
     assert launched and launched[0][-1] == "setup"
+
+
+# --------------------------------------------------------------------------- GNOME tray
+
+
+_GNOME_ENV = {"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}
+
+
+class _Probe:
+    """Stands in for `subprocess.run` of the X11 tray probe."""
+
+    def __init__(self, stdout: str = "1", returncode: int = 0) -> None:
+        self.stdout, self.returncode, self.calls = stdout, returncode, []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        return types.SimpleNamespace(returncode=self.returncode, stdout=self.stdout, stderr="")
+
+
+@pytest.fixture
+def gnome(monkeypatch):
+    monkeypatch.setattr(tray_mod.sys, "platform", "linux")
+    monkeypatch.setattr(tray_mod, "_gnome_legacy_tray_enabled", lambda: True)
+    probe = _Probe()
+    monkeypatch.setattr(tray_mod.subprocess, "run", probe)
+    return probe
+
+
+def test_gnome_gets_an_x11_tray_icon_so_left_click_reaches_the_app(gnome):
+    """GNOME's AppIndicator opens a D-Bus icon's menu on left click; an X11 icon gets the
+    click itself — the same left-click-opens-the-panel as Windows."""
+    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is True
+    argv, kwargs = gnome.calls[0]
+    # The probe runs Qt on X11 with no session bus, in a child (Qt aborts on a bad plugin).
+    assert kwargs["env"]["QT_QPA_PLATFORM"] == "xcb"
+    assert kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"] == tray_mod._NO_SESSION_BUS
+
+
+@pytest.mark.parametrize("env", [
+    {"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "KDE"},           # KDE already sends the click
+    {"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"},                    # no X server to start on
+    {**_GNOME_ENV, "QT_QPA_PLATFORM": "wayland"},               # someone chose a platform
+])
+def test_everything_else_keeps_the_tray_it_had(gnome, env):
+    assert tray_mod._use_legacy_tray(env) is False
+    assert gnome.calls == []
+
+
+def test_a_failed_probe_keeps_the_d_bus_icon(gnome):
+    """No libxcb-*, or no panel taking X11 icons: never a tray with no icon at all."""
+    gnome.stdout = "0"
+    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is False
+
+
+def test_legacy_tray_switched_off_in_the_extension_keeps_the_d_bus_icon(gnome, monkeypatch):
+    monkeypatch.setattr(tray_mod, "_gnome_legacy_tray_enabled", lambda: False)
+    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is False
+
+
+def test_not_linux_never_switches(gnome, monkeypatch):
+    monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is False
+
+
+def test_run_tray_gives_children_the_real_environment_back(monkeypatch):
+    """Qt reads both variables once, at startup. Left in place, the keep-awake inhibitor
+    and notify commands would have no session bus, and the tray the wizard relaunches
+    would inherit QT_QPA_PLATFORM and skip the X11 icon."""
+    seen: dict = {}
+
+    class _App:
+        def __init__(self, argv):
+            seen["platform"] = os.environ.get("QT_QPA_PLATFORM")
+            seen["bus"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+
+        def setQuitOnLastWindowClosed(self, value):
+            pass
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(tray_mod, "_use_legacy_tray", lambda: True)
+    monkeypatch.setattr(tray_mod.QtWidgets, "QApplication", _App)
+    monkeypatch.setattr(tray_mod.QtWidgets.QSystemTrayIcon, "isSystemTrayAvailable",
+                        staticmethod(lambda: True))
+    monkeypatch.setattr(tray_mod, "TrayApp", lambda *a: None)
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+
+    assert tray_mod.run_tray(Config(), object()) == 0
+    assert seen == {"platform": "xcb", "bus": tray_mod._NO_SESSION_BUS}
+    assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    assert "QT_QPA_PLATFORM" not in os.environ

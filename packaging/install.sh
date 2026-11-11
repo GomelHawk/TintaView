@@ -561,17 +561,31 @@ EOF
     info "Added $APP_NAME to the applications menu ($APP_DESKTOP_PATH)"
 fi
 
-# Qt 6.5+ cannot load its X11 platform plugin without libxcb-cursor0, which a stock Ubuntu
-# desktop does not install -- the tray then aborts at start on any X11 session (common in
-# VMs). Measured: "xcb-cursor0 or libxcb-cursor0 is needed to load the Qt xcb platform plugin".
+# Qt's X11 platform plugin needs these libraries (measured: `ldd` on PySide6's libqxcb.so
+# and libQt6XcbQpa.so.6), and a stock Ubuntu desktop does not ship all of them. Without
+# them the tray cannot start on an X11 session, and on GNOME it cannot use the X11 tray
+# icon that lets a left click open the usage panel (ui/tray.py, `_use_legacy_tray`) -- it
+# then falls back to the D-Bus icon, whose left click GNOME turns into the menu.
 # ldconfig is in /sbin, which is not on every user's PATH.
 LDCONFIG=$(command -v ldconfig 2>/dev/null || echo /sbin/ldconfig)
-if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ] && [ -x "$LDCONFIG" ] \
-        && ! "$LDCONFIG" -p 2>/dev/null | grep -q 'libxcb-cursor\.so\.0'; then
-    warn "libxcb-cursor0 is missing; the tray cannot start on an X11 session without it.
-  Debian/Ubuntu:  sudo apt install libxcb-cursor0
-  Fedora:         sudo dnf install xcb-util-cursor
-  Arch:           sudo pacman -S xcb-util-cursor"
+if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ] && [ -x "$LDCONFIG" ]; then
+    LIBS_KNOWN=$("$LDCONFIG" -p 2>/dev/null || true)
+    MISSING_PKGS=""
+    for pair in libxcb-cursor.so.0:libxcb-cursor0 libxcb-icccm.so.4:libxcb-icccm4 \
+            libxcb-image.so.0:libxcb-image0 libxcb-keysyms.so.1:libxcb-keysyms1 \
+            libxcb-render-util.so.0:libxcb-render-util0 libxcb-xkb.so.1:libxcb-xkb1 \
+            libxkbcommon-x11.so.0:libxkbcommon-x11-0; do
+        case "$LIBS_KNOWN" in
+            *"${pair%%:*} "*) ;;
+            *) MISSING_PKGS="$MISSING_PKGS ${pair#*:}" ;;
+        esac
+    done
+    if [ -n "$MISSING_PKGS" ]; then
+        warn "Qt's X11 libraries are missing:$MISSING_PKGS
+  Without them a left click on the tray icon cannot open the usage panel on GNOME,
+  and the tray cannot start at all on an X11 session. Install them, then re-run this:
+  Debian/Ubuntu:  sudo apt install$MISSING_PKGS"
+    fi
 fi
 
 # --------------------------------------------------------------------------- wizard

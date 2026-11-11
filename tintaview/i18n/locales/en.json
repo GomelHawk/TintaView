@@ -6,7 +6,6 @@
     "other": "{count} active sessions"
   },
 
-  "tray.menu.show_usage": "Show usage",
   "tray.menu.refresh_usage": "Refresh usage",
   "tray.menu.sound_on_confirm": "Sound on confirm",
   "tray.menu.sound_on_notify": "Sound on notification",

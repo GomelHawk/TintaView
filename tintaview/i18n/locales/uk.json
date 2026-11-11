@@ -7,7 +7,6 @@
     "many": "{count} активних сеансів"
   },
 
-  "tray.menu.show_usage": "Показати використання",
   "tray.menu.refresh_usage": "Оновити витрати",
   "tray.menu.sound_on_confirm": "Звук під час запиту підтвердження",
   "tray.menu.sound_on_notify": "Звук під час сповіщення",

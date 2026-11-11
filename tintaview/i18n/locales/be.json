@@ -7,7 +7,6 @@
     "many": "{count} актыўных сесій"
   },
 
-  "tray.menu.show_usage": "Паказаць выкарыстанне",
   "tray.menu.refresh_usage": "Абнавіць выдатак",
   "tray.menu.sound_on_confirm": "Гук пры запросе пацвярджэння",
   "tray.menu.sound_on_notify": "Гук пры паведамленні",

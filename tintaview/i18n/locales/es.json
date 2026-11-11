@@ -6,7 +6,6 @@
     "other": "{count} sesiones activas"
   },
 
-  "tray.menu.show_usage": "Mostrar uso",
   "tray.menu.refresh_usage": "Actualizar el uso",
   "tray.menu.sound_on_confirm": "Sonido al pedir confirmación",
   "tray.menu.sound_on_notify": "Sonido al recibir una notificación",

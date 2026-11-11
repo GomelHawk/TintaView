@@ -7,7 +7,6 @@
     "many": "{count} активных сессий"
   },
 
-  "tray.menu.show_usage": "Показать использование",
   "tray.menu.refresh_usage": "Обновить расход",
   "tray.menu.sound_on_confirm": "Звук при запросе подтверждения",
   "tray.menu.sound_on_notify": "Звук при уведомлении",
