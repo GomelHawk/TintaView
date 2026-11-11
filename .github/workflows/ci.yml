@@ -83,8 +83,8 @@ jobs:
       - name: Install Qt runtime dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
 
       - name: Install TintaView (dev + ui extras)
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,ui]"
@@ -178,8 +178,8 @@ jobs:
       - name: Qt's system libraries (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
 
       - name: A desktop install adds TintaView to the applications menu
         env:
@@ -210,8 +210,8 @@ jobs:
     steps:
       - name: System Python only, no python3-venv
         run: |
-          apt-get update -qq
-          apt-get install -y -qq python3 curl git ca-certificates
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update -qq
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y -qq python3 curl git ca-certificates
           useradd -m tv
 
       - uses: actions/checkout@v7
@@ -239,7 +239,7 @@ jobs:
 
       - name: With python3-venv the broken venv is rebuilt and the install succeeds
         run: |
-          apt-get install -y -qq python3.12-venv
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y -qq python3.12-venv
           su tv -c "cd ~/src && sh packaging/install.sh --no-autostart --headless"
           su tv -c "~/.local/share/tintaview/venv/bin/python3 -m pip --version"
           su tv -c "~/.local/share/tintaview/venv/bin/python3 -m tintaview --version"
