@@ -492,9 +492,28 @@ fi
 
 # --------------------------------------------------------------------------- app menu
 
+# The square brand mark -- the tray's own icon -- rendered by the installed app, never the
+# wide wordmark asset, which the app grid squeezes onto a black square. It lives
+# in $PREFIX, so --uninstall removes it with everything else.
+APP_ICON_PNG="$PREFIX/tintaview.png"
+render_app_icon() {
+    QT_QPA_PLATFORM=offscreen "$VENV_PY" -I -c "
+import sys
+from pathlib import Path
+from PySide6.QtGui import QGuiApplication
+app = QGuiApplication([])
+from tintaview.ui.icons import write_brand_png
+sys.exit(0 if write_brand_png(Path(sys.argv[1]), 256) else 1)
+" "$APP_ICON_PNG" >/dev/null 2>&1
+}
+
 # A headless box has no menu to add to.
 if [ "$(uname -s)" = "Darwin" ] && [ "$HEADLESS" -eq 0 ]; then
-    mkdir -p "$MAC_APP_PATH/Contents/MacOS"
+    mkdir -p "$MAC_APP_PATH/Contents/MacOS" "$MAC_APP_PATH/Contents/Resources"
+    if render_app_icon && command -v sips >/dev/null 2>&1; then
+        sips -s format icns "$APP_ICON_PNG" --out "$MAC_APP_PATH/Contents/Resources/AppIcon.icns" \
+            >/dev/null 2>&1 || warn "Could not convert the app icon; Launchpad will show a generic one."
+    fi
     cat >"$MAC_APP_PATH/Contents/MacOS/$APP_NAME" <<EOF
 #!/bin/sh
 exec "$LAUNCHER" "\$@"
@@ -510,6 +529,7 @@ EOF
   <key>CFBundleIdentifier</key><string>io.github.gomelhawk.tintaview</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
 </dict>
 </plist>
@@ -518,8 +538,12 @@ EOF
 fi
 
 if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ]; then
-    ICON_PATH=$("$VENV_PY" -I -c \
-        "import pathlib, tintaview; print(pathlib.Path(tintaview.__file__).resolve().parent / 'assets' / 'generated' / 'logo_full.png')")
+    if render_app_icon; then
+        ICON_PATH="$APP_ICON_PNG"
+    else
+        warn "Could not render the app icon; the applications menu will show a generic one."
+        ICON_PATH="application-x-executable"
+    fi
     mkdir -p "$APPS_DIR"
     cat >"$APP_DESKTOP_PATH" <<EOF
 [Desktop Entry]

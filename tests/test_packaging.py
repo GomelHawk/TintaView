@@ -260,3 +260,12 @@ def test_the_updater_never_runs_the_wizard():
     """`-Silent` on Windows; TINTAVIEW_NO_WIZARD for install.sh."""
     update_py = (REPO_ROOT / "tintaview" / "install" / "update.py").read_text(encoding="utf-8")
     assert '"TINTAVIEW_NO_WIZARD": "1"' in update_py
+
+
+def test_the_app_menu_icon_is_the_square_mark_not_the_wordmark(sh: str):
+    """logo_full.png is a 1024x484 wordmark; GNOME's app grid squeezed it onto a black
+    square. Both menu entries use the brand mark the tray draws, rendered at install."""
+    assert "logo_full.png" not in sh
+    assert "write_brand_png" in sh
+    assert 'ICON_PATH="$APP_ICON_PNG"' in sh
+    assert "CFBundleIconFile" in sh
