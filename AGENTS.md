@@ -1003,6 +1003,16 @@ Two traps both installers encode (the first is Windows-only):
   (`-m venv --help` passes without it). The old check left a pip-less venv behind, and every
   later run reused it. `actions/setup-python` always has `ensurepip`, so the `smoke-install-*`
   jobs could never see this: `smoke-install-distro-python` runs on Ubuntu's own `python3`.
+- **A reinstall restarts the tray, in the desktop session.** `install.sh` stops the running
+  instance (as `install.ps1`'s `Stop-RunningApp` does) and starts the new one; left alone,
+  the old code stayed on screen and every fix looked like it did nothing. Installs often run
+  over SSH or a tty with no DISPLAY (a VM console that can't paste), so the start — and the
+  wizard's `restart._launch` — go through `systemctl --user restart tintaview.service` when
+  the autostart unit exists and `graphical-session.target` is active; a tray `Popen`ed from
+  such a shell dies at once.
+- **The Linux menu icon is a named theme icon** (`~/.local/share/icons/hicolor/256x256/apps/
+  tintaview.png`, `Icon=tintaview`). With a file path in `Icon=`, GNOME Shell kept showing its
+  cached picture after the path changed — measured on the maintainer's Ubuntu VM.
 
 Both installers download the release **wheel** and verify its SHA-256 against the release's
 `SHA256SUMS.txt` before installing, failing closed on a missing or mismatched digest, and are

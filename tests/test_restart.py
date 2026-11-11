@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 import threading
+import types
 
 import pytest
 
@@ -195,6 +196,7 @@ def test_the_relaunched_tray_does_not_keep_the_wizards_terminal(monkeypatch):
     """The wizard runs in a terminal window the user then closes; a relaunched tray still
     holding that pty would write to a dead terminal from then on."""
     seen: dict = {}
+    monkeypatch.setattr(R, "_launch_in_desktop_session", lambda: False)
     monkeypatch.setattr(R.subprocess, "Popen", lambda argv, **kw: seen.update(kw))
     assert R._launch() is True
     if sys.platform == "win32":
@@ -203,3 +205,57 @@ def test_the_relaunched_tray_does_not_keep_the_wizards_terminal(monkeypatch):
         assert seen["start_new_session"] is True
         for stream in ("stdin", "stdout", "stderr"):
             assert seen[stream] is R.subprocess.DEVNULL
+
+
+class _Systemctl:
+    """Records `systemctl` calls; `session` is whether graphical-session.target is up."""
+
+    def __init__(self, session: bool = True) -> None:
+        self.session, self.calls = session, []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv[1:])
+        ok = self.session if "is-active" in argv else True
+        return types.SimpleNamespace(returncode=0 if ok else 3)
+
+
+@pytest.fixture
+def linux_unit(monkeypatch, tmp_path):
+    from tintaview.install import autostart
+
+    unit = tmp_path / "tintaview.service"
+    unit.write_text("[Unit]\n")
+    monkeypatch.setattr(R.sys, "platform", "linux")
+    monkeypatch.setattr(autostart, "_linux_service_path", lambda: unit)
+    monkeypatch.setattr(R.shutil, "which", lambda name: "/usr/bin/systemctl")
+    fake = _Systemctl()
+    monkeypatch.setattr(R.subprocess, "run", fake)
+    monkeypatch.setattr(R.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("Popen from a shell with no desktop"))
+    return fake, unit
+
+
+def test_the_wizard_over_ssh_restarts_the_tray_in_the_desktop_session(linux_unit):
+    """A tray Popen'ed from SSH/a tty has no DISPLAY and dies: the wizard's restart turned
+    into closing the tray. The login's own systemd --user unit runs in the session."""
+    fake, _ = linux_unit
+    assert R._launch() is True
+    assert ["--user", "restart", "tintaview.service"] in fake.calls
+
+
+def test_no_graphical_session_falls_back_to_a_plain_launch(linux_unit, monkeypatch):
+    fake, _ = linux_unit
+    fake.session = False
+    launched: list = []
+    monkeypatch.setattr(R.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+    assert R._launch() is True
+    assert launched and ["--user", "restart", "tintaview.service"] not in fake.calls
+
+
+def test_no_autostart_unit_falls_back_to_a_plain_launch(linux_unit, monkeypatch):
+    fake, unit = linux_unit
+    unit.unlink()
+    launched: list = []
+    monkeypatch.setattr(R.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+    assert R._launch() is True
+    assert launched and fake.calls == []

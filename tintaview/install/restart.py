@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -175,10 +176,45 @@ def _stop(pid: int, cfg: Config | None = None) -> bool:
     return True
 
 
+def _launch_in_desktop_session() -> bool:
+    """Linux: start the tray through the login's own `systemd --user` unit, if it has one.
+
+    The wizard is often run from a shell that is not the desktop session at all — SSH, a
+    tty, a VM whose console can't paste. A tray `Popen`ed from there has no DISPLAY or
+    WAYLAND_DISPLAY and dies at once, so "restart so the settings take effect" quietly
+    became "close the tray". The autostart unit runs inside the graphical session, with
+    the environment GNOME/KDE imported into the user manager, wherever this was called.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    from .autostart import SERVICE_NAME, _linux_service_path
+
+    systemctl = shutil.which("systemctl")
+    if systemctl is None or not _linux_service_path().exists():
+        return False
+    try:
+        session = subprocess.run(
+            [systemctl, "--user", "is-active", "--quiet", "graphical-session.target"],
+            capture_output=True, timeout=10, check=False,
+        )
+        if session.returncode != 0:
+            return False
+        started = subprocess.run(
+            [systemctl, "--user", "restart", f"{SERVICE_NAME}.service"],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not restart TintaView through systemd: %s", exc)
+        return False
+    return started.returncode == 0
+
+
 def _launch() -> bool:
     """Start TintaView detached, the same way autostart would."""
     from .autostart import _executable_command
 
+    if _launch_in_desktop_session():
+        return True
     command = _executable_command()
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":

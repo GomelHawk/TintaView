@@ -110,6 +110,11 @@ SYSTEMD_UNIT_PATH="$SYSTEMD_UNIT_DIR/tintaview.service"
 # The applications-menu entry (Linux) -- the twin of install.ps1's Start Menu shortcut.
 APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 APP_DESKTOP_PATH="$APPS_DIR/tintaview.desktop"
+# The menu icon as a *named* theme icon (Icon=tintaview), the XDG way. A file path in Icon=
+# was tried first: GNOME Shell kept drawing the icon it had cached for the entry even after
+# the path changed (measured on Ubuntu: the new 256px PNG on disk, the old wordmark shown).
+ICON_THEME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+ICON_THEME_PNG="$ICON_THEME_DIR/256x256/apps/tintaview.png"
 # ...and its macOS twin: a minimal app bundle in the per-user Applications folder, so
 # TintaView is in Launchpad/Spotlight. Created here, never signed, so no quarantine flag.
 MAC_APP_PATH="$HOME/Applications/$APP_NAME.app"
@@ -133,7 +138,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
 
     info "Removing launcher $LAUNCHER"
     rm -f "$LAUNCHER"
-    rm -f "$APP_DESKTOP_PATH"
+    rm -f "$APP_DESKTOP_PATH" "$ICON_THEME_PNG"
     if [ -f "$MAC_APP_PATH/Contents/MacOS/$APP_NAME" ]; then
         rm -rf "$HOME/Applications/TintaView.app"
     fi
@@ -539,7 +544,12 @@ fi
 
 if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ]; then
     if render_app_icon; then
-        ICON_PATH="$APP_ICON_PNG"
+        mkdir -p "$(dirname "$ICON_THEME_PNG")"
+        cp "$APP_ICON_PNG" "$ICON_THEME_PNG"
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -f -t "$ICON_THEME_DIR" >/dev/null 2>&1 || true
+        fi
+        ICON_PATH="tintaview"
     else
         warn "Could not render the app icon; the applications menu will show a generic one."
         ICON_PATH="application-x-executable"
@@ -583,8 +593,23 @@ if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ] && [ -x "$LDCONFIG" ]; t
     if [ -n "$MISSING_PKGS" ]; then
         warn "Qt's X11 libraries are missing:$MISSING_PKGS
   Without them a left click on the tray icon cannot open the usage panel on GNOME,
-  and the tray cannot start at all on an X11 session. Install them, then re-run this:
-  Debian/Ubuntu:  sudo apt install$MISSING_PKGS"
+  and the tray cannot start at all on an X11 session."
+        # Asked, never assumed: it is the one step that needs sudo. A non-interactive run
+        # (CI, `tintaview update`) only gets the command to run.
+        LIBS_ANSWER=n
+        if command -v apt-get >/dev/null 2>&1 && ( : </dev/tty ) 2>/dev/null; then
+            printf '%s' "Install them now with sudo apt-get? [Y/n] " >/dev/tty
+            read -r LIBS_ANSWER </dev/tty || LIBS_ANSWER=n
+            case "$LIBS_ANSWER" in [nN]*) LIBS_ANSWER=n ;; *) LIBS_ANSWER=y ;; esac
+        fi
+        if [ "$LIBS_ANSWER" = y ]; then
+            # shellcheck disable=SC2086 -- one word per package
+            sudo apt-get install -y $MISSING_PKGS </dev/tty \
+                || warn "Installing them failed; run: sudo apt install$MISSING_PKGS"
+        else
+            warn "Install them with:  sudo apt install$MISSING_PKGS
+  then restart $APP_NAME (Quit in its menu, then start it from the applications menu)."
+        fi
     fi
 fi
 
@@ -607,16 +632,33 @@ fi
 
 # --------------------------------------------------------------------------- start
 
-# Autostart only fires at the next login, so without this the install ends with no tray
-# icon at all -- which reads exactly like a broken install (install.ps1 does the same).
-# macOS always has a GUI session to start into; Linux only with a display.
-if [ "$HEADLESS" -eq 0 ] && { [ "$(uname -s)" = "Darwin" ] || [ -n "${DISPLAY:-}" ] \
-        || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
-    if curl -fsS -m 1 http://127.0.0.1:8777/healthz >/dev/null 2>&1; then
-        info "$APP_NAME is already running"
-    else
+# The twin of install.ps1's Stop-RunningApp + start. A reinstall that left the running tray
+# alone kept the *old* code on screen ("already running") until the next login, so every
+# fix looked like it had changed nothing. Stop it (graceful /quit, so the lights are handed
+# back), then start the new one -- in the desktop session, which an SSH or tty shell (no
+# DISPLAY) is not: there the session's own systemd --user service is what can reach it.
+if [ "$HEADLESS" -eq 0 ]; then
+    "$VENV_PY" -I -c "
+import sys
+from tintaview.core.config import load
+from tintaview.install import restart
+cfg = load()
+pid = restart.running_pid(cfg)
+sys.exit(0 if pid is None or restart._stop(pid, cfg) else 1)
+" >/dev/null 2>&1 && STOPPED=1 || STOPPED=0
+    [ "$STOPPED" -eq 1 ] || warn "Could not stop the running $APP_NAME; quit it from its menu and start it again."
+
+    if [ "$(uname -s)" = "Linux" ] && [ -f "$SYSTEMD_UNIT_PATH" ] \
+            && systemctl --user is-active --quiet graphical-session.target 2>/dev/null; then
+        info "Starting $APP_NAME in your desktop session"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        systemctl --user restart tintaview.service \
+            || warn "Could not start it; start $APP_NAME from the applications menu."
+    elif [ "$(uname -s)" = "Darwin" ] || [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
         info "Starting $APP_NAME"
         nohup "$LAUNCHER" >/dev/null 2>&1 &
+    else
+        info "No desktop session here; start $APP_NAME from the applications menu (or log in)."
     fi
 fi
 

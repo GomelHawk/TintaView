@@ -267,5 +267,24 @@ def test_the_app_menu_icon_is_the_square_mark_not_the_wordmark(sh: str):
     square. Both menu entries use the brand mark the tray draws, rendered at install."""
     assert "logo_full.png" not in sh
     assert "write_brand_png" in sh
-    assert 'ICON_PATH="$APP_ICON_PNG"' in sh
+    # A named theme icon: GNOME kept its cached picture when only Icon='s *path* changed.
+    assert 'ICON_PATH="tintaview"' in sh
+    assert "icons/hicolor" in sh and "256x256/apps/tintaview.png" in sh
     assert "CFBundleIconFile" in sh
+
+
+def test_a_reinstall_restarts_the_tray_with_the_new_code(sh: str, ps1: str):
+    """install.ps1 stops the running app first; install.sh said "already running" and left
+    the old code on screen until the next login, so every fix looked like it did nothing.
+    From SSH or a tty (no DISPLAY) it starts the tray through the session's systemd unit."""
+    assert "Stop-RunningApp" in ps1
+    assert "restart.running_pid(cfg)" in sh and "restart._stop(pid, cfg)" in sh
+    assert "is already running" not in sh
+    assert "systemctl --user restart tintaview.service" in sh
+
+
+def test_missing_x11_libraries_are_offered_not_just_warned(sh: str):
+    """A warning scrolled past unread on the maintainer's Ubuntu VM, so GNOME's left click
+    never reached the app. Interactive installs are asked; nothing installs unasked."""
+    assert "Install them now with sudo apt-get? [Y/n]" in sh
+    assert "sudo apt-get install -y $MISSING_PKGS </dev/tty" in sh
