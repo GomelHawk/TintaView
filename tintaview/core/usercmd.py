@@ -38,10 +38,18 @@ def cmd_safe(value: str, windows: bool | None = None) -> str:
     This only holds while the user's command keeps the variable **inside double
     quotes**, which the README says in as many words: unquoted, ``&`` in the text is a
     command separator again.
+
+    A value that *ends* in a backslash gets a space after it, for the step after
+    ``cmd``: the program's own argument parser reads ``\\"`` as a literal quote, so
+    ``"…%TINTAVIEW_CWD%"`` with a directory ending in ``\\`` left the argument open and
+    let the next one's text spill into the command line.
     """
     if windows is None:
         windows = sys.platform == "win32"
-    return value.replace('"', "'") if windows else value
+    if not windows:
+        return value
+    value = value.replace('"', "'")
+    return value + " " if value.endswith("\\") else value
 
 
 def confirm_variables(waiting: list[str], question: str, message: str,

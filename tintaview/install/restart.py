@@ -102,6 +102,54 @@ def _is_alive(pid: int) -> bool:
     return True
 
 
+def _is_tintaview_process(pid: int) -> bool:
+    """Is `pid` a TintaView process — something `_stop` may signal? False when unsure."""
+    try:
+        if sys.platform == "win32":
+            name = os.path.basename(_windows_image_path(pid)).lower()
+            return name in ("python.exe", "pythonw.exe")
+        if sys.platform.startswith("linux"):
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                words = fh.read().decode("utf-8", "replace").split("\0")
+        else:
+            done = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                  capture_output=True, text=True, timeout=5, check=False)
+            words = done.stdout.split()
+        # An argument that *is* `tintaview` — `python -m tintaview`, or the
+        # `…/bin/tintaview` launcher — not merely a path with the word in it: every
+        # process started from a folder called TintaView would match that.
+        return any(os.path.basename(word).lower() in ("tintaview", "tintaview.exe")
+                   for word in words)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
+def _windows_image_path(pid: int) -> str:
+    """Full path of `pid`'s executable, or "" when it cannot be read."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return ""
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _windows_is_alive(pid: int) -> bool:
     import ctypes
     from ctypes import wintypes
@@ -275,6 +323,13 @@ def restart_if_running(cfg: Config) -> bool:
             # `tintaview setup` invoked inside the running tray's own
             # process would be asking us to kill ourselves mid-wizard.
             log.debug("skipping restart: this process is the running instance")
+            return False
+        if not _is_tintaview_process(pid):
+            # The pid came out of an HTTP reply from whatever holds the port. Anything
+            # can hold a port: without this, a program answering `/state` with the pid
+            # of the user's shell or editor had it terminated by the next `setup`.
+            log.warning("pid %s on the TintaView port is not a TintaView process — "
+                        "leaving it alone", pid)
             return False
         if not _stop(pid, cfg):
             return False

@@ -184,6 +184,7 @@ def test_restart_passes_the_config_through_so_quit_can_be_used(monkeypatch):
     """`_stop` cannot ask for a graceful shutdown without knowing the broker's port."""
     seen: list[tuple] = []
     monkeypatch.setattr(R, "running_pid", lambda cfg: 4242)
+    monkeypatch.setattr(R, "_is_tintaview_process", lambda pid: True)
     monkeypatch.setattr(R, "_stop", lambda pid, cfg=None: seen.append((pid, cfg)) or True)
     monkeypatch.setattr(R, "_launch", lambda: True)
 
@@ -295,3 +296,42 @@ def test_mac_without_the_launch_agent_falls_back_to_a_plain_launch(mac_agent, mo
     monkeypatch.setattr(R.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
     assert R._launch() is True
     assert launched and calls == []
+
+
+def test_a_pid_that_is_not_tintaview_is_never_signalled(monkeypatch):
+    """The pid comes from an HTTP reply by whatever holds the port. A program answering
+    `/state` with the pid of the user's shell had it terminated by the next `setup`."""
+    import subprocess
+    import sys
+
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        import time
+
+        time.sleep(0.3)  # let it exec, so its real command line is what gets judged
+        assert R._is_tintaview_process(victim.pid) is False
+        monkeypatch.setattr(R, "running_pid", lambda cfg: victim.pid)
+        monkeypatch.setattr(R, "_stop", lambda *a, **k: pytest.fail("signalled a stranger"))
+        monkeypatch.setattr(R, "_launch", lambda: pytest.fail("relaunched"))
+        assert R.restart_if_running(Config()) is False
+        assert victim.poll() is None  # still running
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_a_process_running_tintaview_is_recognised():
+    import subprocess
+    import sys
+
+    ours = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "tintaview"])
+    try:
+        import time
+
+        deadline = time.monotonic() + 5  # the child's command line appears once it has exec-ed
+        while not R._is_tintaview_process(ours.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert R._is_tintaview_process(ours.pid) is True
+    finally:
+        ours.kill()
+        ours.wait()

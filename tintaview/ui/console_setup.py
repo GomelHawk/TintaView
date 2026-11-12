@@ -37,7 +37,8 @@ def console_command() -> list[str] | None:
         exe = console
     if not exe.exists():
         return None
-    return [str(exe), "-m", "tintaview"]
+    # -P: the wizard must not import from whatever directory the tray was started in.
+    return [str(exe), "-P", "-m", "tintaview"]
 
 
 #: Terminal emulators tried on Linux, in order, each with the argv prefix that makes it run

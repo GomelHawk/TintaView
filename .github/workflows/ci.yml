@@ -51,6 +51,22 @@ jobs:
       - name: Verify generated assets are up to date
         run: python scripts/build_assets.py --check
 
+      # The locks in packaging/ are committed, and a release ships them as they are. This
+      # fails when pyproject.toml's dependencies changed and nobody rebuilt them.
+      - name: Verify the dependency locks still fit pyproject.toml
+        run: |
+          python -m pip install --quiet pip-tools
+          python scripts/build_lock.py check
+
+      # A pin with a published vulnerability fails every push, not only the weekly
+      # `deps.yml` run: nothing may be merged, or released, on top of one.
+      - name: Audit the pinned dependencies for known vulnerabilities
+        run: |
+          python -m pip install --quiet pip-audit
+          pip-audit --require-hashes --disable-pip -r packaging/requirements-lock.txt
+          pip-audit --require-hashes --disable-pip -r packaging/requirements-headless-lock.txt
+          pip-audit --require-hashes --disable-pip -r packaging/build-requirements.txt
+
   test:
     strategy:
       fail-fast: false
@@ -141,18 +157,14 @@ jobs:
           echo "TINTAVIEW_HOME=$RUNNER_TEMP/tvhome" >> "$GITHUB_ENV"
           echo "TV_PREFIX=$RUNNER_TEMP/tvprefix" >> "$GITHUB_ENV"
 
-      # What build.yml ships next to the wheel. Built here so the installer's locked,
-      # checksum-verified dependency install runs on this OS before a release depends on
-      # it; `build_lock.py verify` below fails if the installer fell back to unpinned.
-      - name: Build the dependency lock a release ships
-        run: |
-          python -m pip install --quiet pip-tools
-          python scripts/build_lock.py build dist/release
-
+      # A checkout install uses the committed locks in packaging/ — the files a release
+      # ships — so the installer's locked, checksum-verified dependency install runs on
+      # this OS before a release depends on it. `build_lock.py verify` below fails if the
+      # installer fell back to unpinned.
       - name: Install (headless, no autostart)
         run: |
           sh packaging/install.sh --prefix "$TV_PREFIX" --no-autostart --headless
-          "$TV_PREFIX/venv/bin/python" scripts/build_lock.py verify dist/release/requirements-headless-lock.txt
+          "$TV_PREFIX/venv/bin/python" scripts/build_lock.py verify packaging/requirements-headless-lock.txt
 
       - name: Install an agent's hooks
         run: |
@@ -220,7 +232,7 @@ jobs:
           fi
           test -x "$ENTRY" || test -f "$ENTRY" || { echo "no applications entry at $ENTRY"; exit 1; }
           "$TV_PREFIX/venv/bin/python" -I -c "import PySide6.QtWidgets"
-          "$TV_PREFIX/venv/bin/python" scripts/build_lock.py verify dist/release/requirements-lock.txt
+          "$TV_PREFIX/venv/bin/python" scripts/build_lock.py verify packaging/requirements-lock.txt
           curl -fsS http://127.0.0.1:8777/quit >/dev/null 2>&1 || true
           sh packaging/install.sh --prefix "$TV_PREFIX" --uninstall
           test ! -e "$ENTRY" || { echo "the uninstall left $ENTRY behind"; exit 1; }
@@ -323,12 +335,10 @@ jobs:
       - name: Build the wheel the installer will consume
         run: python -m pip wheel . --no-deps --wheel-dir dist
 
-      # Beside the wheel, where `-WheelPath` looks for it — see the same step in the
-      # job above for why.
-      - name: Build the dependency lock a release ships
-        run: |
-          python -m pip install --quiet pip-tools
-          python scripts\build_lock.py build dist
+      # The committed lock, put beside the wheel where `-WheelPath` looks for it — see
+      # the note in the job above for why.
+      - name: Put the release's dependency lock beside the wheel
+        run: Copy-Item packaging\requirements-lock.txt dist\
 
       - name: Install (silent, no autostart)
         run: |

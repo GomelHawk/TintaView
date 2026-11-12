@@ -107,7 +107,9 @@ def parse(body: bytes) -> HookRequest:
         return HookRequest()
     try:
         payload = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # Not JSON, cut off at the cap — or nested deeper than the parser will go, which
+        # a tool call's own arguments can be. Either way the confirm must still land.
         return _salvage(text)
     if not isinstance(payload, dict):
         return HookRequest()

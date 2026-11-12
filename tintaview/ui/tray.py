@@ -75,6 +75,20 @@ def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]
 
 
 
+#: A QTimer interval is a C int of milliseconds; a day is far more than any setting here
+#: can sensibly mean.
+_MAX_TIMER_MS = 24 * 60 * 60 * 1000
+
+
+def _timer_ms(value: float, floor: int = 1000) -> int:
+    """A config value as a QTimer interval. `poll_seconds = 99999999999` in a
+    hand-edited config made `setInterval` raise `OverflowError` at startup."""
+    try:
+        return max(floor, min(_MAX_TIMER_MS, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return floor
+
+
 def _agent_label(key: str) -> str:
     """Human name for an agent key, for the escalation balloon.
 
@@ -224,14 +238,14 @@ class TrayApp(QtCore.QObject):
         self.state_timer.timeout.connect(self._poll_state)
         self.state_timer.start()
 
-        usage_ms = max(1000, int(cfg.stats.poll_seconds * 1000))
+        usage_ms = _timer_ms(cfg.stats.poll_seconds * 1000)
         self.usage_timer = QtCore.QTimer(self)
         self.usage_timer.setInterval(usage_ms)
         self.usage_timer.timeout.connect(self._stats_worker.fetch)
         self.usage_timer.start()
 
         self.blink_timer = QtCore.QTimer(self)
-        self.blink_timer.setInterval(cfg.colors.blink_ms)
+        self.blink_timer.setInterval(_timer_ms(cfg.colors.blink_ms, floor=50))
         self.blink_timer.timeout.connect(self._on_blink)
 
         self.anim_timer = QtCore.QTimer(self)
@@ -537,7 +551,7 @@ class TrayApp(QtCore.QObject):
             # only the icon colours would repaint the tray and leave the LEDs alone.
             setattr(self._cfg.colors.device, status, getattr(new_cfg.colors.device, status))
 
-        self.usage_timer.setInterval(max(1000, int(self._cfg.stats.poll_seconds * 1000)))
+        self.usage_timer.setInterval(_timer_ms(self._cfg.stats.poll_seconds * 1000))
 
         # A language is not a value anything re-reads on its own: the menu's action
         # texts were baked in when it was built, and the tooltip and the usage rows are

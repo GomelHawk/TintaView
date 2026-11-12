@@ -95,6 +95,37 @@ MAX_ID_CHARS = 128
 MAX_TOOL_CHARS = 100
 
 _LOCAL_HOSTNAMES = frozenset({"localhost"})
+_UNSPECIFIED_HOSTS = frozenset({"0.0.0.0", "::"})
+#: In every browser's User-Agent and in no command-line client's.
+_BROWSER_ENGINE_TOKENS = ("AppleWebKit/", "Gecko/", "Chrome/", "Firefox/", "Safari/",
+                          "Trident/", "Edg/", "Presto/")
+
+#: Longest a single request may take from accept to reply, whatever it sends. The socket
+#: timeout above only bounds each read, so a client sending one byte every few seconds
+#: kept its thread indefinitely.
+REQUEST_DEADLINE_S = 10.0
+
+#: Most requests handled at once; a connection beyond this is closed at once. A hook is
+#: a millisecond-long local call, so even a dozen busy sessions stay far below it — the
+#: cap exists so that a process opening connections in a loop cannot grow the tray by a
+#: thread per connection.
+MAX_CONNECTIONS = 64
+
+#: `POST /v1/notify` allowance: a burst of this many, then one more every
+#: `NOTIFY_REFILL_S`. Each accepted message is a balloon and one run of the user's notify
+#: command (a phone push); an agent in a loop must not be able to send hundreds.
+NOTIFY_BURST = 5
+NOTIFY_REFILL_S = 10.0
+
+#: The parts of `/state` that describe what an agent is *asking*: the command, the
+#: question and the directory. The tray reads them in-process; over HTTP they would be
+#: readable by every local account, and a pending command can hold a token.
+PRIVATE_STATE_KEYS = ("question", "detail", "request_tool", "cwd", "questions")
+
+
+def _printable_path(raw: str, limit: int = 80) -> str:
+    """A request path made safe for a log line: no control or escape characters."""
+    return ascii(raw[:limit])[1:-1]
 
 
 def _host_name(header: str) -> str:
@@ -131,20 +162,36 @@ def foreign_request_reason(headers, configured_host: str) -> str:
     - a ``Host`` that is a DNS name other than ``localhost`` or the configured one. DNS
       rebinding points an attacker's own name at 127.0.0.1 so the page becomes
       "same-origin" and may read `/state`; it cannot be done with an IP literal, so any
-      IP address is accepted (a hook reaches a `0.0.0.0` bind by whichever one it has).
+      IP address is accepted (a hook reaches a `0.0.0.0` bind by whichever one it has);
+    - a ``Host`` of ``0.0.0.0`` or ``::`` that is not the configured one. On Linux and
+      macOS that address connects to a loopback listener, and browsers do not treat it
+      as a trustworthy origin, so they may attach no ``Sec-Fetch-Site`` to it at all, and an
+      `<img src="http://0.0.0.0:8777/quit">` then carries neither mark;
+    - a browser's ``User-Agent`` with no ``Sec-Fetch-Site``: a browser too old to send
+      Fetch Metadata, or one that withheld it. Matched on the engine tokens every
+      browser carries and no tool does — PowerShell's `Invoke-WebRequest` also says
+      ``Mozilla/5.0`` and must keep working.
     """
     if headers.get("Origin") is not None:
         return "request carries an Origin header"
     fetch_site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
     if fetch_site and fetch_site not in ("none", "same-origin"):
         return f"cross-site browser request (Sec-Fetch-Site: {fetch_site})"
+    configured = configured_host.strip().lower()
     host_header = headers.get("Host")
     if host_header:
         host = _host_name(host_header)
-        if not (host in _LOCAL_HOSTNAMES or host == configured_host.strip().lower()
-                or _is_ip_literal(host)):
+        if not (host in _LOCAL_HOSTNAMES or host == configured or _is_ip_literal(host)):
             return "unexpected Host header"
+        if host in _UNSPECIFIED_HOSTS and host != configured:
+            return "request addressed to the unspecified address"
+    if not fetch_site and _is_browser_agent(headers.get("User-Agent") or ""):
+        return "browser request without Sec-Fetch-Site"
     return ""
+
+
+def _is_browser_agent(user_agent: str) -> bool:
+    return any(token in user_agent for token in _BROWSER_ENGINE_TOKENS)
 
 
 def is_loopback_host(host: str) -> bool:
@@ -225,9 +272,29 @@ class _Handler(BaseHTTPRequestHandler):
         reason = foreign_request_reason(self.headers, status_server.configured_host)
         if not reason:
             return False
-        log.warning("refused %s %s: %s", self.command, urlparse(self.path).path[:80], reason)
+        log.warning("refused %s %s: %s", self.command,
+                    _printable_path(self.path.split("?", 1)[0]), reason)
         self._send_json({"error": "forbidden"}, status=403)
         return True
+
+    def setup(self) -> None:
+        super().setup()
+        # Wall-clock bound on the whole exchange — see `REQUEST_DEADLINE_S`. Closing the
+        # socket makes whatever read is in progress fail, and the handler thread ends.
+        self._deadline = threading.Timer(REQUEST_DEADLINE_S, self._abort)
+        self._deadline.daemon = True
+        self._deadline.start()
+
+    def finish(self) -> None:
+        self._deadline.cancel()
+        with contextlib.suppress(OSError, ValueError):
+            super().finish()
+
+    def _abort(self) -> None:
+        import socket
+
+        with contextlib.suppress(OSError):
+            self.connection.shutdown(socket.SHUT_RDWR)
 
     def _write_ack(self) -> None:
         """Acknowledge a hook request IMMEDIATELY — 200, Content-Length: 0, flushed —
@@ -252,8 +319,13 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if not self._refuse_foreign():
                 self._route()
+        except ValueError:
+            # `urlparse` on a malformed request line (`GET http://[x/`): the client's
+            # mistake, answered as one rather than logged as a traceback per request.
+            with contextlib.suppress(OSError):
+                self._send_json({"error": "bad request"}, status=400)
         except Exception:
-            log.exception("unhandled error handling %s", self.path)
+            log.exception("unhandled error handling %s", _printable_path(self.path))
 
     def do_POST(self) -> None:  # noqa: N802 (http.server's naming convention)
         """Hook ingress with the agent's whole payload as the body.
@@ -266,8 +338,11 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if not self._refuse_foreign():
                 self._route_post()
+        except ValueError:
+            with contextlib.suppress(OSError):
+                self._send_json({"error": "bad request"}, status=400)
         except Exception:
-            log.exception("unhandled error handling POST %s", self.path)
+            log.exception("unhandled error handling POST %s", _printable_path(self.path))
 
     def _read_body(self) -> bytes:
         """At most `MAX_BODY_BYTES` of the request body; the rest is never read.
@@ -330,7 +405,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(self._read_body() or b"{}")
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (ValueError, RecursionError):  # bad JSON, bad UTF-8, or nested too deep
             payload = None
         if not isinstance(payload, dict):
             self._send_json({"ok": False, "error": "body must be a JSON object"}, status=400)
@@ -341,6 +416,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         agent = clean_id(_first(query, "agent", "")) or DEFAULT_AGENT
         cwd = clean(payload.get("cwd"), MAX_NOTIFY_CHARS)
+        if not status_server.agent_enabled(agent):
+            # Same rule as the hook ingress: an agent the user switched off does not get
+            # to reach them. `notified: false`, so the agent says so instead.
+            self._send_json({"ok": True, "notified": False})
+            return
+        if not status_server.take_notify_allowance():
+            self._send_json({"ok": False, "error": "too many notifications, try again later"},
+                            status=429)
+            return
         self._send_json({"ok": True,
                          "notified": status_server.request_notify(agent, message, cwd)})
 
@@ -376,7 +460,7 @@ class _Handler(BaseHTTPRequestHandler):
             # Best-effort read that must NOT touch the watchdog's last-event timestamp
             # — see StateStore.snapshot()'s docstring. The tray can poll this as
             # often as it likes without ever keeping a dead agent's lights alive.
-            self._send_json(status_server.state_payload())
+            self._send_json(status_server.state_payload(public=True))
             return
 
         if path.startswith(_V1_PREFIX):
@@ -423,6 +507,26 @@ class _StatusHTTPServer(ThreadingHTTPServer):
     # where it only affects sockets stuck in TIME_WAIT. That would silently defeat
     # start()'s "is another instance already running" check below.
     allow_reuse_address = sys.platform != "win32"
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)  # over `MAX_CONNECTIONS`: closed, not queued
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def _is_tintaview_listening(host: str, port: int, timeout: float = 1.5) -> bool:
@@ -597,6 +701,10 @@ class StatusServer:
 
         #: Every `controller.apply()` goes through here — see `_StatusApplier`.
         self._applier = _StatusApplier(self.controller.apply)
+
+        self._notify_lock = threading.Lock()
+        self._notify_tokens = float(NOTIFY_BURST)
+        self._notify_stamp = time.monotonic()
 
         self._httpd: _StatusHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
@@ -826,6 +934,21 @@ class StatusServer:
             return False
         return True
 
+    def agent_enabled(self, agent: str) -> bool:
+        return self._cfg.is_enabled(agent)
+
+    def take_notify_allowance(self) -> bool:
+        """One notification's worth of the `NOTIFY_BURST` allowance, or False when spent."""
+        now = time.monotonic()
+        with self._notify_lock:
+            earned = (now - self._notify_stamp) / NOTIFY_REFILL_S
+            self._notify_tokens = min(float(NOTIFY_BURST), self._notify_tokens + earned)
+            self._notify_stamp = now
+            if self._notify_tokens < 1.0:
+                return False
+            self._notify_tokens -= 1.0
+            return True
+
     def request_notify(self, agent: str, message: str, cwd: str = "") -> bool:
         """Invoke the registered notify callback. Never raises — same contract as
         `request_show()`."""
@@ -851,9 +974,18 @@ class StatusServer:
 
     # --- reads for the tray ------------------------------------------------------
 
-    def state_payload(self) -> dict:
-        """The `GET /state` body: `StateStore.snapshot()` plus lighting/version info."""
+    def state_payload(self, public: bool = False) -> dict:
+        """`StateStore.snapshot()` plus lighting/version info — what the tray reads.
+
+        ``public=True`` is the `GET /state` body: the same, without what each agent is
+        asking (`PRIVATE_STATE_KEYS`). Statuses, session ids and tool names stay; `doctor`
+        and the restart helper need nothing else.
+        """
         payload = self.state.snapshot()
+        if public:
+            for entry in payload.get("agents", {}).values():
+                for key in PRIVATE_STATE_KEYS:
+                    entry.pop(key, None)
         payload["blinking"] = self.controller.blinking
         payload["engine"] = self.controller.engine_status()
         payload["version"] = __version__

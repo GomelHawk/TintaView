@@ -14,7 +14,6 @@ Same contract as :mod:`tintaview.install.hooks`: plan, show, then apply.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,8 +58,14 @@ def plan(config_path: Path, version: str | None) -> FlagPlan:
     parsed = parse_version(version)
     try:
         before = config_path.read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
         before = ""
+    except (OSError, UnicodeDecodeError) as exc:
+        # Only *not found* is empty. A locked file, a permission error or a sleeping
+        # distro's UNC path read as "" produced a `create` plan — and applying it
+        # replaced the user's whole Codex config with our two lines.
+        return FlagPlan(config_path, "noop", "", "",
+                        f"{config_path} could not be read ({exc}); left untouched.")
 
     if parsed is None:
         # Unknown version — the common case on a WSL-split install, where TintaView runs
@@ -139,34 +144,35 @@ def _write_flag(path: Path, before: str, flag: str, reason: str) -> FlagPlan:
     return FlagPlan(path, action, before, after, reason)
 
 
-def diff(p: FlagPlan) -> str:
+def diff(p: FlagPlan, context: int = 3) -> str:
     import difflib
 
     if not p.changes:
         return ""
     return "".join(difflib.unified_diff(
         p.before.splitlines(keepends=True), p.after.splitlines(keepends=True),
-        fromfile=f"{p.path} (current)", tofile=f"{p.path} (after)", n=3))
+        fromfile=f"{p.path} (current)", tofile=f"{p.path} (after)", n=context))
 
 
 def apply(p: FlagPlan) -> Path | None:
     """Write the flag, backing the file up first. Returns the backup path."""
     if not p.changes:
         return None
-    import datetime as _dt
+    from ..core.fsutil import atomic_write
+    from .hooks import PlanStale, _backup
 
-    from .hooks import BACKUP_SUFFIX, _prune_backups
-
+    # Same rules as a hook merge (`hooks.apply`): the file must still be what the plan
+    # was made from, and the backup and the rewrite keep its permissions — Codex's
+    # config.toml can hold MCP server tokens, and both used to come out world-readable.
+    try:
+        current = p.path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = ""
+    if current != p.before:
+        raise PlanStale(f"{p.path} changed while the change was being reviewed; "
+                        "nothing was written — run it again")
     p.path.parent.mkdir(parents=True, exist_ok=True)
-    backup = None
-    if p.path.exists():
-        stamp = _dt.datetime.now().strftime("%Y%m%dT%H%M%S")
-        backup = p.path.with_name(p.path.name + BACKUP_SUFFIX + stamp)
-        backup.write_bytes(p.path.read_bytes())
-        _prune_backups(p.path)
-
-    tmp = p.path.with_name(p.path.name + ".tintaview-tmp")
-    tmp.write_text(p.after, encoding="utf-8")
-    os.replace(tmp, p.path)
+    backup = _backup(p.path)
+    atomic_write(p.path, p.after)
     log.info("codex feature flag %s: %s (backup: %s)", p.action, p.path, backup)
     return backup

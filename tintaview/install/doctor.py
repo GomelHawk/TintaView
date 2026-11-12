@@ -636,7 +636,11 @@ def _check_codex_flag(reporter: _Reporter, cfg: Config, adapter: AgentAdapter) -
     elif plan.action == "noop":
         reporter.ok("AGENT HOOKS", f"Codex feature flag: {plan.reason} ({codex_config_path})")
     else:
-        diff_text = codex_flag.diff(plan)
+        # Only the lines being added. The surrounding lines of the user's config are
+        # not ours to print: the flag lands at the end of the file, which is where
+        # `[mcp_servers.*.env]` blocks with their tokens usually are, and this report
+        # is made to be pasted into a bug report.
+        diff_text = codex_flag.diff(plan, context=0)
         fix = f"apply this change to {codex_config_path}:\n{diff_text}".rstrip()
         reporter.fail(
             "AGENT HOOKS", f"Codex feature flag not set yet: {plan.reason}", fix,

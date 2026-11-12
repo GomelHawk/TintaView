@@ -301,9 +301,11 @@ def _parse_ts(ts: Any) -> datetime | None:
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
     except ValueError:
         return None
+    # One record without a zone beside one with it made every comparison raise.
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- rows

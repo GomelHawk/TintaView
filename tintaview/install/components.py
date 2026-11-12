@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import shutil
 import subprocess
 import sys
+
+from ..core.proc import system_tool
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,10 @@ def install_openrgb_python() -> tuple[bool, str]:
     Returns (ok, message). Uses `sys.executable`, so it lands in TintaView's own venv —
     the same place the app will import from — rather than wherever a bare `pip` points.
     """
-    cmd = [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "openrgb-python"]
+    # `-I`: without it Python puts the working directory on `sys.path`, and a `pip.py`
+    # lying there would be what `-m pip` runs.
+    cmd = [sys.executable, "-I", "-m", "pip", "install", "--quiet", "--upgrade",
+           "openrgb-python"]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=_PIP_TIMEOUT, check=False
@@ -74,8 +78,13 @@ def install_openrgb_python() -> tuple[bool, str]:
     return True, "openrgb-python installed"
 
 
+def _winget() -> str | None:
+    """winget's full path — never a `winget.exe` sitting in the working directory."""
+    return system_tool("winget") if sys.platform == "win32" else None
+
+
 def winget_available() -> bool:
-    return sys.platform == "win32" and shutil.which("winget") is not None
+    return _winget() is not None
 
 
 def winget_package_installed(package_id: str) -> bool | None:
@@ -88,7 +97,7 @@ def winget_package_installed(package_id: str) -> bool | None:
         return None
     try:
         result = subprocess.run(
-            ["winget", "list", "--id", package_id, "--exact", "--disable-interactivity"],
+            [_winget() or "winget", "list", "--id", package_id, "--exact", "--disable-interactivity"],
             capture_output=True, text=True, timeout=_WINGET_QUERY_TIMEOUT, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -104,7 +113,7 @@ def winget_install(package_id: str) -> tuple[bool, str]:
     if not winget_available():
         return False, "winget isn't available on this machine"
     cmd = [
-        "winget", "install", "--id", package_id, "--exact", "--source", "winget",
+        _winget() or "winget", "install", "--id", package_id, "--exact", "--source", "winget",
         "--accept-package-agreements", "--accept-source-agreements",
     ]
     try:

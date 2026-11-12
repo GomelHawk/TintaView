@@ -49,7 +49,7 @@
   "tray.update.up_to_date": "Du bist auf dem neuesten Stand (Version {version}).",
   "tray.update.confirm": "Version {latest} ist verfügbar – du hast {current}.{notes}\n\nEin Update ändert weder deine Einstellungen noch die Hook-Konfiguration deiner Agenten.\n\nJetzt installieren?",
   "tray.update.failed": "Das Update wurde nicht abgeschlossen. Führe `tintaview update` in einem Terminal aus, um den Grund zu sehen.",
-  "tray.update.installing": "Update wird installiert — das kann einige Minuten dauern.",
+  "tray.update.installing": "Update wird installiert. TintaView schließt sich und kommt von selbst zurück. Das kann einige Minuten dauern — es arbeitet, Sie müssen nichts tun.",
   "tray.update.installed": "Das Update ist installiert. Starte TintaView neu, um die neue Version zu verwenden.",
   "tray.diagnostics.title": "TintaView-Diagnose",
   "tray.diagnostics.running": "Diagnose läuft, das kann einige Sekunden dauern…",

@@ -191,7 +191,7 @@ function Get-PythonVersion {
     # Ask the interpreter itself rather than parsing `--version` banners, which have
     # changed format before and go to stderr on some old builds.
     try {
-        $raw = & $Exe -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+        $raw = & $Exe -I -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
     } catch {
         return $null
     }
@@ -296,7 +296,9 @@ function Test-AutostartEnabled {
 function Enable-Autostart {
     # One command *string*, quoted the way Windows parses it: %LOCALAPPDATA% contains the
     # user's name, which is very often a path with a space in it.
-    $value = '"{0}" -m tintaview' -f $VenvPythonW
+    # -P: Python must not put the working directory on its import path (autostart.py
+    # writes the same value).
+    $value = '"{0}" -P -m tintaview' -f $VenvPythonW
     Set-ItemProperty -Path $RunKey -Name $RunValueName -Value $value
 }
 
@@ -357,7 +359,7 @@ function New-AppShortcut {
     # console window, and it keeps the PSF Authenticode signature that Smart App Control
     # wants to see. G HUB painting uses a python.exe sidecar from the tray (see
     # tintaview.engines.ghub_sidecar). Mirrors autostart._executable_command().
-    New-Shortcut -Path $Path -Target $VenvPythonW -Arguments '-m tintaview' `
+    New-Shortcut -Path $Path -Target $VenvPythonW -Arguments '-P -m tintaview' `
         -WorkingDirectory $Prefix -IconLocation (Get-AppIconPath)
 }
 
@@ -396,7 +398,11 @@ function Invoke-Uninstall {
     if (Test-Path -LiteralPath $startMenu) { Remove-Item -LiteralPath $startMenu -Force -ErrorAction SilentlyContinue }
     Disable-Autostart
 
-    if (Test-Path -LiteralPath $VenvDir) {
+    if ((Test-Path -LiteralPath $VenvDir) -and -not (Test-Path -LiteralPath (Join-Path $VenvDir 'pyvenv.cfg'))) {
+        # -Prefix is whatever was typed. A 'venv' folder with no pyvenv.cfg is not a
+        # virtual environment, so it is not this script's, and it is left alone.
+        Write-Warn "$VenvDir is not a Python virtual environment -- leaving it untouched."
+    } elseif (Test-Path -LiteralPath $VenvDir) {
         # Safe to delete recursively, unlike $Prefix: the venv directory is created and
         # owned entirely by this script, and nothing of the user's is ever written inside
         # it (config.toml, hook.env, bin\ and logs\ are all siblings of it, not children).
@@ -533,17 +539,21 @@ function Invoke-Install {
             Save-File -Uri "$baseUrl/$sumsName"  -OutFile $sumsLocal
             Assert-Checksum -FilePath $wheel -ChecksumsPath $sumsLocal -FileName $wheelName
 
-            # Optional to *find* (releases before it existed have none), never optional
-            # to verify: a lock that was downloaded but is not in SHA256SUMS.txt stops
-            # the install.
-            $lockLocal = Join-Path $workDir $lockName
-            try {
-                Invoke-WebRequest -Uri "$baseUrl/$lockName" -OutFile $lockLocal -Headers @{ 'User-Agent' = $UserAgent } -UseBasicParsing
-                $lockFile = $lockLocal
-            } catch {
-                $lockFile = $null
+            # Whether this release has a lock is read from SHA256SUMS.txt, which is
+            # already downloaded: listed there, the lock is required -- a download that
+            # fails is the end of the install, not a quiet switch to unpinned
+            # dependencies. Only a release from before the lock existed goes without.
+            $lockListed = $false
+            foreach ($line in (Get-Content -LiteralPath $sumsLocal)) {
+                $parts = $line.Trim() -split '\s+'
+                if ($parts.Count -ge 2 -and $parts[-1].TrimStart('*') -eq $lockName) { $lockListed = $true; break }
             }
-            if ($lockFile) { Assert-Checksum -FilePath $lockFile -ChecksumsPath $sumsLocal -FileName $lockName }
+            if ($lockListed) {
+                $lockLocal = Join-Path $workDir $lockName
+                Save-File -Uri "$baseUrl/$lockName" -OutFile $lockLocal
+                Assert-Checksum -FilePath $lockLocal -ChecksumsPath $sumsLocal -FileName $lockName
+                $lockFile = $lockLocal
+            }
         }
 
         # ------------------------------------------------------------- venv
@@ -558,7 +568,7 @@ function Invoke-Install {
 
         $venvUsable = $false
         if (Test-Path -LiteralPath $VenvPython) {
-            & $VenvPython -m pip --version *> $null
+            & $VenvPython -I -m pip --version *> $null
             $venvUsable = ($LASTEXITCODE -eq 0)
         }
         if ($venvUsable) {
@@ -568,11 +578,19 @@ function Invoke-Install {
             # pip and cannot be repaired by `venv` itself, so start it over rather than
             # inherit it -- install.sh does the same.
             if (Test-Path -LiteralPath $VenvDir) {
+                # Deleted recursively only when it is a virtual environment (its
+                # pyvenv.cfg is the proof) or empty: -Prefix is whatever was typed, and a
+                # 'venv' folder already there with something else in it is not ours.
+                $isVenv = Test-Path -LiteralPath (Join-Path $VenvDir 'pyvenv.cfg')
+                $isEmpty = -not (Get-ChildItem -LiteralPath $VenvDir -Force | Select-Object -First 1)
+                if (-not ($isVenv -or $isEmpty)) {
+                    Die "$VenvDir exists and is not a Python virtual environment. Move it away, or install somewhere else with -Prefix."
+                }
                 Write-Warn "The virtual environment at $VenvDir is incomplete; recreating it."
                 Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
             }
             Write-Info "Creating a virtual environment at $VenvDir"
-            & $python.Exe -m venv $VenvDir
+            & $python.Exe -I -m venv $VenvDir
             if ($LASTEXITCODE -ne 0) { Die "Could not create a virtual environment at $VenvDir (python -m venv exited $LASTEXITCODE)." }
         }
         if (-not (Test-Path -LiteralPath $VenvPythonW)) {
@@ -580,9 +598,18 @@ function Invoke-Install {
         }
 
         # ------------------------------------------------------------- install
-        Write-Info "Installing $AppName $Version and its dependencies -- this takes a minute the first time"
-        & $VenvPython -m pip install --quiet --upgrade pip
-        if ($LASTEXITCODE -ne 0) { Write-Warn "Could not upgrade pip inside the venv; continuing with the bundled version." }
+        # The long step. In plain words, for someone who is not a developer: something
+        # is being installed, it takes a while, and the window must stay open. "This
+        # takes a minute" above a silent window for five minutes read as a hung install,
+        # and people closed it. pip's own progress is left visible for this step (unless
+        # -Silent) so that something keeps moving. install.sh says the same.
+        Write-Info "Installing $AppName's components. This can take several minutes."
+        Write-Info "Please keep this window open -- it is working, even when nothing seems to move."
+        $pipQuiet = @()
+        if ($Silent) { $pipQuiet = @('--quiet') }
+        # pip is used as the venv has it. It used to be upgraded from the index first,
+        # unpinned and unverified, on every install and update -- so whatever "pip" was
+        # newest that day ran before the checksummed lock below was ever consulted.
 
         # Both extras: [ui] is the tray, [openrgb] is the second lighting engine. The
         # openrgb extra used to be left out, which made the engine permanently
@@ -596,22 +623,27 @@ function Invoke-Install {
             # read from, the same way install.sh does, and redirecting a native
             # command's stderr under $ErrorActionPreference = 'Stop' throws.
             $pipLog = Join-Path $workDir 'pip-lock.log'
-            & $VenvPython -m pip install --quiet --require-hashes --only-binary ':all:' --log $pipLog -r $lockFile
+            & $VenvPython -I -m pip install @pipQuiet --require-hashes --only-binary ':all:' --log $pipLog -r $lockFile
             if ($LASTEXITCODE -eq 0) {
                 $locked = $true
             } elseif ((Test-Path -LiteralPath $pipLog) -and (Select-String -LiteralPath $pipLog -Pattern 'DO NOT MATCH THE HASHES' -SimpleMatch -Quiet)) {
                 # A file that is not the one the release was built with. Never installed,
                 # and never worked around by falling back to whatever the index serves.
                 Die "A downloaded dependency does not match the checksum in this release's $lockName. Nothing was installed from it. This can be a corrupted download or a tampered package -- try again on another network, and report it at https://github.com/$GitHubRepo/releases if it repeats."
+            } elseif ((Test-Path -LiteralPath $pipLog) -and (Select-String -LiteralPath $pipLog -Pattern 'require a different python version|Hashes are required in --require-hashes mode|all requirements must have their versions pinned' -Quiet)) {
+                # The lock does not fit this machine: pip itself says the pinned versions
+                # do not support this Python, or that this system needs a package the
+                # lock does not list. Only then: install as before the lock existed.
+                Write-Warn "Could not install the exact dependency versions this release was built with (they do not support Python $($python.Version) on this system); installing the newest compatible ones instead."
             } else {
-                # Anything else is the lock not fitting this machine -- a Python newer
-                # than the pinned versions support, a platform-specific dependency the
-                # lock does not list. Install as before the lock existed, and say so.
-                Write-Warn "Could not install the exact dependency versions this release was built with (they may not support Python $($python.Version) on this system); installing the newest compatible ones instead."
+                # Everything else -- no connection, an index that did not answer, a
+                # pinned file that is gone -- stops here. Carrying on unpinned would let
+                # whoever can make a download fail choose what gets installed.
+                Die "Could not download $AppName's components. Nothing was changed in your existing install. Check your internet connection and run this again."
             }
         }
         if (-not $locked) {
-            & $VenvPython -m pip install --quiet --upgrade "${wheel}[ui,openrgb]"
+            & $VenvPython -I -m pip install @pipQuiet --upgrade "${wheel}[ui,openrgb]"
             if ($LASTEXITCODE -ne 0) { Die "pip failed to install $AppName (exit $LASTEXITCODE). Re-run without -Silent to see the full output." }
         }
 
@@ -621,7 +653,7 @@ function Invoke-Install {
         # re-tag, or a dev build) silently leaves the previous code in place while
         # reporting success. `--no-deps` keeps it to the one small local wheel, so the
         # dependency resolution above is not repeated.
-        & $VenvPython -m pip install --quiet --force-reinstall --no-deps $wheel
+        & $VenvPython -I -m pip install --quiet --force-reinstall --no-deps $wheel
         if ($LASTEXITCODE -ne 0) { Die "pip failed to install $AppName (exit $LASTEXITCODE). Re-run without -Silent to see the full output." }
 
         $installedVersion = (& $VenvPython -I -c "import tintaview; print(tintaview.__version__)" 2>$null)
@@ -666,7 +698,7 @@ function Invoke-Install {
             # The wizard is a text-mode flow reading stdin, so it needs a console of its
             # own -- console python.exe here, not the windowed pythonw.exe the tray uses.
             # Waited on, because the tray started afterwards reads the config it writes.
-            $wizard = Start-Process -FilePath $VenvPython -ArgumentList '-m', 'tintaview', 'setup' `
+            $wizard = Start-Process -FilePath $VenvPython -ArgumentList '-P', '-m', 'tintaview', 'setup' `
                 -WorkingDirectory $Prefix -Wait -PassThru
             if ($wizard.ExitCode -ne 0) {
                 Write-Warn "The setup wizard exited with code $($wizard.ExitCode). Re-run it any time with: $LauncherPath setup"
@@ -677,7 +709,7 @@ function Invoke-Install {
         # finishes with no tray icon and nothing to indicate anything is wrong -- which
         # reads exactly like a broken install. Start it now instead.
         Write-Info "Starting $AppName"
-        Start-Process -FilePath $VenvPythonW -ArgumentList '-m', 'tintaview' -WorkingDirectory $Prefix | Out-Null
+        Start-Process -FilePath $VenvPythonW -ArgumentList '-P', '-m', 'tintaview' -WorkingDirectory $Prefix | Out-Null
         Start-Sleep -Seconds 3
         $alive = @(Get-Process -Name 'pythonw' -ErrorAction SilentlyContinue | Where-Object {
             try { $_.Path -and ($_.Path -like (Join-Path $VenvDir '*')) } catch { $false }

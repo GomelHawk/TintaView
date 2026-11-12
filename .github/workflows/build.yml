@@ -40,7 +40,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  # Four jobs, split by what each is allowed to touch:
+  #
+  #   test     runs the suite — with pytest, ruff, pillow, numpy and everything they pull
+  #            in, all unpinned. It produces nothing the release uses.
+  #   build    builds the wheel in a clean checkout with *only* the pinned, hashed tools
+  #            in packaging/build-requirements.txt, and checksums the release files.
+  #   verify   installs the built wheel and runs it. It works on a downloaded copy and
+  #            uploads nothing.
+  #   publish  attests and uploads exactly what `build` produced.
+  #
+  # They used to be one job. The test tooling then ran in the same workspace, minutes
+  # before the wheel was built and SHA256SUMS.txt written, so one compromised release of
+  # any test dependency could have changed the wheel or an install script before it was
+  # hashed — and the provenance attestation would have vouched for the result.
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -48,11 +62,6 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v7
-        with:
-          # setuptools-scm derives the version from `git describe --tags`, which needs
-          # the tag history available locally -- a shallow (depth-1) checkout leaves
-          # tags unfetched and the version falls back to a "0.1.dev0+unknown" guess.
-          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
@@ -76,39 +85,55 @@ jobs:
 
       # A tag push does not go through ci.yml's pull_request trigger, so without this a
       # red suite could still be published to a GitHub Release — and a release is the one
-      # artifact that cannot be quietly fixed afterwards. Runs before the build so the
-      # failure is about the code, not about packaging.
+      # artifact that cannot be quietly fixed afterwards.
       - name: Test (pytest)
         run: |
-          python -m pip install --upgrade pip
           python -m pip install -e ".[dev,ui]"
           pytest -q
 
+      # A release never ships a pin with a published vulnerability.
+      - name: Audit the pinned dependencies for known vulnerabilities
+        run: |
+          python -m pip install --quiet pip-audit
+          pip-audit --require-hashes --disable-pip -r packaging/requirements-lock.txt
+          pip-audit --require-hashes --disable-pip -r packaging/requirements-headless-lock.txt
+          pip-audit --require-hashes --disable-pip -r packaging/build-requirements.txt
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # setuptools-scm derives the version from `git describe --tags`, which needs
+          # the tag history available locally -- a shallow (depth-1) checkout leaves
+          # tags unfetched and the version falls back to a "0.1.dev0+unknown" guess.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The only packages this job installs: the build tools, each pinned to one version
+      # and checked against the SHA-256 in the committed file. `--no-isolation` below
+      # makes `build` use exactly these instead of fetching its own, unpinned, copies.
+      - name: Install the pinned build tools
+        run: |
+          python -I -m pip install --require-hashes --only-binary :all: -r packaging/build-requirements.txt
+
       - name: Build the wheel and sdist
-        run: |
-          python -m pip install --upgrade build
-          python -m build
+        run: python -I -m build --no-isolation
 
-      - name: Check the wheel installs and imports cleanly
-        run: |
-          set -eu
-          python -m venv /tmp/smoke
-          # Without the [ui] extra on purpose: the headless install path must work on a
-          # box with no Qt, and this is the cheapest place to catch a regression in it.
-          /tmp/smoke/bin/pip install --quiet dist/*.whl
-          /tmp/smoke/bin/python -c "import tintaview; print('imported', tintaview.__version__)"
-          # `python -m tintaview` is what the Windows Startup shortcut runs, so a missing
-          # __main__.py would break autostart for every Windows user and nothing else.
-          /tmp/smoke/bin/python -m tintaview --version
-
+      # From the file name, without installing anything in this job.
       - name: Check the built version matches the tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eu
           tag_version="${GITHUB_REF_NAME#v}"
-          built_version="$(/tmp/smoke/bin/python -c 'import tintaview; print(tintaview.__version__)')"
-          if [ "$tag_version" != "$built_version" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match the version setuptools-scm derived ($built_version) -- checkout may be shallow or the tag isn't on this commit." >&2
+          wheel="dist/tintaview-${tag_version}-py3-none-any.whl"
+          if [ ! -f "$wheel" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the version setuptools-scm derived ($(ls dist)) -- checkout may be shallow or the tag isn't on this commit." >&2
             exit 1
           fi
 
@@ -120,18 +145,19 @@ jobs:
           cp packaging/install.ps1 dist/release/
           cp packaging/install.sh dist/release/
           # The dependency locks both installers hand to `pip install --require-hashes`:
-          # every dependency pinned to the version this release was tested with, with the
-          # SHA-256 of its files. Written before the checksums so SHA256SUMS.txt covers them.
-          python -m pip install --quiet pip-tools
-          python scripts/build_lock.py build dist/release
-          ( cd dist/release && sha256sum * > SHA256SUMS.txt )
+          # every dependency pinned, with the SHA-256 of its files. The committed files,
+          # as they are — regenerating them here moved the pins at every release, and
+          # every user's update then re-downloaded Qt. Copied before the checksums so
+          # SHA256SUMS.txt covers them.
+          cp packaging/requirements-lock.txt packaging/requirements-headless-lock.txt dist/release/
+          ( cd dist/release && sha256sum -- * > SHA256SUMS.txt )
           cat dist/release/SHA256SUMS.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: tintaview-${{ github.ref_name }}
-          # Deliberately not `dist/release/*`: the sdist is left out. The step below
+          # Deliberately not `dist/release/*`: the sdist is left out. The publish job
           # attaches it permanently to the Release -- which is free, does not count
           # against Actions storage, and is where every download actually comes from.
           # This copy exists only to eyeball a workflow_dispatch build before it is
@@ -142,16 +168,16 @@ jobs:
           path: |
             dist/release/*.whl
             dist/release/install.*
+            dist/release/requirements-*.txt
             dist/release/SHA256SUMS.txt
           # Matches the repo-wide artifact-and-log retention (Settings -> Actions).
           # At the 90-day default these piled up one per tag and ate the account's
           # Actions storage allowance for files nobody opens after the day they build.
           retention-days: 3
 
-      # Everything the Release gets, handed to the `publish` job: it has the write
-      # permission and this job does not. One day is plenty — it is read minutes later.
-      - name: Hand the release files to the publish job
-        if: startsWith(github.ref, 'refs/tags/')
+      # Everything the Release gets, handed to the jobs below: `verify` checks it and
+      # `publish` uploads it. One day is plenty — both read it minutes later.
+      - name: Hand the release files to the next jobs
         uses: actions/upload-artifact@v7
         with:
           name: release-files
@@ -159,9 +185,38 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-files
+          path: dist/release
+
+      - name: Check the wheel installs and imports cleanly
+        run: |
+          set -eu
+          ( cd dist/release && sha256sum -c SHA256SUMS.txt )
+          python -m venv /tmp/smoke
+          # Without the [ui] extra on purpose: the headless install path must work on a
+          # box with no Qt, and this is the cheapest place to catch a regression in it.
+          # From the release's own lock, the way the installers do it.
+          /tmp/smoke/bin/python -I -m pip install --quiet --require-hashes --only-binary :all: -r dist/release/requirements-headless-lock.txt
+          /tmp/smoke/bin/python -I -m pip install --quiet --no-deps dist/release/*.whl
+          /tmp/smoke/bin/python -I -c "import tintaview; print('imported', tintaview.__version__)"
+          # `python -m tintaview` is what the Windows Startup shortcut runs, so a missing
+          # __main__.py would break autostart for every Windows user and nothing else.
+          /tmp/smoke/bin/python -P -m tintaview --version
+
   publish:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [build, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

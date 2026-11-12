@@ -28,7 +28,15 @@ class ResponseTooLarge(OSError):
 
 def token_request(url: str, authorization: str, *, headers: Mapping[str, str] | None = None,
                   data: bytes | None = None, method: str | None = None) -> urllib.request.Request:
-    """A request carrying `authorization` to `url`'s host only — never to a redirect's."""
+    """A request carrying `authorization` to `url`'s host only — never to a redirect's.
+
+    Raises a `ValueError` that does **not** quote the value when it holds something a
+    header cannot carry (a newline, a non-ASCII character). `http.client` raises its
+    own for those, with the whole credential in the message — and that message went
+    into the usage panel, the log and the `doctor` report.
+    """
+    if not (authorization.isascii() and authorization.isprintable()):
+        raise ValueError("the stored credential has characters a header cannot carry")
     req = urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)
     req.add_unredirected_header("Authorization", authorization)
     return req

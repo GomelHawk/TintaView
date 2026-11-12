@@ -45,6 +45,11 @@ def atomic_write(path: Path, data: str | bytes, *, mode: int | None = None,
     Raises OSError like any write; the temp file is removed on the way out.
     """
     path = Path(path)
+    if path.is_symlink():
+        # Write the file the link points at. Renaming over the link itself replaced a
+        # `settings.json` symlinked into a dotfiles repository with a regular file, and
+        # the repository's copy never got the change.
+        path = path.resolve()
     final = mode if mode is not None else file_mode(path)
     # Unique per writer: two threads, or a stale second process, must not share a temp.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tintaview-tmp")

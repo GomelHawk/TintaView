@@ -198,7 +198,12 @@ def _merge(existing: dict, rendered: dict) -> dict:
     hooks = _strip_ours(hooks)
 
     for event, entries in _event_map(rendered).items():
-        current = list(hooks.get(event, []))
+        existing_entries = hooks.get(event, [])
+        if not isinstance(existing_entries, list):
+            # `list()` of an object is its keys: the user's own entry would be rewritten
+            # into a list of strings. Refused like any other file we cannot read safely.
+            raise ValueError(f"hooks.{event} is not a list; fix or move the file, then retry")
+        current = list(existing_entries)
         current.extend(entries)
         hooks[event] = current
 
@@ -325,11 +330,22 @@ def status(
 # --------------------------------------------------------------------------- applying
 
 
+class PlanStale(ValueError):
+    """The file changed between planning an edit and applying it."""
+
+
 def _backup(path: Path) -> Path | None:
     if not path.exists():
         return None
     stamp = _dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     dest = path.with_name(path.name + BACKUP_SUFFIX + stamp)
+    # Never over an existing backup: two changes to one file in the same second (hooks,
+    # then the notify tool's allow rule) would replace the pristine copy with the
+    # already-edited one.
+    counter = 1
+    while dest.exists():
+        counter += 1
+        dest = path.with_name(f"{path.name}{BACKUP_SUFFIX}{stamp}-{counter}")
     # Created with the original's permissions, not given them afterwards:
     # `~/.claude.json` is 0600, and a copy of it must never be readable in between.
     atomic_write(dest, path.read_bytes(), mode=file_mode(path))
@@ -352,6 +368,17 @@ def apply(plan: HookPlan) -> Path | None:
     """
     if not plan.changes:
         return None
+    # The plan is what the user approved, computed from the file as it was then. An
+    # agent rewrites its own config constantly (`~/.claude.json` on every prompt), so if
+    # the file moved on while the diff was on screen, writing `plan.after` would undo
+    # whatever changed in between.
+    try:
+        current = plan.path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = ""
+    if current != plan.before:
+        raise PlanStale(f"{plan.path} changed while the change was being reviewed; "
+                        "nothing was written — run it again")
     plan.path.parent.mkdir(parents=True, exist_ok=True)
     backup = _backup(plan.path)
     # An existing file keeps its mode, and the temp file is created with it.

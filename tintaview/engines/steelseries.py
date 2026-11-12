@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -42,6 +43,8 @@ from ..core.config import SteelSeriesConfig, expand
 from .base import BaseEngine
 
 log = logging.getLogger(__name__)
+
+_LOCAL_ADDRESS = re.compile(r"(?:127\.0\.0\.1|localhost):\d{1,5}")
 
 #: Our identity to GG. Uppercase with no spaces is the documented constraint on a game
 #: id (`[A-Z0-9_-]`), and it is what shows up in GG's own "Games" list.
@@ -104,8 +107,12 @@ def read_address(configured: str = "") -> str | None:
     except (OSError, ValueError) as e:
         log.debug("GameSense coreProps unreadable (%s): %r", path, e)
         return None
-    address = data.get("address")
-    return address if isinstance(address, str) and address else None
+    address = data.get("address") if isinstance(data, dict) else None
+    if not isinstance(address, str) or not _LOCAL_ADDRESS.fullmatch(address):
+        # GG only ever writes a loopback `host:port`. A file naming anything else was
+        # not written by GG, and every colour write would go wherever it says.
+        return None
+    return address
 
 
 class SteelSeriesEngine(BaseEngine):

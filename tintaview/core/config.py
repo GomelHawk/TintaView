@@ -559,6 +559,20 @@ def _migrate_engine_order(order: list[str], version: int) -> list[str]:
     return migrated
 
 
+def _section(raw: dict, name: str) -> dict:
+    """`raw[name]` when it is a table, else `{}` — with a warning when it is something
+    else. `engine = "auto"` is an easy slip for `[engine]` + `mode = "auto"`, and every
+    `.get()` on that string raised: `load()` promises never to, and the tray did not
+    start."""
+    value = raw.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        log.warning("config: %s = %r is not a table, using defaults for it", name, value)
+        return {}
+    return value
+
+
 def _int_or_default(value: Any, key: str, default: int) -> int:
     coerced = _coerce_value(value, default)
     if coerced is _INVALID:
@@ -585,7 +599,7 @@ def load(path: Path | None = None) -> Config:
 
     version = _int_or_default(raw.get("version", CONFIG_VERSION), "version", CONFIG_VERSION)
 
-    engine_raw = raw.get("engine", {}) or {}
+    engine_raw = _section(raw, "engine")
     engine = _build(EngineConfig, engine_raw, "engine")
     engine.chroma = _build(ChromaConfig, engine_raw.get("chroma", {}), "engine.chroma")
     engine.ghub = _build(GHubConfig, engine_raw.get("ghub", {}), "engine.ghub")
@@ -599,7 +613,7 @@ def load(path: Path | None = None) -> Config:
         engine.order = migrated_order
         version = CONFIG_VERSION  # the in-memory config now matches the current schema
 
-    agents_raw = dict(raw.get("agents", {}) or {})
+    agents_raw = dict(_section(raw, "agents"))
     enabled = agents_raw.pop("enabled", None) or ["claude"]
     if not isinstance(enabled, list):
         log.warning("config: agents.enabled = %r is not a list, using ['claude']", enabled)
@@ -610,7 +624,7 @@ def load(path: Path | None = None) -> Config:
         if isinstance(v, dict)
     }
 
-    ui_raw = raw.get("ui", {}) or {}
+    ui_raw = _section(raw, "ui")
     ui = _build(UIConfig, ui_raw, "ui")
     ui.clocks = _clocks(ui_raw.get("clocks", {}))
 
@@ -624,7 +638,7 @@ def load(path: Path | None = None) -> Config:
         escalation=_build(EscalationConfig, raw.get("escalation", {}), "escalation"),
         notify=_build(NotifyConfig, raw.get("notify", {}), "notify"),
         update=_build(UpdateConfig, raw.get("update", {}), "update"),
-        enabled_agents=[str(a) for a in enabled],
+        enabled_agents=[str(a) for a in enabled if isinstance(a, str) and a.strip()],
         agents=agents,
         path=p,
     )
@@ -640,10 +654,38 @@ def _toml_value(value: Any) -> str:
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
     s = str(value)
     # Literal strings ('…') don't process escapes, which keeps Windows and UNC paths
-    # readable. Fall back to a basic string when the value contains a quote.
-    if "'" not in s and "\n" not in s:
+    # readable. Fall back to a basic string when the value contains a quote — or any
+    # control character, which a literal string may not hold: a value with both a `'`
+    # and a `\r` used to be written as a file that no longer parsed, and the next load
+    # silently came back as all defaults.
+    if "'" not in s and not any(ord(ch) < 32 or ord(ch) == 127 for ch in s):
         return f"'{s}'"
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    return _basic_string(s)
+
+
+_BASIC_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _basic_string(s: str) -> str:
+    """`s` as a TOML basic string, every character it cannot hold raw escaped."""
+    out = []
+    for ch in s:
+        if ch in _BASIC_ESCAPES:
+            out.append(_BASIC_ESCAPES[ch])
+        elif ord(ch) < 32 or ord(ch) == 127:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _table_key(key: str) -> str:
+    """A table-name component: bare when TOML allows it, quoted otherwise. An agent key
+    with a space in it (`enabled = ["my agent"]` loads fine) was written as
+    `[agents.my agent]`, which does not parse."""
+    if key and all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in key):
+        return key
+    return _basic_string(key)
 
 
 def _validate_colors(obj: Any, table: str, *, blank_ok: bool) -> None:
@@ -784,7 +826,7 @@ def dumps(cfg: Config) -> str:
     # it serialises — this runs on the GUI thread on every save while the HTTP threads
     # read `cfg.agents`, and `agent()` inserts a table for each enabled agent.
     for key in _agent_table_keys(cfg):
-        out += _table(f"agents.{key}", cfg.agent_config(key))
+        out += _table(f"agents.{_table_key(key)}", cfg.agent_config(key))
     return "\n".join(out).rstrip() + "\n"
 
 

@@ -116,12 +116,12 @@ def _executable_command() -> list[str]:
     if sys.platform == "win32":
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         if pythonw.exists():
-            return [str(pythonw), "-m", "tintaview"]
-        return [sys.executable, "-m", "tintaview"]
+            return [str(pythonw), "-P", "-m", "tintaview"]
+        return [sys.executable, "-P", "-m", "tintaview"]
     exe = shutil.which("tintaview")
     if exe:
         return [exe]
-    return [sys.executable, "-m", "tintaview"]
+    return [sys.executable, "-P", "-m", "tintaview"]
 
 
 def _run(*args: str) -> bool:

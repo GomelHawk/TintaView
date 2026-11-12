@@ -1,0 +1,5 @@
+# The tools that build the release wheel. Compiled to build-requirements.txt (pinned,
+# with hashes) by `python scripts/build_lock.py build`; build.yml installs only that.
+build
+setuptools>=77
+setuptools-scm>=8

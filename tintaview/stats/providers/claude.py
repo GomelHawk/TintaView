@@ -213,8 +213,19 @@ def _money(m: dict[str, Any] | None) -> tuple[float, str] | None:
     amt = m.get("amount_minor")
     if amt is None:
         return None
-    exp = m.get("exponent", 0) or 0
+    exp = _small_exponent(m.get("exponent", 0) or 0)
+    if exp is None or not isinstance(amt, (int, float)):
+        return None
     return amt / (10**exp), m.get("currency", "USD")
+
+
+def _small_exponent(value: Any) -> int | None:
+    """A decimal exponent from the API, or None when it is not a small whole number.
+    `10 ** exponent` with whatever the response says froze the process for the better
+    part of a minute at 40 million."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 12:
+        return None
+    return value
 
 
 def _reset_of(iso: str | None) -> tuple[float, str]:
@@ -298,7 +309,9 @@ def _parse_usage(data: dict[str, Any]) -> list[UsageRow]:
         limit = _money(spend.get("limit"))
         pct = spend.get("percent")
     elif ex.get("is_enabled"):
-        dp = ex.get("decimal_places", 2)
+        dp = _small_exponent(ex.get("decimal_places", 2))
+        if dp is None:
+            dp = 2
         cur = ex.get("currency", "USD")
         if ex.get("used_credits") is not None:
             used = (ex["used_credits"] / (10**dp), cur)
@@ -575,7 +588,7 @@ class ClaudeUsageProvider(UsageProvider):
         """
         try:
             acc = _reconstruct_from_jsonl(home)
-        except OSError as e:
+        except Exception as e:  # noqa: BLE001 - a transcript line of any shape; see above
             log.info("claude local estimate unavailable: %r", e)
             return []
         if _has_unpriced(acc):

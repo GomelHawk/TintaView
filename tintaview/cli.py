@@ -237,7 +237,11 @@ def _cmd_hooks(args: argparse.Namespace) -> int:
             print("  skipped.")
             continue
 
-        backup = hooks_mod.apply(plan)
+        try:
+            backup = hooks_mod.apply(plan)
+        except hooks_mod.PlanStale as exc:
+            print(f"  not written: {exc}")
+            continue
         print(f"  written. backup: {backup}" if backup else "  written.")
 
         # Codex additionally gates hooks behind a feature flag in its own config.toml.
@@ -282,7 +286,11 @@ def _apply_notify_tool(cfg, adapter, action: str, assume_yes: bool) -> int:
         print("  skipped.")
         return 0
     for plan in pending:
-        backup = hooks_mod.apply(plan)
+        try:
+            backup = hooks_mod.apply(plan)
+        except hooks_mod.PlanStale as exc:
+            print(f"  not written: {exc}")
+            continue
         print(f"  written: {plan.path}" + (f" (backup: {backup})" if backup else ""))
     return 0
 
@@ -311,7 +319,13 @@ def _apply_codex_flag(adapter, assume_yes: bool) -> int:
     if not (assume_yes or _confirm(f"Apply this change to {plan.path}?")):
         print("  skipped — Codex hooks will not fire until this flag is set.")
         return 0
-    codex_flag.apply(plan)
+    from .install.hooks import PlanStale
+
+    try:
+        codex_flag.apply(plan)
+    except PlanStale as exc:
+        print(f"  not written: {exc}")
+        return 1
     print("  written.")
     return 0
 

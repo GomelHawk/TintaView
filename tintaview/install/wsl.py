@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import logging
 import shlex
-import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
 from ..core import config as config_mod
-from ..core.proc import no_window
+from ..core.proc import no_window, system_tool
 from . import codex_flag, detect
 from . import hooks as hooks_mod
 
@@ -57,7 +56,7 @@ def list_distros() -> list[str]:
 
 
 def _wsl_exe() -> str:
-    exe = shutil.which("wsl.exe") or shutil.which("wsl")
+    exe = system_tool("wsl.exe") or system_tool("wsl")
     if not exe:
         raise WslError(
             "WSL doesn't seem to be available on this machine (wsl.exe was not found)."

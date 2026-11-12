@@ -19,7 +19,11 @@ license-files = ["LICENSE"]
 dependencies = ["tomlkit>=0.12"]
 
 [project.optional-dependencies]
-ui = ["PySide6>=6.6"]
+# The two halves of Qt the tray uses, not the `PySide6` meta-package: that one also pulls
+# in PySide6_WebEngine (132 MB on Windows) and PySide6_Pdf, neither of which is imported
+# anywhere — over half of what every install and every Qt upgrade had to download.
+# Essentials is QtCore/QtGui/QtWidgets; Addons is there for QtMultimedia (custom sounds).
+ui = ["PySide6-Essentials>=6.6", "PySide6-Addons>=6.6"]
 openrgb = ["openrgb-python>=0.3.0"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "pillow>=10", "numpy>=1.26"]
 

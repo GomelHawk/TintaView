@@ -48,7 +48,7 @@
   "tray.update.up_to_date": "Sei aggiornato (versione {version}).",
   "tray.update.confirm": "La versione {latest} è disponibile — la tua è la {current}.{notes}\n\nUn aggiornamento non modifica mai le tue impostazioni né la configurazione degli hook dei tuoi agenti.\n\nInstallarla ora?",
   "tray.update.failed": "L'aggiornamento non è stato completato. Esegui `tintaview update` da un terminale per capire perché.",
-  "tray.update.installing": "Installazione dell'aggiornamento: può richiedere qualche minuto.",
+  "tray.update.installing": "Installazione dell'aggiornamento. TintaView si chiuderà e tornerà da solo. Può richiedere diversi minuti: sta lavorando, non devi fare nulla.",
   "tray.update.installed": "L'aggiornamento è installato. Riavvia TintaView per usare la nuova versione.",
   "tray.diagnostics.title": "Diagnostica di TintaView",
   "tray.diagnostics.running": "Diagnostica in corso, può richiedere qualche secondo…",

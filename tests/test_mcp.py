@@ -32,6 +32,8 @@ def daemon():
 
     cfg = Config()
     cfg.server.port = 0
+    # Notifications follow `agents.enabled`, like hook events do.
+    cfg.enabled_agents = ["claude", "codex", "cursor", "junie"]
     server = StatusServer(cfg, controller=LightController(cfg, engine=NullEngine()))
     assert server.start()
     received: list[tuple[str, str, str]] = []
@@ -248,7 +250,7 @@ def test_claude_registration_is_lossless_idempotent_and_reversible(tmp_path):
     assert data["numStartups"] == 3 and data["userName"] == "Zoë"
     assert data["mcpServers"]["gitlab"] == {"command": "npx"}
     assert data["mcpServers"]["tintaview"] == {
-        "type": "stdio", "command": PY, "args": ["-m", "tintaview.core.mcp", "claude"],
+        "type": "stdio", "command": PY, "args": ["-P", "-m", "tintaview.core.mcp", "claude"],
         "env": {}}
     assert not state.read_text(encoding="utf-8").endswith("\n")
     allow = json.loads(settings.read_text())["permissions"]["allow"]
@@ -277,7 +279,7 @@ def test_codex_registration_keeps_the_users_toml_and_auto_approves(tmp_path):
 
     entry = tomllib.loads(text)["mcp_servers"]["tintaview"]
     assert entry["command"] == PY
-    assert entry["args"] == ["-m", "tintaview.core.mcp", "codex"]
+    assert entry["args"] == ["-P", "-m", "tintaview.core.mcp", "codex"]
     assert entry["tools"]["notify_user"]["approval_mode"] == "approve"
     assert all(not p.changes for p in mcp_install.plan_install("codex", home, PY))
 
@@ -300,7 +302,7 @@ def test_cursor_registration(tmp_path):
     servers = json.loads(path.read_text())["mcpServers"]
     assert servers["other"] == {"command": "x"}
     assert servers["tintaview"] == {"command": PY,
-                                    "args": ["-m", "tintaview.core.mcp", "cursor"]}
+                                    "args": ["-P", "-m", "tintaview.core.mcp", "cursor"]}
 
     _apply(mcp_install.plan_uninstall("cursor", home))
     assert json.loads(path.read_text()) == {"mcpServers": {"other": {"command": "x"}}}
@@ -320,7 +322,7 @@ def test_copilot_registration(tmp_path):
     servers = json.loads(path.read_text())["mcpServers"]
     assert servers["other"] == {"command": "x"}
     assert servers["tintaview"] == {"type": "local", "command": PY,
-                                    "args": ["-m", "tintaview.core.mcp", "copilot"],
+                                    "args": ["-P", "-m", "tintaview.core.mcp", "copilot"],
                                     "env": {}, "tools": ["notify_user"]}
     assert mcp_install.status("copilot", home, PY) == hooks_mod.STATUS_INSTALLED
     assert mcp_install.plan_install("copilot", home, PY)[0].action == hooks_mod.ACTION_NOOP
@@ -420,7 +422,7 @@ def test_junie_registration_lives_in_mcp_subdir_and_keeps_the_users_servers(tmp_
     _apply(plans)
     servers = json.loads(path.read_text())["mcpServers"]
     assert servers["Context7"] == {"url": "https://x/mcp"}
-    assert servers["tintaview"] == {"command": PY, "args": ["-m", "tintaview.core.mcp", "junie"]}
+    assert servers["tintaview"] == {"command": PY, "args": ["-P", "-m", "tintaview.core.mcp", "junie"]}
     assert mcp_install.status("junie", home, PY) == hooks_mod.STATUS_INSTALLED
     assert mcp_install.plan_install("junie", home, PY)[0].action == hooks_mod.ACTION_NOOP
 
@@ -452,3 +454,29 @@ def test_windows_side_gives_the_windows_home_and_plain_python(tmp_path, monkeypa
     # Derived from the one set, so a third agent cannot be added there and forgotten here.
     for key in wsl.WINDOWS_SIDE_AGENTS:
         assert key in mcp_install.SUPPORTED
+
+
+def test_the_launcher_never_imports_from_the_agents_working_directory(tmp_path):
+    """An agent starts the notify tool in whatever directory the session is working in.
+    A cloned repository holding a `json.py` ran it as the user as soon as a session
+    opened there. Runs the registered command line, argument for argument."""
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parent.parent
+    hostile = tmp_path / "cloned-repo"
+    hostile.mkdir()
+    marker = tmp_path / "hijacked"
+    for name in ("json.py", "contextlib.py", "urllib.py"):
+        (hostile / name).write_text(
+            f"open({str(marker)!r}, 'w').write('ran')\nraise SystemExit(7)\n")
+    from tintaview.install import mcp as install_mcp
+
+    spec = install_mcp.launcher("claude", sys.executable)
+    assert spec["args"][0] == "-P"
+    done = subprocess.run(
+        [spec["command"], *spec["args"]], cwd=hostile, input=b"", capture_output=True,
+        timeout=30, env={**os.environ, "PYTHONPATH": str(repo_root),
+                         "TINTAVIEW_HOME": str(tmp_path / "home")})
+    assert not marker.exists(), "a file in the working directory was imported"
+    assert done.returncode == 0, done.stderr.decode()

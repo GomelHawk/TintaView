@@ -25,3 +25,7 @@
 *.png binary
 *.ico binary
 *.icns binary
+
+# The dependency locks are shipped in a release as they are; keep them LF everywhere.
+packaging/requirements-*.txt text eol=lf
+packaging/build-requirements.* text eol=lf

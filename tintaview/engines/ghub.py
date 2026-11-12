@@ -215,8 +215,18 @@ def discover_dll_path(cfg: GHubConfig) -> Path | None:
         if candidate.is_file():
             return candidate
 
+    # Last resort: PATH — but never the working directory, which `shutil.which`
+    # searches first on Windows. A DLL lying there would be loaded into the tray.
     found = shutil.which("LogitechLed.dll")
-    return Path(found) if found else None
+    if not found:
+        return None
+    try:
+        located = Path(found).resolve()
+        if located.parent == Path.cwd().resolve():
+            return None
+    except OSError:
+        return None
+    return located
 
 
 def _bind_signatures(dll) -> None:

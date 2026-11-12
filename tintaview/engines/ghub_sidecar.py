@@ -127,7 +127,8 @@ class GHubSidecar:
             # Avoid inheriting a parent force-flag that would recurse.
             env.pop(_ENV_SIDECAR, None)
             self._proc = subprocess.Popen(
-                [str(python), "-u", "-m", "tintaview.engines.ghub_worker"],
+                # -P: never import from the directory the tray happened to start in.
+                [str(python), "-P", "-u", "-m", "tintaview.engines.ghub_worker"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

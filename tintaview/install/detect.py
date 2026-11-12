@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core.proc import no_window
+from ..core.proc import no_window, system_tool
 
 PLATFORM_WINDOWS = "windows"
 PLATFORM_WSL = "wsl"  # running *inside* a WSL distro
@@ -84,7 +83,7 @@ def is_wsl() -> bool:
 
 def wsl_distros() -> list[str]:
     """Distro names visible from the Windows side, newest listing order preserved."""
-    exe = shutil.which("wsl.exe") or shutil.which("wsl")
+    exe = system_tool("wsl.exe") or system_tool("wsl")
     if not exe:
         return []
     try:

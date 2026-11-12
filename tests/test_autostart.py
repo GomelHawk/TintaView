@@ -229,10 +229,10 @@ def test_windows_enable_writes_the_run_key_not_a_startup_shortcut(
     # The windowed, PSF-signed interpreter — not the unsigned pip console shim.
     # G HUB paints via a python.exe sidecar spawned from the tray.
     assert "pythonw.exe" in value
-    assert value.endswith("-m tintaview")
+    assert value.endswith("-P -m tintaview")
     # The install prefix here contains a space, which is the normal case under
     # %LOCALAPPDATA% for most user names: the path must come back out quoted.
-    assert value.startswith('"') and '" -m' in value
+    assert value.startswith('"') and '" -P -m' in value
 
 
 def test_windows_status_and_disable(tmp_path, monkeypatch, fake_run, fake_which, fake_winreg):

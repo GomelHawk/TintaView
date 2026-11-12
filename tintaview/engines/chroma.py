@@ -14,12 +14,26 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from ..core.config import ChromaConfig
+from ..core.net import MAX_JSON_BYTES, read_capped
 from .base import BaseEngine
 
 log = logging.getLogger(__name__)
+
+
+def _is_local_http(uri: object) -> bool:
+    """Is `uri` an http(s) URL on this machine?"""
+    if not isinstance(uri, str):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(uri)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and host in ("localhost", "127.0.0.1", "::1")
 
 #: Chroma Connect's fixed discovery endpoint. A module-level default so callers don't
 #: need to know it, but overridable per instance — the tests point it at a local
@@ -198,8 +212,14 @@ class ChromaEngine(BaseEngine):
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return data["uri"]  # the SDK's response carries the *real* session URI
+                data = json.loads(read_capped(resp, MAX_JSON_BYTES).decode("utf-8"))
+            uri = data["uri"]  # the SDK's response carries the *real* session URI
+            if not _is_local_http(uri):
+                # Whatever answers on the SDK port names where every later PUT and the
+                # DELETE go. Synapse only ever names itself; anything else is not it.
+                log.warning("Chroma SDK named a session address that is not on this machine")
+                return None
+            return uri
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError, OSError) as e:
             log.debug("Chroma open failed: %r", e)
             return None

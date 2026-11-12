@@ -93,8 +93,14 @@ def console_python(executable: str | None = None) -> str:
 
 
 def launcher(agent_key: str, python: str) -> dict[str, Any]:
-    """The ``command`` + ``args`` pair every agent's MCP config takes."""
-    return {"command": python, "args": ["-m", MODULE, agent_key]}
+    """The ``command`` + ``args`` pair every agent's MCP config takes.
+
+    ``-P`` is load-bearing: the agent starts this in whatever directory the session is
+    working in, and without it Python puts that directory first on ``sys.path`` — so a
+    cloned repository holding a ``json.py`` (or a ``tintaview/`` folder) had its file run
+    as the user the moment a session opened there, before any tool was called.
+    """
+    return {"command": python, "args": ["-P", "-m", MODULE, agent_key]}
 
 
 def agent_home(cfg: Any, adapter: Any) -> Path:

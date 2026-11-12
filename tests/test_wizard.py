@@ -18,6 +18,7 @@ touch a real `~/.claude`, `~/.codex` or `~/.cursor`.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -155,7 +156,7 @@ def test_writes_config_matching_answers(monkeypatch, _isolated):
     from tintaview.install import mcp as mcp_install
 
     state = json.loads((home / ".claude.json").read_text())
-    assert state["mcpServers"]["tintaview"]["args"] == ["-m", "tintaview.core.mcp", "claude"]
+    assert state["mcpServers"]["tintaview"]["args"] == ["-P", "-m", "tintaview.core.mcp", "claude"]
     assert mcp_install.CLAUDE_ALLOW_RULE in json.loads(settings.read_text())["permissions"]["allow"]
 
 
@@ -385,7 +386,7 @@ class _FakeCompleted:
 def wsl_mod(monkeypatch):
     from tintaview.install import wsl
 
-    monkeypatch.setattr(wsl.shutil, "which", lambda name: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wsl.exe")
     return wsl
 
 
@@ -413,7 +414,7 @@ def test_run_in_builds_expected_wsl_command(monkeypatch, wsl_mod):
 
 
 def test_run_in_missing_wsl_exe_degrades_cleanly(monkeypatch, wsl_mod):
-    monkeypatch.setattr(wsl_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     with pytest.raises(wsl_mod.WslError, match="wsl.exe"):
         wsl_mod.run_in("Ubuntu", ["echo", "hi"])
 
@@ -574,6 +575,7 @@ def test_restart_targets_the_pid_the_daemon_reports(monkeypatch):
     stopped: list[int] = []
     launched: list[bool] = []
     monkeypatch.setattr(restart_mod, "running_pid", lambda cfg: 4242)
+    monkeypatch.setattr(restart_mod, "_is_tintaview_process", lambda pid: True)
     monkeypatch.setattr(
         restart_mod, "_stop", lambda pid, cfg=None: stopped.append(pid) or True
     )

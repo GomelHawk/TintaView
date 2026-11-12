@@ -710,7 +710,11 @@ def _confirm_and_apply_hooks(plan: hooks_mod.HookPlan, assume_yes: bool) -> bool
     if not _prompt_yes_no(f"Apply this change to {plan.path}?", True, assume_yes):
         print("  Skipped — hooks were not installed for this agent.")
         return False
-    hooks_mod.apply(plan)
+    try:
+        hooks_mod.apply(plan)
+    except hooks_mod.PlanStale as exc:
+        print(f"  Not written: {exc}")
+        return False
     print("  Done.")
     return True
 
@@ -726,8 +730,11 @@ def _confirm_and_apply_codex_flag(plan: codex_flag.FlagPlan, assume_yes: bool) -
     print(f"  note: {plan.reason}")
     print(codex_flag.diff(plan).rstrip("\n"))
     if _prompt_yes_no(f"Apply this change to {plan.path}?", True, assume_yes):
-        codex_flag.apply(plan)
-        print("  Done.")
+        try:
+            codex_flag.apply(plan)
+            print("  Done.")
+        except hooks_mod.PlanStale as exc:
+            print(f"  Not written: {exc}")
     else:
         print("  Skipped.")
 
@@ -888,7 +895,11 @@ def _confirm_and_apply_notify_tool(name: str, plans: list[hooks_mod.HookPlan],
         print("  Skipped — you can register it later with `tintaview setup`.")
         return False
     for plan in pending:
-        hooks_mod.apply(plan)
+        try:
+            hooks_mod.apply(plan)
+        except hooks_mod.PlanStale as exc:
+            print(f"  Not written: {exc}")
+            return False
     print("  Done.")
     return True
 

@@ -25,6 +25,7 @@ import pytest
 
 from tintaview import __version__
 from tintaview.core import controller as controller_mod
+from tintaview.core import server as server_mod
 from tintaview.core.config import AgentConfig, Config
 from tintaview.core.controller import LightController
 from tintaview.core.server import StatusServer, _StatusApplier
@@ -127,8 +128,17 @@ def _legacy_event(server: StatusServer, event: str, sid: str) -> None:
 
 
 def _get_state(server: StatusServer) -> dict:
+    """`GET /state`, plus what each agent is asking — which the HTTP route leaves out
+    (see `test_state_over_http_does_not_say_what_an_agent_is_asking`) and the tray reads
+    in-process through `state_payload()`."""
     with urllib.request.urlopen(f"{server.url}/state", timeout=2) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        state = json.loads(resp.read().decode("utf-8"))
+    private = server.state_payload()["agents"]
+    for agent, entry in state["agents"].items():
+        for key in server_mod.PRIVATE_STATE_KEYS:
+            if key in private.get(agent, {}):
+                entry[key] = private[agent][key]
+    return state
 
 
 def _wait_until(predicate, timeout: float = 1.0, interval: float = 0.01) -> bool:

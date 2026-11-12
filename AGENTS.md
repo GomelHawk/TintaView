@@ -254,7 +254,12 @@ browser leaves and no real client does: an `Origin` header (every cross-site POS
 link, a redirect), and a `Host` that is a DNS name other than `localhost` or `server.host` (DNS
 rebinding, which would otherwise let a page *read* `/state`). Any IP-literal `Host` is accepted —
 rebinding needs a name, and a hook reaches a `0.0.0.0` bind by whichever address it has — as is a
-request with no `Host` at all. `POST /v1/notify` additionally requires
+request with no `Host` at all — except `0.0.0.0` and `::` when they are not the configured
+host: on Linux and macOS those connect to a loopback listener, and a browser may attach no
+`Sec-Fetch-Site` to them. A browser's `User-Agent` with no `Sec-Fetch-Site` is refused too
+(a browser too old to send Fetch Metadata); it is matched on engine tokens (`Gecko/`,
+`AppleWebKit/`, …), never on `Mozilla/`, because PowerShell's `Invoke-WebRequest` says
+`Mozilla/5.0` and hooks, the installer and CI all use it. `POST /v1/notify` additionally requires
 `Content-Type: application/json`, which a page cannot send cross-site without a preflight.
 Never add a route above that check, and never answer `Access-Control-Allow-*`.
 `server.host` off loopback is logged at startup and is a `doctor` WARN: the same routes are then
@@ -262,8 +267,27 @@ open to the network.
 
 Both ingress paths read `agent`, `sid`, `tool` and `aid` through `server._ingress_ids`: made
 printable, one line and bounded (not rejected — a hand-written hook may name its session
-anything). `StateStore` keeps at most `MAX_SESSIONS`, dropping the longest-silent one, and a
-connection that sends nothing is closed after `REQUEST_TIMEOUT_S`.
+anything). `StateStore` keeps at most `MAX_SESSIONS`, dropping the longest-silent one. A
+connection that sends nothing is closed after `REQUEST_TIMEOUT_S`, any request is cut off at
+`REQUEST_DEADLINE_S` however slowly it trickles, and at most `MAX_CONNECTIONS` are handled at
+once (the rest are closed, not queued). A request path goes into the log only through
+`_printable_path`, and a request line `urlparse` cannot read is a 400, not a traceback.
+
+**`GET /state` is the public view.** `state_payload(public=True)` drops
+`PRIVATE_STATE_KEYS` — the question, the command (`detail`), the tool and the working directory
+of whatever an agent is asking — because loopback is readable by every local account and a
+pending command can hold a token. The tray reads the full payload in-process
+(`state_payload()`); nothing over HTTP needs those fields. Tests that want them read
+`server.state_payload()`.
+
+**`POST /v1/notify` follows `agents.enabled` and has an allowance** (`NOTIFY_BURST`, refilled
+every `NOTIFY_REFILL_S`): each accepted message is a balloon and one run of the user's notify
+command. A disabled agent gets `notified: false`; an exhausted allowance gets a 429, which the
+MCP server reports to the agent as a refusal — never as delivered.
+
+**Every JSON parse of something an agent sent catches `RecursionError` as well as
+`ValueError`.** A tool call's arguments can nest deeper than `json.loads` will go; the confirm
+was acknowledged and then dropped, so the session never turned red.
 
 Two invariants in the ingress path:
 
@@ -589,6 +613,21 @@ detector confirms with nothing to quote.
    distro's UNC path, corrupt JSON) is deliberately *not* `missing`: `missing` is what routes a
    user into a CREATE, which would overwrite their real config with only our hooks. Every UI
    that offers "install" must key on `missing / partial / stale-path`, never on `!= installed`.
+8. **A plan is applied only to the file it was made from.** `apply` re-reads the file and
+   raises `PlanStale` when it differs from `plan.before`: an agent rewrites its own config
+   constantly (`~/.claude.json` on every prompt), and writing the approved text over a file
+   that moved on while the diff was on screen undid whatever changed in between. Callers
+   print "not written … run it again".
+9. A backup never overwrites an existing backup (two edits to one file in the same second get
+   distinct names), an event whose existing value is not a list is refused like unparseable
+   JSON, and a symlinked config is written *through* the link (`fsutil.atomic_write`), so a
+   `settings.json` kept in a dotfiles repository stays a link.
+
+`install/codex_flag.py` edits Codex's `config.toml` under the same rules — only *not found* is
+empty, `PlanStale`, mode-preserving backup and rewrite — and `doctor` prints its change with
+no context lines (`diff(plan, context=0)`): the flag lands at the end of the file, where
+`[mcp_servers.*.env]` blocks with their tokens usually are, and that report is made to be pasted
+into a bug report.
 
 **Drift detection — startup only, WSL-aware, no menu item.** Agents rewrite their config on
 upgrade, so the tray runs **one** hook check at startup (`ui/tray.py`'s `HookCheckWorker`, off the
@@ -616,6 +655,14 @@ care). The server forwards a call to `POST /v1/notify`; the tray balloons it and
 variables empty). The agent only ever sends text — the command and any token in it stay in
 `config.toml`. Rules:
 
+- **Every `python -m …` the app writes or starts carries `-P`** (the MCP launcher, the Run key
+  and shortcut, the G HUB sidecar, the wizard's terminal), and every interpreter call in the
+  installers carries `-I`. Without it Python puts the working directory first on `sys.path`.
+  The notify tool is started by the agent in whatever folder the session is working in, so a
+  cloned repository holding a `json.py` had it run as the user the moment a session opened
+  there — reproduced, and now a test launches the registered command from a folder full of
+  planted modules. Adding `-P` changed the registered arguments, so an install from before it
+  reads as needing a refresh (`tintaview setup` / `hooks install`).
 - **The launcher is a contract, like the `tv-hook` path.** The module path is baked into
   every registered config, so `tintaview.core.mcp` never moves. The interpreter written is
   `install.mcp.console_python()` — never `pythonw.exe`, which has no stdio. In a WSL split
@@ -961,9 +1008,41 @@ a provider.
   replaced whole, because an agent may run the script mid-install. Don't `write_text` then
   `chmod`.
 - **A user command is never logged**, only its length (`core.usercmd.spawn`).
+- **A credential a header cannot carry is refused before `http.client` sees it**
+  (`token_request` raises a fixed-text `ValueError`). `http.client`'s own exception quotes the
+  whole header value, and provider errors are shown in the panel, logged, and printed by
+  `doctor`.
+- **Agent-supplied text is never handed to Qt as markup.** A `QLabel` and a `QToolTip` both
+  auto-detect rich text; `<img src=…>` in a `notify_user` message or a working directory made
+  Qt load the file, and on Windows a UNC `src` is an outbound login. The bell's tooltip is
+  `html.escape`d and its labels are `Qt.PlainText`. Anything painted with `QPainter.drawText`
+  is plain already.
+- **Nothing read from a file or an API is trusted to be well-formed**, because every one of
+  these was a crash or a stall: `config.load()` treats a non-table section as absent
+  (`_section`); `config.dumps()` quotes agent keys and escapes control characters so that what
+  it writes always parses again; `TrendStore` and `UsageCache` skip a malformed entry;
+  `format.reset_row_text` returns "" for an instant it cannot word (it runs in `paintEvent`);
+  Claude's money exponents are accepted only as small whole numbers (`10 ** exponent` with
+  whatever the response said took most of a minute); QTimer intervals are clamped
+  (`tray._timer_ms`).
+- **A lighting SDK is only ever spoken to on this machine.** Chroma's session URI
+  (`chroma._is_local_http`) and GameSense's `coreProps.json` address must be loopback;
+  whatever answers on the SDK port, or writes that file, otherwise names where every later
+  write goes.
+- **Windows system tools are started by full path** (`core.proc.system_tool`): `shutil.which`
+  and `CreateProcess` search the working directory before System32, so `tintaview update` run
+  from a folder holding a `powershell.exe` ran that one. The G HUB DLL's PATH fallback refuses
+  the working directory for the same reason.
+- **`restart` signals a pid only after checking it is TintaView**
+  (`_is_tintaview_process`). The pid comes from whatever answers `/state` on the port; a
+  program answering with the pid of the user's shell had it terminated by the next `setup`.
 - **The updater downloads only from `update.RELEASE_DOWNLOAD_PREFIX`** (this repository's
   release downloads): asset URLs come out of a JSON reply, so they are checked, not trusted,
-  and a download is capped at `MAX_ASSET_BYTES`.
+  and a download is capped at `MAX_ASSET_BYTES`. The script is saved one directory *below*
+  the private `mkdtemp()` folder, and `install.sh` accepts a checkout only when it sits in a
+  `packaging/` folder beside `tintaview/__init__.py`: it used to accept "a `pyproject.toml`
+  one level up", which for the updater's copy was the machine's shared temp folder — any
+  local user could leave one there and have their package installed instead of the release.
 
 ## Interface language (i18n)
 
@@ -1087,10 +1166,11 @@ Two traps both installers encode (the first is Windows-only):
   tintaview.png`, `Icon=tintaview`). With a file path in `Icon=`, GNOME Shell kept showing its
   cached picture after the path changed — measured on the maintainer's Ubuntu VM.
 
-**Dependencies are installed from the release's lock, when it has one.** `build.yml` runs
-`scripts/build_lock.py build`, which writes `requirements-lock.txt` ([ui] + [openrgb]) and
-`requirements-headless-lock.txt` ([openrgb]) with `pip-compile --generate-hashes`: every
-dependency pinned, with the SHA-256 of every file published for that version, so one file made
+**Dependencies are installed from the release's lock, and the lock is committed.**
+`packaging/requirements-lock.txt` ([ui] + [openrgb]) and
+`packaging/requirements-headless-lock.txt` ([openrgb]) are written by
+`scripts/build_lock.py` with `pip-compile --generate-hashes`: every dependency pinned, with the
+SHA-256 of every file published for that version, so one file made
 on Linux installs on all three systems. Both are in `SHA256SUMS.txt`. Each installer downloads
 its lock, verifies it like the wheel, and runs `pip install --require-hashes --only-binary :all:
 -r <lock>` in place of the unpinned `--upgrade "<wheel>[extras]"`; the wheel itself then goes in
@@ -1098,18 +1178,43 @@ with the existing `--force-reinstall --no-deps`. What this buys is that a depend
 published *after* a TintaView release — how a compromised package usually arrives — is never
 fetched. Three outcomes, and the difference between the last two is deliberate:
 
-- **No lock** (a release from before it, `-WheelPath` with none beside the wheel, a checkout
-  with no `dist/release/`): install unpinned, exactly as before.
+- **No lock** (a release from before it, `-WheelPath` with none beside the wheel): install
+  unpinned, exactly as before.
 - **A checksum mismatch** — pip's log (`--log`, read instead of captured output; redirecting a
   native command's stderr throws under PowerShell's `Stop`) contains `DO NOT MATCH THE HASHES`:
   the install stops. Never retried unpinned.
-- **Any other failure** — a Python newer than the pinned versions support, a platform-only
-  dependency the Linux-made lock does not list: a warning, then the unpinned install. Failing
-  closed here would break installs for a reason that is not an attack, on the project's most
-  fragile path. The cost is stated honestly: someone who can make the pinned version
-  *unavailable* gets the unpinned behaviour back, which is what every install had before.
+- **pip says the lock does not fit this machine** — its log contains `require a different
+  python version` (a Python newer than the pinned versions support), or `Hashes are required
+  in --require-hashes mode` / `all requirements must have their versions pinned` (this system
+  needs a package the lock does not list — pip words it either way, depending on whether the
+  parent pins it): a warning, then the unpinned install. Only those messages.
+- **Anything else** — no connection, an index that does not answer, a pinned file that is
+  gone — stops the install with "check your connection and run this again". It used to take
+  the unpinned path too, which let whoever could make a download fail choose what was
+  installed.
 
-The `smoke-install*` jobs build the lock and run `build_lock.py verify` against the installed
+Three more rules around the lock, each of which was a way past it:
+
+- **Whether a release has a lock is read from `SHA256SUMS.txt`.** Listed there, a failed
+  download of the lock is fatal; it used to mean "no lock", silently.
+- **pip is never upgraded from the index.** Both installers used to run
+  `pip install --upgrade pip` first, unpinned, on every install and update — so the newest
+  "pip" of the day ran before the lock was consulted.
+- **A `venv` folder is only emptied or deleted when it is one** (`pyvenv.cfg` present, or the
+  folder empty), in both installers, on install and on uninstall.
+
+**`build.yml` copies the committed locks; it never regenerates them.** It did, for one release:
+each release then pinned whatever PySide6 was newest that day, and since the locked install
+puts in exactly the pinned versions, an update that should replace one 0.7 MB wheel
+re-downloaded about 260 MB of Qt (measured on the 1.1.0 update: every PySide6 package
+reinstalled). The old unpinned `--upgrade` left an installed PySide6 alone, and with committed
+pins the locked install does too. A pin moves only when someone runs
+`python scripts/build_lock.py upgrade` and commits the diff — expect that release's update to
+be the large one, and say so in its notes. `build` adds what `pyproject.toml` newly needs and
+keeps every existing pin; the `lint` job runs `check`, which fails when the committed locks no
+longer fit `pyproject.toml`. A checkout install reads the same files from `packaging/`.
+
+The `smoke-install*` jobs run `build_lock.py verify` against the installed
 venv on ubuntu, macOS and Windows. It checks pip's `REQUESTED` marker, not only versions: on the
 day a lock is made the unpinned fallback installs the same versions, and only a package named
 in the lock file itself carries that marker.
@@ -1211,12 +1316,43 @@ smoke test that the wheel installs and `python -m tintaview` works, then it atta
 GitHub Release. Building on Linux also keeps `install.sh` from being CRLF-mangled on the way into
 the release — see `.gitattributes`. Third-party actions are pinned to a commit SHA (with the tag in
 a comment) and `.github/dependabot.yml` proposes the bumps; `ci.yml` runs with `contents: read`.
-`build.yml` is two jobs: `build` (tests, wheel, checksums) is read-only, because it runs code
-from the repository and from PyPI; `publish` takes the finished files as an artifact, is the
-only job with `contents: write`, records a build-provenance attestation for them
-(`gh attestation verify <file> --repo GomelHawk/TintaView`) and attaches them to the Release.
+`build.yml` is four jobs, split by what each may touch. `test` runs the suite and the
+dependency audit, with all the unpinned tooling that needs, and produces nothing. `build`
+builds the wheel in a clean checkout with only the tools in `packaging/build-requirements.txt`
+(pinned, hashed, `python -m build --no-isolation`) and writes the checksums. `verify`
+installs the built wheel from a downloaded copy. `publish` is the only job with
+`contents: write`: it records a build-provenance attestation
+(`gh attestation verify <file> --repo GomelHawk/TintaView`) and attaches the files to the
+Release. Tests and build used to share one job, so one compromised release of any test
+dependency could have changed the wheel or an install script before it was hashed — and the
+attestation would have vouched for it. Never install anything else in `build`.
 The attestation is the only check that does not come from the Release itself —
 `SHA256SUMS.txt` sits beside the files it covers.
+
+**Every release starts with the dependencies: fresh, and free of known vulnerabilities.** The
+locks in `packaging/` are committed so that an update does not re-download Qt, which means
+nothing refreshes them unless someone does. Pinned must never come to mean stale — an old Qt is
+an unpatched Qt — so before a version is prepared:
+
+```sh
+python scripts/build_lock.py outdated      # every pin against PyPI's newest release
+pip-audit --require-hashes --disable-pip -r packaging/requirements-lock.txt
+pip-audit --require-hashes --disable-pip -r packaging/requirements-headless-lock.txt
+```
+
+- **A known vulnerability is never shipped.** `ci.yml` and `build.yml` both run the audit and
+  fail on one. Bump the pin (`python scripts/build_lock.py upgrade`), run the tests, commit
+  the locks — and cut a release for that alone if the fix is not already on its way out.
+- **Anything behind its newest release is bumped by default**, the same way. Leaving a pin
+  where it is needs a reason (a regression in the new version, a release in the middle of
+  something else), and the reason goes to the maintainer with the release notes — it is not a
+  silent choice. This rule is written down because it was broken: the locks were committed to
+  stop a 260 MB download on every update, and nothing was put in place to keep them current
+  until the maintainer asked where the security had gone.
+- **A release that moves the Qt pin says so in its notes**: that update downloads Qt again
+  (over 100 MB) and takes minutes, not seconds.
+- `deps.yml` runs both checks every Monday and fails when either has something to say, so
+  a fix published between releases is not waiting for the next one to be noticed.
 
 **Asked for a release, or for release notes?** Write a detailed description of it, derived from
 **every commit on `main` after the most recent tag** — not from memory, not from what this session
@@ -1314,7 +1450,7 @@ can't be worked out from the diff, say so in the notes rather than guessing at i
 | G HUB legacy LED SDK + start order | Undocumented/unofficial by Logitech's own admission; `RestoreLighting` does not hand mice back — `close()` must `LogiLedShutdown` and the next `open()` re-inits. If G HUB restarts under us the session is orphaned — surface a status_note and restart TintaView. **`pythonw.exe` silent no-op:** SetLighting returns true but does not paint — tray stays on `pythonw`, paint goes through a `python.exe` sidecar only for this engine |
 | OpenRGB SDK version drift | Pin to v5 behaviour, feature-detect, fail soft |
 | Unsigned build (accepted) | Ship via the install scripts so no MOTW tag ever reaches anything. If a Defender *heuristic* ever bites, submit to Microsoft's false-positive portal and consider free OSS signing (SignPath) or Azure Trusted Signing |
-| PySide6 size (~60 MB) | Accepted for the usage-card quality; revisit `pystray` only if it becomes a real problem |
+| Qt size (over 100 MB) | Accepted for the usage-card quality; revisit `pystray` only if it becomes a real problem. The `[ui]` extra is `PySide6-Essentials` + `PySide6-Addons` (QtMultimedia, for custom sounds), never the `PySide6` meta-package: that adds WebEngine (132 MB on Windows) and Pdf, which nothing imports — a test scans the package's Qt imports. Both installers say, in plain words, that the step takes several minutes and the window must stay open (no package names or sizes — the reader is not a developer), and leave pip's progress visible for it |
 | `doctor` from a GUI | `run_doctor` is reachable from the tray (Run diagnostics), not just a terminal. Every step that prompts must go through the `interactive` flag: a windowed process has **no** `sys.stdin` at all (it is `None` under `pythonw`, so `sys.stdin.isatty()` raises, not returns False), and a tray started *from* a terminal has one the user cannot see, so it hangs instead. `run_doctor(interactive=None)` auto-detects via `_can_prompt()`; a GUI caller passes an explicit `False`. New interactive checks must be gated the same way |
 | macOS lighting | There isn't any realistically — positioned as status + stats only, stated up front |
 | Tray left click (GNOME, macOS) | **Left click opens the usage panel on every OS — never a menu item instead.** **macOS:** with a menu attached, a status item opens it on *every* click and Qt reports the click only as the menu opens (`qcocoasystemtrayicon.mm`, `updateMenu`), so `TrayApp._attach_menu` attaches none there and `_on_activated` pops the menu on `Context` itself (from Qt's source; not run on a Mac). **GNOME:** GNOME's AppIndicator extension opens a *D-Bus* (StatusNotifierItem) icon's menu on left click and passes the app only a double click (`indicatorStatusIcon.js` `vfunc_button_press_event`, identical v58–v66), while its *X11* tray icons get the raw click. Qt picks D-Bus whenever the watcher is on the bus, with no switch (`QGenericUnixTheme::shouldUseDBusTray`). So `ui/tray.py` `_use_legacy_tray` starts Qt on `xcb` with a session bus it cannot reach, **only** on GNOME with `legacy-tray-enabled`, and only after a child-process probe proves Qt's xcb plugin loads and an X11 tray host exists (Qt *aborts* on a missing `libxcb-*`); both variables are restored once the icon exists. Anything in doubt falls back to the D-Bus icon. Measured here: Qt on xcb registers via D-Bus when the watcher is present, and the probe answers right with/without a host and without the libraries. **Verified on Ubuntu (GNOME, VM):** without the libraries the log says "X11 tray icon unavailable, using the D-Bus one"; after `install.sh` installed them, "using an X11 tray icon", and a left click opened the usage panel. A user who declines the libraries (the installer asks, with apt, dnf or pacman package names) keeps the D-Bus icon: a double click, or launching TintaView again from the app menu (`/show`), still opens the panel. **Where the panel opens:** at the icon's own rectangle (`QSystemTrayIcon.geometry()`, `TrayApp._flyout_anchor`), never the cursor first — on XWayland the cursor is wherever the pointer last crossed an X11 window, and the panel opened somewhere new each time; only an icon with no known rectangle (D-Bus) uses the cursor |

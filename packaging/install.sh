@@ -18,6 +18,10 @@
 # autostart entry in place — nothing is ever duplicated. Config and hook installs are
 # never touched by a re-run; only `tintaview setup`/`tintaview hooks` change those.
 #
+# Every Python call below carries `-I` (isolated mode): without it the interpreter puts
+# the directory this script is run from on its import path, and a `venv.py` or `pip.py`
+# lying there — /tmp, a shared folder, a cloned repository — would run instead.
+#
 # Written in POSIX sh (no bashisms, no `local`) plus a portable `curl`/`wget` fallback so
 # it also works piped straight from a release, with no local checkout on disk:
 #
@@ -185,7 +189,7 @@ FIRST_PY=""
 for candidate in python3.14 python3.13 python3.12 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
         [ -n "$FIRST_PY" ] || FIRST_PY="$candidate"
-        if "$candidate" -c 'import venv, ensurepip' >/dev/null 2>&1; then
+        if "$candidate" -I -c 'import venv, ensurepip' >/dev/null 2>&1; then
             PY="$candidate"
             break
         fi
@@ -193,7 +197,7 @@ for candidate in python3.14 python3.13 python3.12 python3; do
 done
 
 if [ -z "$PY" ] && [ -n "$FIRST_PY" ]; then
-    FIRST_VER=$("$FIRST_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+    FIRST_VER=$("$FIRST_PY" -I -c 'import sys; print("%d.%d" % sys.version_info[:2])')
     die "$FIRST_PY ($FIRST_VER) cannot create a virtual environment: its 'venv'/'ensurepip'
 modules are missing. On Debian/Ubuntu they are a separate package:
   sudo apt install python$FIRST_VER-venv
@@ -208,7 +212,7 @@ if [ -z "$PY" ]; then
   macOS:          brew install python3   (or: xcode-select --install)"
 fi
 
-PY_VERSION=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+PY_VERSION=$("$PY" -I -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 info "Using $PY ($PY_VERSION)"
 
 # --------------------------------------------------------------------------- source
@@ -229,7 +233,15 @@ REPO_ROOT=""
 case "$0" in
     */*)
         script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || script_dir=""
-        if [ -n "$script_dir" ] && [ -f "$script_dir/../pyproject.toml" ]; then
+        # A checkout is this script sitting in its own `packaging/` folder beside the
+        # package it installs — all three, not just "a pyproject.toml one level up".
+        # `tintaview update` runs a downloaded copy of this file out of a temp folder,
+        # and one level up from there is the machine's shared temp directory: a
+        # `pyproject.toml` left in it by any local user made this install *their*
+        # package instead of the verified release.
+        if [ -n "$script_dir" ] && [ "$(basename -- "$script_dir")" = "packaging" ] \
+            && [ -f "$script_dir/../pyproject.toml" ] \
+            && [ -f "$script_dir/../tintaview/__init__.py" ]; then
             candidate_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
             if grep -q '^name = "tintaview"' "$candidate_root/pyproject.toml" 2>/dev/null; then
                 REPO_ROOT="$candidate_root"
@@ -323,8 +335,10 @@ RELEASES_URL="https://github.com/$GITHUB_REPO/releases"
 # release was built and tested with, each with the SHA-256 of its files (build.yml writes
 # it; it is listed in SHA256SUMS.txt like the wheel). With it pip installs exactly those
 # files, so a dependency release published *after* this TintaView release — the usual way
-# a compromised package arrives — is never downloaded. Empty means "no lock": an older
-# release without one, or a checkout that never built one, installs as it always did.
+# a compromised package arrives — is never downloaded. The pins are committed
+# (packaging/) and move only on purpose, so an update replaces TintaView's own wheel and
+# leaves an already-installed Qt alone. Empty means "no lock": an older release without
+# one installs as it always did.
 if [ "$HEADLESS" -eq 1 ]; then
     LOCK_NAME="requirements-headless-lock.txt"
 else
@@ -335,9 +349,9 @@ LOCK_FILE=""
 if [ -n "$REPO_ROOT" ]; then
     info "Installing from local checkout at $REPO_ROOT"
     PKG_SPEC="$REPO_ROOT"
-    # Where build.yml writes it; present only after a local release build (and in CI).
-    if [ -f "$REPO_ROOT/dist/release/$LOCK_NAME" ]; then
-        LOCK_FILE="$REPO_ROOT/dist/release/$LOCK_NAME"
+    # The committed lock a release ships, so a checkout installs the same pins.
+    if [ -f "$REPO_ROOT/packaging/$LOCK_NAME" ]; then
+        LOCK_FILE="$REPO_ROOT/packaging/$LOCK_NAME"
     fi
 elif [ -n "${TINTAVIEW_SOURCE_URL:-}" ]; then
     # Explicit developer/CI override: install exactly what the caller pointed at, with no
@@ -398,9 +412,14 @@ Refusing to install an unverified build. Check $RELEASES_URL and try again short
     verify_checksum "$WORKDIR" "$WHEEL_NAME" "$SUMS_NAME"
     PKG_SPEC="$WORKDIR/$WHEEL_NAME"
 
-    # Optional to *find* (releases before it existed have none), never optional to
-    # verify: a lock that was downloaded but is not in SHA256SUMS.txt stops the install.
-    if fetch "$BASE_URL/$LOCK_NAME" "$WORKDIR/$LOCK_NAME" 2>/dev/null; then
+    # Whether this release has a lock is read from SHA256SUMS.txt, which is already
+    # downloaded: listed there, the lock is required — a download that fails is the end
+    # of the install, not a quiet switch to unpinned dependencies. Only a release from
+    # before the lock existed (not listed) goes without.
+    if grep -Eq "[[:space:]][*]?$LOCK_NAME\$" "$WORKDIR/$SUMS_NAME"; then
+        fetch "$BASE_URL/$LOCK_NAME" "$WORKDIR/$LOCK_NAME" \
+            || die "Could not download $BASE_URL/$LOCK_NAME.
+Check your internet connection and run this again."
         verify_checksum "$WORKDIR" "$LOCK_NAME" "$SUMS_NAME"
         LOCK_FILE="$WORKDIR/$LOCK_NAME"
     fi
@@ -411,25 +430,34 @@ fi
 # A venv is reused only if its pip works. One left by an interrupted run, or by an older
 # install.sh that created it without ensurepip, has a python3 and no pip; `--clear` rebuilds
 # it in place (the venv directory is the installer's own, never user data).
-if [ -x "$VENV_PY" ] && "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+if [ -x "$VENV_PY" ] && "$VENV_PY" -I -m pip --version >/dev/null 2>&1; then
     info "Reusing existing virtual environment at $VENV_DIR"
 else
     if [ -d "$VENV_DIR" ]; then
         warn "The virtual environment at $VENV_DIR is incomplete (no pip); recreating it."
     fi
+    # `--clear` below empties the directory. It may only ever empty a virtual
+    # environment: `--prefix` is whatever was typed, and a `venv` folder already there
+    # with something else in it is not this script's to wipe.
+    if [ -d "$VENV_DIR" ] && [ ! -f "$VENV_DIR/pyvenv.cfg" ] \
+        && [ -n "$(ls -A "$VENV_DIR" 2>/dev/null)" ]; then
+        die "$VENV_DIR exists and is not a Python virtual environment.
+Move it away, or install somewhere else with --prefix."
+    fi
     info "Creating a virtual environment at $VENV_DIR"
     mkdir -p "$PREFIX"
-    "$PY" -m venv --clear "$VENV_DIR" \
+    "$PY" -I -m venv --clear "$VENV_DIR" \
         || die "Could not create a virtual environment at $VENV_DIR with $PY."
 fi
 
-info "Upgrading pip inside the virtual environment"
-"$VENV_PY" -m pip install --quiet --upgrade pip
+# pip is used as the venv has it. It used to be upgraded from the index first, unpinned
+# and unverified, on every install and update — so whatever "pip" was newest that day
+# ran before the checksummed lock below was ever consulted.
 
 # [openrgb] goes in either way: it is the second lighting engine, it is small and pure
 # Python, and leaving it out makes the engine permanently unavailable however the user
 # configures it -- reported as "the SDK server isn't answering", which sends people to
-# restart software that was never the problem. [ui] (PySide6, ~100MB) is the one worth
+# restart software that was never the problem. [ui] (Qt, over 100 MB) is the one worth
 # skipping on a headless box, since there is no tray to draw there.
 if [ "$HEADLESS" -eq 1 ]; then
     EXTRA_SPEC="${PKG_SPEC}[openrgb]"
@@ -437,13 +465,18 @@ else
     EXTRA_SPEC="${PKG_SPEC}[ui,openrgb]"
 fi
 
-info "Installing $APP_NAME ($EXTRA_SPEC) — this may take a minute the first time"
+# The long step. In plain words, for someone who is not a developer: something is being
+# installed, it takes a while, and the window must stay open. "This may take a minute"
+# above a silent terminal for five minutes read as a hung install, and people closed it.
+# pip's own progress is left visible for this step so that something keeps moving.
+info "Installing $APP_NAME's components. This can take several minutes."
+info "Please keep this window open — it is working, even when nothing seems to move."
 LOCKED=0
 if [ -n "$LOCK_FILE" ]; then
     # pip's own log, not captured output: it is where the reason for a failure is read
     # from, the same way on every platform (install.ps1 does exactly this).
     PIP_LOG=$(mktemp)
-    if "$VENV_PY" -m pip install --quiet --require-hashes --only-binary :all: \
+    if "$VENV_PY" -I -m pip install --require-hashes --only-binary :all: \
         --log "$PIP_LOG" -r "$LOCK_FILE"; then
         LOCKED=1
     elif grep -q "DO NOT MATCH THE HASHES" "$PIP_LOG" 2>/dev/null; then
@@ -453,18 +486,26 @@ if [ -n "$LOCK_FILE" ]; then
         die "A downloaded dependency does not match the checksum in this release's $LOCK_NAME.
 Nothing was installed from it. This can be a corrupted download or a tampered package —
 try again on another network, and report it at $RELEASES_URL if it repeats."
-    else
-        # Anything else is the lock not fitting this machine — a Python newer than the
-        # pinned versions support, a platform-specific dependency the lock does not
-        # list. Install as before the lock existed, and say so.
+    elif grep -Eq "require a different python version|Hashes are required in --require-hashes mode|all requirements must have their versions pinned" "$PIP_LOG" 2>/dev/null; then
+        # The lock does not fit this machine: pip itself says the pinned versions do
+        # not support this Python, or that this system needs a package the lock does
+        # not list. Only then: install as before the lock existed, and say so.
         warn "Could not install the exact dependency versions this release was built with
-(they may not support $PY_VERSION on this system); installing the newest compatible ones instead."
+(they do not support Python $PY_VERSION on this system); installing the newest compatible ones instead."
+    else
+        # Everything else — no connection, an index that did not answer, a pinned file
+        # that is gone — stops here. Carrying on unpinned would let whoever can make a
+        # download fail choose what gets installed.
+        rm -f "$PIP_LOG"
+        die "Could not download $APP_NAME's components (see the messages above). Nothing was
+changed in your existing install. Check your internet connection and run this again."
     fi
     rm -f "$PIP_LOG"
 fi
 if [ "$LOCKED" -eq 0 ]; then
-    "$VENV_PY" -m pip install --quiet --upgrade "$EXTRA_SPEC"
+    "$VENV_PY" -I -m pip install --upgrade "$EXTRA_SPEC"
 fi
+info "Installing $APP_NAME itself"
 
 # ...and then plant TintaView's own code unconditionally, the same repair pass install.ps1
 # runs. `--upgrade` compares version numbers and does nothing when they match, so without
@@ -472,7 +513,7 @@ fi
 # string (a re-tag, or a dev build) silently leaves the old code in place while reporting
 # success. `--no-deps` keeps it to the one artifact, so the dependency resolution above is
 # not repeated.
-"$VENV_PY" -m pip install --quiet --force-reinstall --no-deps "$PKG_SPEC"
+"$VENV_PY" -I -m pip install --quiet --force-reinstall --no-deps "$PKG_SPEC"
 
 # --------------------------------------------------------------------------- launcher
 

@@ -34,6 +34,7 @@ from typing import Any
 
 from .. import __version__
 from ..core.net import copy_capped
+from ..core.proc import system_tool
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ def _parse_version(text: str) -> tuple[int, ...]:
     for piece in core.split("."):
         digits = ""
         for ch in piece:
-            if not ch.isdigit():
+            if ch not in "0123456789":  # ASCII only: `"²".isdigit()` is true, `int("²")` raises
                 break
             digits += ch
         parts.append(int(digits) if digits else 0)
@@ -99,8 +100,17 @@ def _parse_prerelease(text: str) -> str:
     Build metadata (`+abc`) is dropped: semver says it never affects precedence.
     """
     text = _strip_v(text).split("+", 1)[0]
-    _core, _, pre = text.partition("-")
-    return pre
+    _core, sep, pre = text.partition("-")
+    if sep:
+        return pre
+    # The PEP 440 spelling, which is what an installed build actually reports
+    # (setuptools-scm writes `1.2.0rc1`, never `1.2.0-rc1`): everything from the first
+    # character that is neither a digit nor a dot. Without it an installed rc compared
+    # equal to its final release and was never offered it.
+    for index, ch in enumerate(text):
+        if ch not in "0123456789.":
+            return text[index:].lstrip(".")
+    return ""
 
 
 def _prerelease_key(pre: str) -> tuple:
@@ -110,7 +120,8 @@ def _prerelease_key(pre: str) -> tuple:
     """
     out = []
     for ident in pre.split("."):
-        out.append((0, int(ident), "") if ident.isdigit() else (1, 0, ident))
+        numeric = bool(ident) and all(ch in "0123456789" for ch in ident)
+        out.append((0, int(ident), "") if numeric else (1, 0, ident))
     return tuple(out)
 
 
@@ -238,7 +249,7 @@ def _parse_checksums(text: str, filename: str) -> str | None:
         if len(parts) < 2:
             continue
         digest, name = parts[0], parts[-1].lstrip("*")
-        if name == filename or name.endswith(f"/{filename}"):
+        if name == filename:  # exactly, as both installers match it
             return digest
     return None
 
@@ -304,7 +315,12 @@ def _fetch_install_script(assets: list[dict[str, Any]], script_name: str) -> Pat
         print(f"{checksums_name} was listed but has no download URL — refusing to run an unverified script.")
         return None
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="tintaview-update-"))
+    # One level down inside the private (0700) directory, never directly in it:
+    # install.sh treats "a pyproject.toml one directory above me" as a source checkout,
+    # and directly inside `mkdtemp()` that directory is the shared temp folder — where
+    # any local user can leave a `pyproject.toml` and have their package installed.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="tintaview-update-")) / "run"
+    tmp_dir.mkdir()
     return _download_and_verify(script_url, checksums_url, tmp_dir, script_name)
 
 
@@ -331,7 +347,10 @@ def _update_windows(version: str, assets: list[dict[str, Any]]) -> int:
     if script_path is None:
         return 1
 
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
+    powershell = system_tool("powershell.exe")
+    if powershell is None:
+        print("Could not find Windows PowerShell to run the installer with.")
+        return 1
     # -ExecutionPolicy Bypass is required here, not belt-and-braces: the default policy on
     # Windows client SKUs is Restricted, which refuses to run any .ps1 from disk at all.
     # (The file carries no Mark-of-the-Web — urllib wrote it, not a browser — so the
@@ -393,7 +412,7 @@ def _update_posix(version: str, assets: list[dict[str, Any]]) -> int:
         # Synchronous, so by here the script has been read and run — unlike the detached
         # Windows path, which must leave its copy on disk. `mkdtemp` is never cleaned up
         # by anyone else, and `tintaview update` runs on a timer from the tray.
-        shutil.rmtree(script_path.parent, ignore_errors=True)
+        shutil.rmtree(script_path.parent.parent, ignore_errors=True)
     return result.returncode
 
 

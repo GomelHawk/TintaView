@@ -429,6 +429,17 @@ reading it. So TintaView turns every `"` in these variables into `'` there: insi
 text instead of running as commands of their own. Unquoted, they would not. (PowerShell's
 `$env:TINTAVIEW_DETAIL` is safe either way.)
 
+Three more things to keep in mind, because the text in these variables comes from the agent:
+
+- **In PowerShell, read the variable with `$env:TINTAVIEW_MESSAGE`.** Never paste `%VAR%` into
+  a `powershell -Command "…"` string: a `'` in the text would end your quoted string there.
+- **Put something in front of the variable** when a program gives a leading character a
+  meaning. `curl -d "$TINTAVIEW_MESSAGE"` would treat a message starting with `@` as "upload
+  this file"; `curl --data-urlencode "text=$TINTAVIEW_MESSAGE"`, as in the example above, is
+  safe.
+- A value that ends in `\` gets a space added after it on Windows, so that it cannot swallow
+  the closing quote of your argument.
+
 **Usage limits can run a command too.** The usage alert — the notification the first time a
 window crosses `stats.alert_threshold` (90 % by default) — takes a command of its own, set on
 the same **Alerts** tab. It is a separate setting, so a command set up for questions doesn't
@@ -587,6 +598,8 @@ Mouse / keyboard / headset LEDs
 
 The tray reads the broker's state directly in-process (no HTTP hop) to paint its icon
 and tooltip, and polls the same GET /state endpoint a doctor or a remote tool would use.
+Over HTTP that endpoint reports statuses, session ids and tool names only — what an agent is
+*asking* (the command, the question, the folder) stays inside the tray.
 ```
 
 ## Updating

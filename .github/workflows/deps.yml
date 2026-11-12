@@ -1,0 +1,39 @@
+name: Dependency freshness
+
+# The dependency locks in packaging/ are committed and move only on purpose, so that an
+# update does not re-download Qt. The price of that is that nothing refreshes them on its
+# own — and a pinned library that nobody refreshes is one that stops getting its security
+# fixes. This workflow is the "someone has to look": once a week (and on demand) it fails
+# when a pinned package has a published vulnerability, or simply a newer release. GitHub
+# mails a failed scheduled run to the repository owner; the fix is
+#   python scripts/build_lock.py upgrade   # then run the tests and commit the locks
+# See AGENTS.md, "CI and release".
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  locks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Known vulnerabilities first: this one is never optional.
+      - name: Audit the pinned dependencies for known vulnerabilities
+        run: |
+          python -m pip install --quiet pip-audit
+          pip-audit --require-hashes --disable-pip -r packaging/requirements-lock.txt
+          pip-audit --require-hashes --disable-pip -r packaging/requirements-headless-lock.txt
+          pip-audit --require-hashes --disable-pip -r packaging/build-requirements.txt
+
+      - name: Check the pins against the newest releases
+        run: python scripts/build_lock.py outdated

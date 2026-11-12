@@ -118,7 +118,7 @@ def credits_since(homes: Iterable[Path], since: float, *, now: float | None = No
         for path in files:
             try:
                 updated, credits, provider = _MEMO.get(path, _parse_summary)
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError):  # a summary of any shape
                 continue
             if provider == BILLED_PROVIDER and updated >= since:
                 total += credits

@@ -120,7 +120,7 @@ class UsageResult:
     def from_dict(cls, data: dict[str, Any]) -> UsageResult:
         return cls(
             agent=data.get("agent", ""),
-            rows=[UsageRow(**r) for r in data.get("rows", [])],
+            rows=[_row_from_dict(r) for r in data.get("rows", [])],
             header=data.get("header", ""),
             source=data.get("source", "cache"),
             error=data.get("error"),
@@ -128,6 +128,25 @@ class UsageResult:
             # treats as one malformed entry to skip — the same as any other bad field.
             fetched_at=float(data.get("fetched_at") or 0.0),
         )
+
+
+def _row_from_dict(data: Any) -> UsageRow:
+    """A cached row, with every field forced to its type. A cache file is a file: a
+    string `reset_at` or `pct` used to load fine and then raise wherever it was first
+    compared — the cache policy, or `paintEvent`. A bad value raises here instead, which
+    `UsageCache._load` treats as one malformed entry to skip."""
+    if not isinstance(data, dict):
+        raise TypeError("a cached row must be an object")
+    row = UsageRow(**data)
+    row.label = str(row.label)
+    row.pct = float(row.pct)
+    row.right = str(row.right)
+    row.show_pct = bool(row.show_pct)
+    row.severity = str(row.severity)
+    row.kind = str(row.kind)
+    row.reset_at = float(row.reset_at)
+    row.reset_style = str(row.reset_style)
+    return row
 
 
 class UsageProvider(abc.ABC):

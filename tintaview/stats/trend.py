@@ -92,11 +92,14 @@ class TrendStore:
             if not isinstance(rows, dict):
                 continue
             for label, samples in rows.items():
-                clean = [
-                    [float(s[0]), float(s[1])]
-                    for s in samples
-                    if isinstance(s, list) and len(s) == 2
-                ]
+                try:
+                    clean = [
+                        [float(s[0]), float(s[1])]
+                        for s in samples
+                        if isinstance(s, list) and len(s) == 2
+                    ]
+                except (TypeError, ValueError):
+                    continue  # one malformed series must not stop the tray starting
                 if clean:
                     out.setdefault(str(agent), {})[str(label)] = clean
         return out

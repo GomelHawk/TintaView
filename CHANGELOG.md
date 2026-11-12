@@ -4,6 +4,32 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 1.2.0 — 2026-11-12
+
+- **Security fixes — please update.** A full review found ways for a web page, a downloaded
+  project folder, or another user of the same computer to interfere with TintaView. All are
+  closed. The two most serious: the "notify me" tool could run code from the folder an agent
+  was working in, and on Linux an update could be made to install someone else's package.
+- **After updating, run the setup wizard once** (**Settings… → Open Full Setup Wizard**, or
+  `tintaview setup`) and accept the change it shows for the notify tool. Until you do, your
+  agents keep using the old, unprotected way of starting it.
+- **Updates are quick again.** The update to 1.1.0 downloaded the whole interface toolkit
+  again. From now on an update replaces only TintaView itself, unless the toolkit is being
+  updated too — and the release notes will say when it is. A fresh install is also about
+  half the size.
+- **The installer and the update message say what is happening**: that components are being
+  installed, that it can take several minutes, and that the window should stay open.
+- **Notifications from agents are limited** to a few in quick succession, and an agent you
+  switched off in Settings can no longer send them.
+- **On Windows, a value ending in `\` in a reminder or notify command** now has a space added
+  after it, so it cannot break the quotes around it.
+- If you read TintaView's status from your own scripts: `http://127.0.0.1:8777/state` no longer
+  includes what an agent is asking (the command, the question, the folder). Statuses and
+  session names are unchanged.
+
+Updating from 1.1.0 is small. Updating from an older version downloads the interface toolkit
+once more (over 100 MB), so give it a few minutes.
+
 ## 1.1.0 — 2026-11-12
 
 - **Linux and macOS now install the way Windows does.** The installer works on a stock Ubuntu

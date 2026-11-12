@@ -15,6 +15,7 @@ reopen it, and the rounded track/fill bars with severity colours.
 
 from __future__ import annotations
 
+import html
 import math
 import time
 from collections.abc import Callable, Iterable
@@ -703,7 +704,10 @@ class Flyout(QtWidgets.QWidget):
         if e.type() == QtCore.QEvent.ToolTip:
             pos = QtCore.QPointF(e.pos())  # type: ignore[attr-defined]
             if self._bell_rect().contains(pos):
-                QtWidgets.QToolTip.showText(e.globalPos(), self._bell_tooltip(), self)  # type: ignore[attr-defined]
+                # Escaped: a tooltip auto-detects rich text, and this one quotes what an
+                # agent wrote — `<img src=…>` in it made Qt go and load the file.
+                QtWidgets.QToolTip.showText(  # type: ignore[attr-defined]
+                    e.globalPos(), html.escape(self._bell_tooltip()), self)
             else:
                 QtWidgets.QToolTip.hideText()
             return True
@@ -1385,6 +1389,8 @@ class NotifyPopup(QtWidgets.QFrame):
         row = 1
         if entry.project:
             project = QtWidgets.QLabel(entry.project)
+            # The agent's working directory: plain text, never auto-detected markup.
+            project.setTextFormat(Qt.PlainText)
             project.setStyleSheet(f"color: {FAINT.name()};")
             grid.addWidget(project, row, 1)
             row += 1

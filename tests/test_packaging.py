@@ -61,7 +61,7 @@ def test_installer_and_ci_agree_on_the_wheel_name(ps1: str, build_yml: str):
     # install.ps1 asks the release for "<name>-<version>-py3-none-any.whl"; CI produces
     # exactly that filename via `python -m build` and copies every .whl to the release.
     assert '"{0}-{1}-py3-none-any.whl"' in ps1
-    assert "python -m build" in build_yml
+    assert "python -I -m build --no-isolation" in build_yml
     assert "cp dist/*.whl" in build_yml
 
 
@@ -118,7 +118,7 @@ def test_windows_launches_through_the_signed_interpreter(ps1: str):
     G HUB lighting uses a python.exe sidecar from inside the tray process.
     """
     assert re.search(r"\$VenvPythonW\s*=\s*Join-Path \$VenvScripts 'pythonw\.exe'", ps1)
-    assert re.search(r"-Target \$VenvPythonW\s+-Arguments '-m tintaview'", ps1)
+    assert re.search(r"-Target \$VenvPythonW\s+-Arguments '-P -m tintaview'", ps1)
     assert (REPO_ROOT / "tintaview" / "__main__.py").is_file(), (
         "`pythonw.exe -m tintaview` is what the Startup shortcut runs; without a "
         "__main__.py it fails at login and nowhere else"
@@ -228,9 +228,9 @@ def test_both_installers_rebuild_a_venv_without_pip(sh: str, ps1: str):
     Reusing on "python3 exists" alone made every re-run of install.sh fail with
     "No module named pip", even after the missing package was installed.
     """
-    assert '"$VENV_PY" -m pip --version' in sh
-    assert '-m venv --clear "$VENV_DIR"' in sh
-    assert "& $VenvPython -m pip --version" in ps1
+    assert '"$VENV_PY" -I -m pip --version' in sh
+    assert '-I -m venv --clear "$VENV_DIR"' in sh
+    assert "& $VenvPython -I -m pip --version" in ps1
 
 
 def test_install_sh_does_everything_install_ps1_does(sh: str, ps1: str):
@@ -339,9 +339,12 @@ def test_ci_ships_the_lock_files_the_installers_download(ps1: str, sh: str, buil
     assert "'requirements-lock.txt'" in ps1
     for name in locks:
         assert f'"{name}"' in sh
-    # Built before the checksums are computed, so SHA256SUMS.txt covers them.
-    assert build_yml.index("scripts/build_lock.py build dist/release") < build_yml.index(
-        "sha256sum * > SHA256SUMS.txt")
+    # The committed files, copied before the checksums are computed so SHA256SUMS.txt
+    # covers them — and never regenerated at release time: that moved the pins with every
+    # release, and every user's update re-downloaded Qt (about 260 MB) for it.
+    copy = "cp packaging/requirements-lock.txt packaging/requirements-headless-lock.txt dist/release/"
+    assert build_yml.index(copy) < build_yml.index("sha256sum -- * > SHA256SUMS.txt")
+    assert "build_lock.py" not in build_yml and "pip-tools" not in build_yml
 
 
 def test_both_installers_install_from_the_lock_the_same_way(ps1: str, sh: str):
@@ -356,17 +359,43 @@ def test_both_installers_install_from_the_lock_the_same_way(ps1: str, sh: str):
         assert "--log" in code
     # A downloaded lock is verified against the release's checksums like the wheel.
     assert 'verify_checksum "$WORKDIR" "$LOCK_NAME" "$SUMS_NAME"' in sh
-    assert "Assert-Checksum -FilePath $lockFile -ChecksumsPath $sumsLocal -FileName $lockName" in ps1
+    assert "Assert-Checksum -FilePath $lockLocal -ChecksumsPath $sumsLocal -FileName $lockName" in ps1
 
 
 def test_the_smoke_jobs_prove_the_locked_path_ran_on_every_os():
     """Versions alone cannot tell a locked install from the unpinned fallback on the day
     the lock is made, so each smoke job runs `build_lock.py verify`."""
     ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert ci.count("build_lock.py build") == 2  # ubuntu+macOS job, windows job
-    assert "build_lock.py verify dist/release/requirements-headless-lock.txt" in ci
-    assert "build_lock.py verify dist/release/requirements-lock.txt" in ci
+    assert "build_lock.py verify packaging/requirements-headless-lock.txt" in ci
+    assert "build_lock.py verify packaging/requirements-lock.txt" in ci
     assert "build_lock.py verify dist\\requirements-lock.txt" in ci
+    # ...against the committed locks, which CI also checks still fit pyproject.toml.
+    assert "Copy-Item packaging\\requirements-lock.txt dist\\" in ci
+    assert "python scripts/build_lock.py check" in ci
+    assert "build_lock.py build" not in ci
+
+
+def test_the_committed_locks_pin_and_hash_every_dependency(sh: str):
+    """What a release ships and a checkout install uses. Every requirement line is an
+    exact pin followed by at least one hash, or `--require-hashes` refuses the file."""
+    module = _load_build_lock()
+    assert module.LOCK_DIR == REPO_ROOT / "packaging"
+    assert '"$REPO_ROOT/packaging/$LOCK_NAME"' in sh
+    for name, extras in module.LOCKS.items():
+        text = (module.LOCK_DIR / name).read_text(encoding="utf-8")
+        assert "\r" not in text, f"{name} must stay LF"
+        assert "/home/" not in text and "runner" not in text, f"{name} names a build machine"
+        pins = module.pinned(module.LOCK_DIR / name)
+        names = {pin_name for pin_name, _version in pins}
+        assert {"tomlkit", "openrgb-python"} <= names
+        assert ({"pyside6-essentials", "pyside6-addons"} <= names) == ("ui" in extras)
+        # Never the `PySide6` meta-package: it drags in WebEngine and Pdf, which nothing
+        # imports — more than half of the download.
+        assert not names & {"pyside6", "pyside6-webengine", "pyside6-pdf"}
+        requirement_lines = [line for line in text.splitlines()
+                             if line and not line.startswith((" ", "#"))]
+        assert len(requirement_lines) == len(pins), f"{name} has an unpinned requirement"
+        assert text.count("--hash=sha256:") >= len(pins)
 
 
 def test_lock_pins_are_read_from_a_pip_compile_file(tmp_path):
@@ -387,3 +416,92 @@ def test_the_install_command_fetches_the_released_installer():
     assert "raw.githubusercontent.com" not in readme
     assert "releases/latest/download/install.sh | sh" in readme
     assert "releases/latest/download/install.ps1 | iex" in readme
+
+
+def test_the_ui_extra_names_only_the_qt_parts_the_tray_imports():
+    """Derived from the package: every `PySide6.<module>` imported anywhere must come
+    from Essentials or Addons, the two distributions the [ui] extra installs."""
+    import re
+    import tomllib
+
+    extras = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["optional-dependencies"]["ui"]
+    assert [spec.split(">=")[0] for spec in extras] == ["PySide6-Essentials", "PySide6-Addons"]
+
+    essentials = {"QtCore", "QtGui", "QtWidgets"}
+    addons = {"QtMultimedia"}
+    used = set()
+    for path in (REPO_ROOT / "tintaview").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"from PySide6 import ([A-Za-z, ]+)", text):
+            used |= {name.strip() for name in match.group(1).split(",")}
+        used |= set(re.findall(r"PySide6\.(Qt[A-Za-z]+)", text))
+    assert used, "found no PySide6 imports — the scan is broken"
+    assert used <= essentials | addons, f"a Qt module outside the [ui] extra: {used - essentials - addons}"
+
+
+def test_both_installers_say_it_takes_a_while_and_to_keep_the_window_open(ps1: str, sh: str):
+    """A silent terminal for minutes under "this takes a minute" read as a hung install.
+    Plain words, no package names or sizes: the reader is not a developer."""
+    for script in (ps1, sh):
+        code = "\n".join(line for line in script.splitlines()
+                         if not line.lstrip().startswith("#"))
+        assert "This can take several minutes." in code
+        assert "keep this window open" in code and "it is working" in code
+        message = [line for line in code.splitlines() if "keep this window open" in line][0]
+        assert "Qt" not in message and "pip" not in message and "MB" not in message
+        assert "this takes a minute" not in code and "may take a minute" not in code
+
+
+# --- pinned must not mean stale: freshness and vulnerability checks ---
+
+
+def _lock_dir(tmp_path, module, tomlkit="0.15.2"):
+    for name in module.LOCKS:
+        (tmp_path / name).write_text(
+            f"tomlkit=={tomlkit} \\\n    --hash=sha256:aa\n"
+            "openrgb-python==0.3.8 \\\n    --hash=sha256:bb\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_outdated_fails_when_a_pin_is_behind_its_newest_release(tmp_path, capsys):
+    module = _load_build_lock()
+    newest = {"tomlkit": "0.15.2", "openrgb-python": "0.3.8"}
+    assert module.outdated(_lock_dir(tmp_path, module), newest=newest.__getitem__) == 0
+
+    newest["tomlkit"] = "0.16.0"
+    assert module.outdated(tmp_path, newest=newest.__getitem__) == 1
+    captured = capsys.readouterr()
+    assert "tomlkit==0.15.2   <- newest is 0.16.0" in captured.out
+    assert "build_lock.py upgrade" in captured.err
+
+
+def test_outdated_does_not_pass_when_pypi_cannot_be_asked(tmp_path):
+    """An unanswered check must never read as "everything is up to date"."""
+    module = _load_build_lock()
+
+    def unreachable(name):
+        raise OSError("no network")
+
+    assert module.outdated(_lock_dir(tmp_path, module), newest=unreachable) == 1
+
+
+def test_vulnerable_or_stale_pins_cannot_go_unnoticed(build_yml: str):
+    """Every lock is audited on each push and before each release, and a weekly run
+    checks both the audit and the newest releases. Derived from the lock list, so a
+    third lock file cannot be left out of any of them."""
+    locks = _load_build_lock().LOCKS
+    workflows = REPO_ROOT / ".github" / "workflows"
+    ci = (workflows / "ci.yml").read_text(encoding="utf-8")
+    deps = (workflows / "deps.yml").read_text(encoding="utf-8")
+    for name in locks:
+        audit = f"pip-audit --require-hashes --disable-pip -r packaging/{name}"
+        for workflow in (ci, build_yml, deps):
+            assert audit in workflow, f"{name} is not audited everywhere"
+    # The release audits before it stages the files it ships.
+    assert build_yml.index("pip-audit") < build_yml.index("cp packaging/requirements-lock.txt")
+    assert "schedule:" in deps and "cron:" in deps
+    assert "python scripts/build_lock.py outdated" in deps
+    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "python scripts/build_lock.py outdated" in agents
+    assert "A known vulnerability is never shipped" in agents

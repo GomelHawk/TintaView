@@ -164,17 +164,19 @@ def reset_row_text(reset_at: float, style: str = RESET_RELATIVE) -> str:
         return ""
     try:
         dt = datetime.fromtimestamp(reset_at, UTC)
-    except (OverflowError, OSError, ValueError):
+        # The whole wording, not only the conversion above: `astimezone()` overflows for
+        # an instant near year 9999 east of UTC, and this runs inside `paintEvent`.
+        if style == RESET_DATE:
+            return reset_at_date(dt.astimezone())
+        if style == RESET_DAYS:
+            return reset_in_days_text(dt)
+        if style == RESET_RELATIVE_WEEK:
+            # Beyond a week a weekday name is ambiguous at best — "Resets Fri" for a
+            # monthly budget four weeks out reads as *this* Friday.
+            return reset_text(dt, date_after_days=6)
+        return reset_text(dt)
+    except (OverflowError, OSError, ValueError, TypeError):
         return ""
-    if style == RESET_DATE:
-        return reset_at_date(dt.astimezone())
-    if style == RESET_DAYS:
-        return reset_in_days_text(dt)
-    if style == RESET_RELATIVE_WEEK:
-        # Beyond a week a weekday name is ambiguous at best — "Resets Fri" for a
-        # monthly budget four weeks out reads as *this* Friday.
-        return reset_text(dt, date_after_days=6)
-    return reset_text(dt)
 
 
 def duration_text(seconds: float) -> str:
