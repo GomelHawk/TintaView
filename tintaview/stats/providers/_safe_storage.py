@@ -1,6 +1,6 @@
 """Decrypt a value Electron's ``safeStorage.encryptString`` wrote, on Windows only.
 
-Cursor (measured on its build of 2026-10, ``cursorAuthTokenStorageCodec.js``) stores
+Cursor (measured, ``cursorAuthTokenStorageCodec.js``) stores
 ``cursorAuth/accessToken`` as ``"cursor-safe-storage:v1:" + base64(encryptString(token))``
 once ``cursor.storage.authTokenEncryptionAtRest`` is on. On Windows that ciphertext is
 Chromium's ``os_crypt`` format:

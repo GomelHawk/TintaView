@@ -352,7 +352,7 @@ class TrayApp(QtCore.QObject):
         # and the menu is replaced wholesale on a language change (see `_apply_settings`),
         # so the live one needs a Python reference of its own to stay alive.
         self._menu = self._build_menu()
-        self.tray.setContextMenu(self._menu)
+        self._attach_menu()
         self.tray.show()
 
         self.state_timer = QtCore.QTimer(self)
@@ -692,7 +692,7 @@ class TrayApp(QtCore.QObject):
         if language_changed:
             set_language(self._cfg.ui.language)
             self._menu = self._build_menu()
-            self.tray.setContextMenu(self._menu)
+            self._attach_menu()
             # The tooltip is only re-set when its (status, count) changes, and a language
             # switch changes neither — so drop the latch or the old language's tooltip
             # survives until the next session opens or closes.
@@ -1293,9 +1293,26 @@ class TrayApp(QtCore.QObject):
         keys += [k for k in self._usage_results if k not in keys]
         self._usage_results = {k: self._usage_results[k] for k in keys}
 
+    def _attach_menu(self) -> None:
+        """Give the icon its right-click menu — on macOS by hand, everywhere else by Qt.
+
+        macOS opens a status item's attached menu on *every* click, left included: with a
+        menu assigned, NSStatusBarButtonCell intercepts the mouse-down to pop it up, and Qt
+        only reports the click as the menu starts tracking (qcocoasystemtrayicon.mm,
+        `updateMenu`). A left click would open the menu, not the usage panel. With no menu
+        assigned Qt reports clean clicks — left `Trigger`, right `Context` — so on macOS the
+        menu is popped up from `_on_activated` instead, exactly as Windows behaves.
+        """
+        if sys.platform == "darwin":
+            self.tray.setContextMenu(None)
+        else:
+            self.tray.setContextMenu(self._menu)
+
     def _on_activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
         if reason == QtWidgets.QSystemTrayIcon.Context:
-            return  # let the context menu handle right-click
+            if sys.platform == "darwin":
+                self._menu.popup(QtGui.QCursor.pos())
+            return  # elsewhere the attached context menu handles right-click
         if reason != QtWidgets.QSystemTrayIcon.Trigger:
             return
         if self.flyout.isVisible():

@@ -9,7 +9,7 @@ records the cost of every session locally, per model::
                                                        updatedAt (epoch ms)
     <junie home>/sessions/<session id>/settings.json   model.providerCode
 
-`cost` is in the same credits the IDE's widget shows (measured 2026-10-26: PhpStorm said
+`cost` is in the same credits the IDE's widget shows (measured: PhpStorm said
 9.36 of 10.00 credits left, i.e. 0.64 used this period, and the sessions recorded on this
 machine summed to 0.53 — the rest being usage with no local record). `providerCode` tells
 who is billed: ``jetbrains-ai`` is the account; anything else (``proxy:…``, a BYOK

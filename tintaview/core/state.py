@@ -145,7 +145,7 @@ class StateStore:
                 # quotes a session that is waiting). Claude sends one when a message is
                 # typed *while a question is still open*: it fired between the
                 # PermissionRequest and the 6-second Notification, and the reminder then
-                # said only "Claude needs your permission" (measured, 2026-09-25).
+                # said only "Claude needs your permission" (measured).
                 pass
             else:
                 session.question = session.detail = session.request_tool = session.cwd = ""

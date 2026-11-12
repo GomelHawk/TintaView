@@ -579,38 +579,83 @@ fi
 # ldconfig is in /sbin, which is not on every user's PATH.
 LDCONFIG=$(command -v ldconfig 2>/dev/null || echo /sbin/ldconfig)
 if [ "$(uname -s)" = "Linux" ] && [ "$HEADLESS" -eq 0 ] && [ -x "$LDCONFIG" ]; then
+    # Each library and the package that ships it, per package manager:
+    #   soname : Debian/Ubuntu (apt) : Fedora (dnf) : Arch (pacman)
+    if command -v apt-get >/dev/null 2>&1; then
+        PKG_COL=2; PKG_CMD="sudo apt-get install -y"
+    elif command -v dnf >/dev/null 2>&1; then
+        PKG_COL=3; PKG_CMD="sudo dnf install -y"
+    elif command -v pacman >/dev/null 2>&1; then
+        PKG_COL=4; PKG_CMD="sudo pacman -S --needed --noconfirm"
+    else
+        PKG_COL=""; PKG_CMD=""
+    fi
     LIBS_KNOWN=$("$LDCONFIG" -p 2>/dev/null || true)
+    MISSING_LIBS=""
     MISSING_PKGS=""
-    for pair in libxcb-cursor.so.0:libxcb-cursor0 libxcb-icccm.so.4:libxcb-icccm4 \
-            libxcb-image.so.0:libxcb-image0 libxcb-keysyms.so.1:libxcb-keysyms1 \
-            libxcb-render-util.so.0:libxcb-render-util0 libxcb-xkb.so.1:libxcb-xkb1 \
-            libxkbcommon-x11.so.0:libxkbcommon-x11-0; do
+    for row in \
+            libxcb-cursor.so.0:libxcb-cursor0:xcb-util-cursor:xcb-util-cursor \
+            libxcb-icccm.so.4:libxcb-icccm4:xcb-util-wm:xcb-util-wm \
+            libxcb-image.so.0:libxcb-image0:xcb-util-image:xcb-util-image \
+            libxcb-keysyms.so.1:libxcb-keysyms1:xcb-util-keysyms:xcb-util-keysyms \
+            libxcb-render-util.so.0:libxcb-render-util0:xcb-util-renderutil:xcb-util-renderutil \
+            libxcb-xkb.so.1:libxcb-xkb1:libxcb:libxcb \
+            libxkbcommon-x11.so.0:libxkbcommon-x11-0:libxkbcommon-x11:libxkbcommon-x11; do
+        soname=$(printf '%s' "$row" | cut -d: -f1)
         case "$LIBS_KNOWN" in
-            *"${pair%%:*} "*) ;;
-            *) MISSING_PKGS="$MISSING_PKGS ${pair#*:}" ;;
+            *"$soname "*) ;;
+            *)
+                MISSING_LIBS="$MISSING_LIBS $soname"
+                if [ -n "$PKG_COL" ]; then
+                    MISSING_PKGS="$MISSING_PKGS $(printf '%s' "$row" | cut -d: -f"$PKG_COL")"
+                fi
+                ;;
         esac
     done
-    if [ -n "$MISSING_PKGS" ]; then
-        warn "Qt's X11 libraries are missing:$MISSING_PKGS
-  Without them a left click on the tray icon cannot open the usage panel on GNOME,
-  and the tray cannot start at all on an X11 session."
+    if [ -n "$MISSING_LIBS" ]; then
+        warn "Qt's X11 libraries are missing:$MISSING_LIBS
+  On GNOME a left click on the tray icon cannot open the usage panel without them
+  (until then: double-click the icon, or open $APP_NAME from the applications menu),
+  and on an X11 session the tray cannot start at all."
         # Asked, never assumed: it is the one step that needs sudo. A non-interactive run
         # (CI, `tintaview update`) only gets the command to run.
         LIBS_ANSWER=n
-        if command -v apt-get >/dev/null 2>&1 && ( : </dev/tty ) 2>/dev/null; then
-            printf '%s' "Install them now with sudo apt-get? [Y/n] " >/dev/tty
+        if [ -n "$PKG_CMD" ] && ( : </dev/tty ) 2>/dev/null; then
+            printf '%s' "Install them now with: $PKG_CMD$MISSING_PKGS? [Y/n] " >/dev/tty
             read -r LIBS_ANSWER </dev/tty || LIBS_ANSWER=n
             case "$LIBS_ANSWER" in [nN]*) LIBS_ANSWER=n ;; *) LIBS_ANSWER=y ;; esac
         fi
         if [ "$LIBS_ANSWER" = y ]; then
             # shellcheck disable=SC2086 -- one word per package
-            sudo apt-get install -y $MISSING_PKGS </dev/tty \
-                || warn "Installing them failed; run: sudo apt install$MISSING_PKGS"
-        else
-            warn "Install them with:  sudo apt install$MISSING_PKGS
+            $PKG_CMD $MISSING_PKGS </dev/tty \
+                || warn "Installing them failed; run: $PKG_CMD$MISSING_PKGS"
+        elif [ -n "$PKG_CMD" ]; then
+            warn "Install them later with:  $PKG_CMD$MISSING_PKGS
   then restart $APP_NAME (Quit in its menu, then start it from the applications menu)."
+        else
+            warn "Install the packages that provide them with your distribution's package
+  manager, then restart $APP_NAME."
         fi
     fi
+fi
+
+# --------------------------------------------------------------------------- stop
+
+# install.ps1's Stop-RunningApp, at the same point: before the wizard. A reinstall that left
+# the running tray alone kept the *old* code on screen until the next login, so every fix
+# looked like it had changed nothing; stopped *after* the wizard, the wizard's own restart
+# brought the old tray back first and it was started twice. Graceful /quit, so the lights
+# are handed back.
+if [ "$HEADLESS" -eq 0 ]; then
+    "$VENV_PY" -I -c "
+import sys
+from tintaview.core.config import load
+from tintaview.install import restart
+cfg = load()
+pid = restart.running_pid(cfg)
+sys.exit(0 if pid is None or restart._stop(pid, cfg) else 1)
+" >/dev/null 2>&1 \
+        || warn "Could not stop the running $APP_NAME; quit it from its menu and start it again."
 fi
 
 # --------------------------------------------------------------------------- wizard
@@ -632,28 +677,22 @@ fi
 
 # --------------------------------------------------------------------------- start
 
-# The twin of install.ps1's Stop-RunningApp + start. A reinstall that left the running tray
-# alone kept the *old* code on screen ("already running") until the next login, so every
-# fix looked like it had changed nothing. Stop it (graceful /quit, so the lights are handed
-# back), then start the new one -- in the desktop session, which an SSH or tty shell (no
-# DISPLAY) is not: there the session's own systemd --user service is what can reach it.
+# Autostart only fires at the next login, so without this the install ends with no tray
+# icon at all -- which reads exactly like a broken install (install.ps1 does the same).
+# Started in the *desktop session*, which an SSH or tty shell is not: there the login's own
+# service is what can reach it -- the systemd --user unit on Linux, the LaunchAgent on
+# macOS (`launchctl kickstart` in the gui/<uid> domain), the same units autostart writes.
+MAC_AGENT_PLIST="$HOME/Library/LaunchAgents/com.tintaview.app.plist"
 if [ "$HEADLESS" -eq 0 ]; then
-    "$VENV_PY" -I -c "
-import sys
-from tintaview.core.config import load
-from tintaview.install import restart
-cfg = load()
-pid = restart.running_pid(cfg)
-sys.exit(0 if pid is None or restart._stop(pid, cfg) else 1)
-" >/dev/null 2>&1 && STOPPED=1 || STOPPED=0
-    [ "$STOPPED" -eq 1 ] || warn "Could not stop the running $APP_NAME; quit it from its menu and start it again."
-
     if [ "$(uname -s)" = "Linux" ] && [ -f "$SYSTEMD_UNIT_PATH" ] \
             && systemctl --user is-active --quiet graphical-session.target 2>/dev/null; then
         info "Starting $APP_NAME in your desktop session"
         systemctl --user daemon-reload >/dev/null 2>&1 || true
         systemctl --user restart tintaview.service \
             || warn "Could not start it; start $APP_NAME from the applications menu."
+    elif [ "$(uname -s)" = "Darwin" ] && [ -f "$MAC_AGENT_PLIST" ] \
+            && launchctl kickstart -k "gui/$(id -u)/com.tintaview.app" >/dev/null 2>&1; then
+        info "Started $APP_NAME in your desktop session"
     elif [ "$(uname -s)" = "Darwin" ] || [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
         info "Starting $APP_NAME"
         nohup "$LAUNCHER" >/dev/null 2>&1 &

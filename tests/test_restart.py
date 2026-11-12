@@ -259,3 +259,39 @@ def test_no_autostart_unit_falls_back_to_a_plain_launch(linux_unit, monkeypatch)
     monkeypatch.setattr(R.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
     assert R._launch() is True
     assert launched and fake.calls == []
+
+
+@pytest.fixture
+def mac_agent(monkeypatch, tmp_path):
+    from tintaview.install import autostart
+
+    plist = tmp_path / "com.tintaview.app.plist"
+    plist.write_text("<plist/>")
+    monkeypatch.setattr(R.sys, "platform", "darwin")
+    monkeypatch.setattr(autostart, "_macos_plist_path", lambda: plist)
+    monkeypatch.setattr(R.shutil, "which", lambda name: "/bin/launchctl")
+    monkeypatch.setattr(R.os, "getuid", lambda: 501, raising=False)
+    calls: list = []
+    monkeypatch.setattr(R.subprocess, "run",
+                        lambda argv, **kw: calls.append(argv[1:])
+                        or types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(R.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("Popen from a shell with no desktop"))
+    return calls, plist
+
+
+def test_the_wizard_over_ssh_restarts_the_mac_tray_through_launchd(mac_agent):
+    """The macOS twin of the systemd route: the autostart LaunchAgent, kickstarted in the
+    user's GUI domain, runs in the desktop session wherever the wizard was run from."""
+    calls, _ = mac_agent
+    assert R._launch() is True
+    assert calls == [["kickstart", "-k", "gui/501/com.tintaview.app"]]
+
+
+def test_mac_without_the_launch_agent_falls_back_to_a_plain_launch(mac_agent, monkeypatch):
+    calls, plist = mac_agent
+    plist.unlink()
+    launched: list = []
+    monkeypatch.setattr(R.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+    assert R._launch() is True
+    assert launched and calls == []

@@ -3293,3 +3293,47 @@ def test_run_tray_gives_children_the_real_environment_back(monkeypatch):
     assert seen == {"platform": "xcb", "bus": tray_mod._NO_SESSION_BUS}
     assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
     assert "QT_QPA_PLATFORM" not in os.environ
+
+
+# --------------------------------------------------------------------------- macOS tray
+
+
+@pytest.fixture
+def mac_tray(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(tray_mod.sys, "platform", "darwin")
+    monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
+    monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: None)
+    app_instance = TrayApp(Config(), _FakeServer(), qapp)
+    yield app_instance
+    for timer in (app_instance.state_timer, app_instance.usage_timer,
+                  app_instance.blink_timer, app_instance.anim_timer):
+        timer.stop()
+    app_instance.flyout.hide()
+    app_instance.tray.hide()
+
+
+def test_macos_attaches_no_menu_so_a_left_click_reaches_the_app(mac_tray):
+    """With a menu attached, macOS opens it on every click and Qt reports the click only
+    as the menu opens (qcocoasystemtrayicon.mm, `updateMenu`) — a left click would open
+    the menu, not the usage panel."""
+    assert mac_tray.tray.contextMenu() is None
+
+
+def test_macos_left_click_opens_the_usage_panel(mac_tray):
+    mac_tray._on_activated(QtWidgets.QSystemTrayIcon.Trigger)
+    assert mac_tray.flyout.isVisible()
+
+
+def test_macos_right_click_pops_the_menu(mac_tray, monkeypatch):
+    shown: list = []
+    monkeypatch.setattr(mac_tray._menu, "popup", lambda pos: shown.append(pos))
+    mac_tray._on_activated(QtWidgets.QSystemTrayIcon.Context)
+    assert len(shown) == 1
+    assert not mac_tray.flyout.isVisible()
+
+
+def test_other_platforms_keep_the_attached_menu(tray):
+    app_instance, _ = tray
+    assert app_instance.tray.contextMenu() is app_instance._menu

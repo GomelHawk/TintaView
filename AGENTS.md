@@ -821,8 +821,8 @@ its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catal
   - Read the token fresh on each poll; never log, cache or persist it; mask it in `doctor` output;
     pin requests to `api2.cursor.sh`.
   - On 401/403 re-read from disk (Cursor refreshes it while signed in).
-  - **The token may be encrypted at rest** (`cursor.storage.authTokenEncryptionAtRest`,
-    seen 2026-11): `cursor-safe-storage:v1:` + base64 of Electron `safeStorage` output
+  - **The token may be encrypted at rest** (`cursor.storage.authTokenEncryptionAtRest`):
+    `cursor-safe-storage:v1:` + base64 of Electron `safeStorage` output
     (`cursorAuthTokenStorageCodec.js`). `stats/providers/_safe_storage.py` decrypts it on
     Windows — `v10` + nonce + AES-256-GCM, key from `<Cursor>/Local State`
     `os_crypt.encrypted_key` under DPAPI — through `ctypes` (crypt32 + CNG), since stdlib
@@ -1004,12 +1004,15 @@ Two traps both installers encode (the first is Windows-only):
   later run reused it. `actions/setup-python` always has `ensurepip`, so the `smoke-install-*`
   jobs could never see this: `smoke-install-distro-python` runs on Ubuntu's own `python3`.
 - **A reinstall restarts the tray, in the desktop session.** `install.sh` stops the running
-  instance (as `install.ps1`'s `Stop-RunningApp` does) and starts the new one; left alone,
-  the old code stayed on screen and every fix looked like it did nothing. Installs often run
-  over SSH or a tty with no DISPLAY (a VM console that can't paste), so the start — and the
-  wizard's `restart._launch` — go through `systemctl --user restart tintaview.service` when
-  the autostart unit exists and `graphical-session.target` is active; a tray `Popen`ed from
-  such a shell dies at once.
+  instance *before the wizard*, at the same point `install.ps1` calls `Stop-RunningApp`, and
+  starts the new one at the end; left alone, the old code stayed on screen and every fix
+  looked like it did nothing, and stopped after the wizard it was started twice. Installs
+  often run over SSH or a tty (a VM console that can't paste), where a tray `Popen`ed from
+  the shell dies at once, so the start — and the wizard's `restart._launch` — go through the
+  service autostart registered: `systemctl --user restart tintaview.service` on Linux (when
+  `graphical-session.target` is active), `launchctl kickstart -k gui/<uid>/com.tintaview.app`
+  on macOS. Windows' autostart is a Run key, not a service, so there is nothing to start
+  from outside the session; it keeps the plain launch.
 - **The Linux menu icon is a named theme icon** (`~/.local/share/icons/hicolor/256x256/apps/
   tintaview.png`, `Icon=tintaview`). With a file path in `Icon=`, GNOME Shell kept showing its
   cached picture after the path changed — measured on the maintainer's Ubuntu VM.
@@ -1207,5 +1210,5 @@ can't be worked out from the diff, say so in the notes rather than guessing at i
 | PySide6 size (~60 MB) | Accepted for the usage-card quality; revisit `pystray` only if it becomes a real problem |
 | `doctor` from a GUI | `run_doctor` is reachable from the tray (Run diagnostics), not just a terminal. Every step that prompts must go through the `interactive` flag: a windowed process has **no** `sys.stdin` at all (it is `None` under `pythonw`, so `sys.stdin.isatty()` raises, not returns False), and a tray started *from* a terminal has one the user cannot see, so it hangs instead. `run_doctor(interactive=None)` auto-detects via `_can_prompt()`; a GUI caller passes an explicit `False`. New interactive checks must be gated the same way |
 | macOS lighting | There isn't any realistically — positioned as status + stats only, stated up front |
-| GNOME tray click | **Left click opens the usage panel on every OS, GNOME included — never a menu item instead.** GNOME's AppIndicator extension opens a *D-Bus* (StatusNotifierItem) icon's menu on left click and passes the app only a double click (`indicatorStatusIcon.js` `vfunc_button_press_event`, identical v58–v66), while its *X11* tray icons get the raw click. Qt picks D-Bus whenever the watcher is on the bus, with no switch (`QGenericUnixTheme::shouldUseDBusTray`). So `ui/tray.py` `_use_legacy_tray` starts Qt on `xcb` with a session bus it cannot reach, **only** on GNOME with `legacy-tray-enabled`, and only after a child-process probe proves Qt's xcb plugin loads and an X11 tray host exists (Qt *aborts* on a missing `libxcb-*`); both variables are restored once the icon exists. Anything in doubt falls back to the D-Bus icon. Measured here: Qt on xcb registers via D-Bus when the watcher is present, and the probe answers right with/without a host and without the libraries. **Not verified on a real GNOME session** — the click through Shell.TrayManager is from the extension's source |
+| Tray left click (GNOME, macOS) | **Left click opens the usage panel on every OS — never a menu item instead.** **macOS:** with a menu attached, a status item opens it on *every* click and Qt reports the click only as the menu opens (`qcocoasystemtrayicon.mm`, `updateMenu`), so `TrayApp._attach_menu` attaches none there and `_on_activated` pops the menu on `Context` itself (from Qt's source; not run on a Mac). **GNOME:** GNOME's AppIndicator extension opens a *D-Bus* (StatusNotifierItem) icon's menu on left click and passes the app only a double click (`indicatorStatusIcon.js` `vfunc_button_press_event`, identical v58–v66), while its *X11* tray icons get the raw click. Qt picks D-Bus whenever the watcher is on the bus, with no switch (`QGenericUnixTheme::shouldUseDBusTray`). So `ui/tray.py` `_use_legacy_tray` starts Qt on `xcb` with a session bus it cannot reach, **only** on GNOME with `legacy-tray-enabled`, and only after a child-process probe proves Qt's xcb plugin loads and an X11 tray host exists (Qt *aborts* on a missing `libxcb-*`); both variables are restored once the icon exists. Anything in doubt falls back to the D-Bus icon. Measured here: Qt on xcb registers via D-Bus when the watcher is present, and the probe answers right with/without a host and without the libraries. **Verified on Ubuntu (GNOME, VM):** without the libraries the log says "X11 tray icon unavailable, using the D-Bus one"; after `install.sh` installed them, "using an X11 tray icon", and a left click opened the usage panel. A user who declines the libraries (the installer asks, with apt, dnf or pacman package names) keeps the D-Bus icon: a double click, or launching TintaView again from the app menu (`/show`), still opens the panel |
 | Non-English catalogues | Written in-house, not by native speakers, and not reviewed by one. `en.json` is the source of truth and the parity tests keep the *structure* right; wording is fixed per report, not by re-translating everything. Expect a placeholder mistake to surface as English (by design, see `t()`) rather than as a crash |

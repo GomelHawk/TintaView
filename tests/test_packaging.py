@@ -286,5 +286,23 @@ def test_a_reinstall_restarts_the_tray_with_the_new_code(sh: str, ps1: str):
 def test_missing_x11_libraries_are_offered_not_just_warned(sh: str):
     """A warning scrolled past unread on the maintainer's Ubuntu VM, so GNOME's left click
     never reached the app. Interactive installs are asked; nothing installs unasked."""
-    assert "Install them now with sudo apt-get? [Y/n]" in sh
-    assert "sudo apt-get install -y $MISSING_PKGS </dev/tty" in sh
+    assert 'Install them now with: $PKG_CMD$MISSING_PKGS? [Y/n]' in sh
+    assert "$PKG_CMD $MISSING_PKGS </dev/tty" in sh
+    # The package names of every distribution the installer knows, not Ubuntu's alone.
+    for manager in ("sudo apt-get install -y", "sudo dnf install -y",
+                    "sudo pacman -S --needed --noconfirm"):
+        assert manager in sh
+
+
+def test_install_sh_stops_the_tray_before_the_wizard_like_install_ps1(sh: str, ps1: str):
+    """install.ps1 calls Stop-RunningApp before its wizard. Stopping after it let the
+    wizard restart the old tray first, so it was started twice (seen in a real log)."""
+    assert sh.index("restart.running_pid(cfg)") < sh.index('"$LAUNCHER" setup </dev/tty')
+    assert ps1.index("Stop-RunningApp\n", ps1.index("# ------------------------------------------------------------- venv")) \
+        < ps1.index("Launching the setup wizard")
+
+
+def test_install_sh_starts_the_mac_tray_in_the_desktop_session(sh: str):
+    """The LaunchAgent autostart writes, kickstarted in gui/<uid> -- the macOS twin of
+    `systemctl --user restart`, so an install over SSH still shows the tray."""
+    assert 'launchctl kickstart -k "gui/$(id -u)/com.tintaview.app"' in sh

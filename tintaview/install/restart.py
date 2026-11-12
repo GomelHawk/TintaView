@@ -177,14 +177,19 @@ def _stop(pid: int, cfg: Config | None = None) -> bool:
 
 
 def _launch_in_desktop_session() -> bool:
-    """Linux: start the tray through the login's own `systemd --user` unit, if it has one.
+    """Start the tray through the login's own autostart service, if it has one.
 
     The wizard is often run from a shell that is not the desktop session at all — SSH, a
-    tty, a VM whose console can't paste. A tray `Popen`ed from there has no DISPLAY or
-    WAYLAND_DISPLAY and dies at once, so "restart so the settings take effect" quietly
-    became "close the tray". The autostart unit runs inside the graphical session, with
-    the environment GNOME/KDE imported into the user manager, wherever this was called.
+    tty, a VM whose console can't paste. A tray `Popen`ed from there has no display to
+    draw on and dies at once, so "restart so the settings take effect" quietly became
+    "close the tray". The services autostart registers run inside the desktop session
+    wherever this is called from: the `systemd --user` unit on Linux (with the
+    environment GNOME/KDE imported into the user manager) and the LaunchAgent on macOS,
+    restarted in the `gui/<uid>` domain. Windows has no counterpart to reach (its autostart
+    is a Run key, not a service — see AGENTS.md "Autostart") and keeps the plain launch.
     """
+    if sys.platform == "darwin":
+        return _kickstart_launch_agent()
     if not sys.platform.startswith("linux"):
         return False
     from .autostart import SERVICE_NAME, _linux_service_path
@@ -205,6 +210,24 @@ def _launch_in_desktop_session() -> bool:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("could not restart TintaView through systemd: %s", exc)
+        return False
+    return started.returncode == 0
+
+
+def _kickstart_launch_agent() -> bool:
+    """macOS: restart the autostart LaunchAgent in the user's GUI session, if installed."""
+    from .autostart import LAUNCHD_LABEL, _macos_plist_path
+
+    launchctl = shutil.which("launchctl")
+    if launchctl is None or not _macos_plist_path().exists():
+        return False
+    try:
+        started = subprocess.run(
+            [launchctl, "kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not restart TintaView through launchd: %s", exc)
         return False
     return started.returncode == 0
 

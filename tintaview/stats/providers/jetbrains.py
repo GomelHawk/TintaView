@@ -48,7 +48,7 @@ so every `<Product><Version>` directory under the JetBrains config root is scann
 and the newest wins. `AgentConfig.quota_path` overrides this with a specific file or
 IDE directory when auto-detection picks the wrong one.
 
-**PhpStorm 2026.3 stopped refreshing that file** (measured 2026-10-26: its copy was
+**PhpStorm 2026.3 stopped refreshing that file** (measured: its copy was
 frozen at the day the IDE was installed and said 0.13 credits used and a refill on 15 Oct,
 while the IDE itself showed 9.36 of 10.00 left and a renewal on 14 Nov). The live balance
 is in `<IDE data dir>/options/other.xml` instead, rewritten as the IDE runs, in two keys
