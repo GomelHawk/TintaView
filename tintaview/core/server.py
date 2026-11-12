@@ -275,8 +275,16 @@ class _Handler(BaseHTTPRequestHandler):
             tool = _first(query, "tool", "")
             question = _clean_question(_first(query, "question", ""))
             actor = clean_id(_first(query, "aid", ""))
-            self._write_ack()
+            # State first, then the ack. `handle_event` is in-memory only (the store's
+            # lock, the stall detector, a hand-off to the applier thread — the lighting
+            # I/O happens there, after this ack), so the ack still precedes every SDK
+            # call. The order matters: each request has its own thread, and an agent
+            # sends its next event the moment this one is acknowledged. Acked first, a
+            # `working` could land after the `PermissionRequest` it preceded and wipe the
+            # question — measured as a reordered session-start/confirm pair on a macOS
+            # runner. Acked after, a hook's ack means its event is already in the state.
             status_server.handle_event(event, agent, sid, tool, question, actor=actor)
+            self._write_ack()
             return
 
         legacy_event = path.lstrip("/")
@@ -285,8 +293,9 @@ class _Handler(BaseHTTPRequestHandler):
             # `agent=` gets defaulted to "claude", so a hand-written hook script stays
             # a one-line curl without having to know about the multi-agent query API.
             sid = _first(query, "sid", DEFAULT_SID)
-            self._write_ack()
+            # State first, then the ack — the same ordering guarantee as the v1 path.
             status_server.handle_event(legacy_event, DEFAULT_AGENT, sid, "")
+            self._write_ack()
             return
 
         self._send_json({"error": "not found"}, status=404)
@@ -581,8 +590,9 @@ class StatusServer:
         can't apply each other's stale fold.
 
         Returns as soon as the store is updated: the actual `controller.apply()` runs on
-        the applier thread, so the ack this request already sent is never followed by a
-        handler thread sitting on a slow vendor SDK call.
+        the applier thread. That is what lets the GET hook path call this *before* its
+        ack (so events from one agent keep their order) while the ack still precedes
+        every slow vendor SDK call.
 
         ``actor`` is the subagent that sent the event (the shim's ``aid=``, Claude's
         ``agent_id``), "" for the session's main thread — see `StateStore.set`.

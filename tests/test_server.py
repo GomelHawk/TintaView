@@ -1467,3 +1467,26 @@ def test_a_suppressed_subagent_event_still_counts_as_a_sign_of_life(server_engin
     _sub_event(server, "tool-start", "s1", "sub-a", tool="Bash")
 
     assert _wait_until(lambda: server.state._sessions[("claude", "s1")].seen > stamp)
+
+
+def test_a_hooks_ack_means_its_event_is_already_in_the_state(server_engine, monkeypatch):
+    """Each request has its own thread and an agent sends its next event the moment one
+    is acked. Acked before the store was updated, a `confirm` could be applied before the
+    `session-start` sent ahead of it, and the late session-start wiped the question —
+    seen on a macOS runner. The session-start here is made slow on purpose, so the race
+    is certain rather than down to thread scheduling: with the ack first this fails every
+    time, with the state first it cannot."""
+    server, _engine = server_engine
+    original = server.handle_event
+
+    def slow_session_start(event, *args, **kwargs):
+        if event == "session-start":
+            time.sleep(0.2)
+        return original(event, *args, **kwargs)
+
+    monkeypatch.setattr(server, "handle_event", slow_session_start)
+
+    _event(server, "session-start", "claude", "s1")
+    _confirm_with_question(server, "claude", "s1", "permission to use Bash")
+    time.sleep(0.3)  # past the slow session-start, had it still been running
+    assert _get_state(server)["agents"]["claude"]["question"] == "permission to use Bash"

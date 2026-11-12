@@ -240,12 +240,19 @@ tool-start, tool-end`.
 
 Two invariants in the ingress path:
 
-- **Acknowledge before any lighting I/O.** A slow Chroma or OpenRGB call must never be able to
-  stall an agent. The handler acks, updates the store, and hands the resulting status to a
+- **Acknowledge before any lighting I/O — but after the store update.** A slow Chroma or
+  OpenRGB call must never be able to stall an agent. On the GET hook path the handler updates
+  the store (in memory: a lock and a dict), acks, and hands the resulting status to a
   **single-slot applier thread** (`_StatusApplier` in `core/server.py`), the only caller of
   `controller.apply()`. It keeps just the newest wanted status, so a status superseded while a
   slow SDK call was in flight is dropped rather than replayed onto the device afterwards; the
   watchdog, the stall detector and the tray's `StatusServer.apply_status()` route through it too.
+  The store update comes *before* the ack because every request has its own thread and an
+  agent sends its next event the moment one is acked: acked first, a late `session-start` or
+  `working` could land after the `confirm` it preceded and wipe the question (seen on a macOS
+  runner; `test_a_hooks_ack_means_its_event_is_already_in_the_state` forces the race). The
+  POST `confirm` path still acks before *parsing* its up-to-1 MiB body — nothing an agent
+  sends after a confirm comes before the user has answered it.
 - **`/state` must never touch a session's last-seen stamp.** Polling it would otherwise keep the
   watchdog from ever expiring anything and defeat the crash-safety release. Related:
   `LightController.engine_status()` is a **lock-free** snapshot kept current by the methods that
