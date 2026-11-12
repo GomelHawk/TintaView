@@ -16,6 +16,8 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from .fsutil import PRIVATE_FILE, atomic_write, ensure_private_dir
+
 log = logging.getLogger(__name__)
 
 APP_NAME = "TintaView"
@@ -778,10 +780,11 @@ def dumps(cfg: Config) -> str:
     # a UNC path the wizard computed over `wsl.exe`, and `state_db`/`quota_path` may be
     # hand-picked. Dropping the table meant unticking an agent and re-ticking it later
     # silently reverted all of that to defaults. Enabled first, so the file still reads
-    # in tray order; `_agent_table_keys` is materialised before the loop because
-    # `cfg.agent()` inserts into `cfg.agents` as it goes.
+    # in tray order. `agent_config()`, not `agent()`: serialising must not change what
+    # it serialises — this runs on the GUI thread on every save while the HTTP threads
+    # read `cfg.agents`, and `agent()` inserts a table for each enabled agent.
     for key in _agent_table_keys(cfg):
-        out += _table(f"agents.{key}", cfg.agent(key))
+        out += _table(f"agents.{key}", cfg.agent_config(key))
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -794,9 +797,12 @@ def _agent_table_keys(cfg: Config) -> list[str]:
 def save(cfg: Config, path: Path | None = None) -> Path:
     """Write the config atomically so a crash mid-write can't leave a truncated file."""
     p = path or cfg.path or config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(dumps(cfg), encoding="utf-8")
-    os.replace(tmp, p)
+    if p.parent == config_dir():
+        ensure_private_dir(p.parent)
+    else:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    # Owner-only: the notify/escalation commands are the user's own shell lines, and
+    # the documented examples carry a bot token.
+    atomic_write(p, dumps(cfg), mode=PRIVATE_FILE)
     cfg.path = p
     return p

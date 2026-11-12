@@ -12,7 +12,7 @@ safe to spread on every call site unconditionally, which is the point: a call si
 has to remember a platform check is a call site that will forget.
 
 Two deliberate exceptions, both of which want a window or want to be detached:
-`ui.tray.run_console_setup` (`CREATE_NEW_CONSOLE` — the wizard *is* a terminal program)
+`ui.console_setup.run_console_setup` (`CREATE_NEW_CONSOLE` — the wizard *is* a terminal program)
 and `install.restart` (`DETACHED_PROCESS`, so the replacement outlives its parent).
 
 Stdlib only, and in `core/` rather than `install/`, because the engines spawn processes

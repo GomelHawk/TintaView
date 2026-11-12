@@ -9,6 +9,8 @@ of even `pytest.importorskip`.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -24,10 +26,11 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 import tintaview.ui.tray as tray_mod  # noqa: E402
 import tintaview.ui.workers as workers_mod  # noqa: E402
+from tintaview.core import usercmd  # noqa: E402
 from tintaview.core.config import Config  # noqa: E402
 from tintaview.install import win_identity  # noqa: E402
 from tintaview.stats.model import UsageResult, UsageRow  # noqa: E402
-from tintaview.ui import icons  # noqa: E402
+from tintaview.ui import console_setup, icons, tray_backend  # noqa: E402
 from tintaview.ui.flyout import HEADER_H, Flyout  # noqa: E402
 from tintaview.ui.tray import TrayApp  # noqa: E402
 
@@ -606,7 +609,7 @@ def tray(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
     # Same reasoning: the startup update check is real network I/O on a background
     # thread, which every other tray test would otherwise trigger unattended.
-    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(workers_mod.UpdateCheckWorker, "fetch", lambda self: None)
     # And the startup hook check, which would read the developer's own agent configs
     # (and on a WSL-split box call wsl.exe). Its worker is exercised directly below.
     monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: None)
@@ -796,7 +799,7 @@ def test_tray_keep_awake_is_reapplied_at_startup(qapp, monkeypatch, tmp_path):
     """The toggle is remembered, so a tray started with it on holds the request
     straight away rather than waiting for the menu to be touched."""
     monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
-    for worker in (tray_mod.StatsWorker, tray_mod.UpdateCheckWorker, tray_mod.HookCheckWorker):
+    for worker in (tray_mod.StatsWorker, workers_mod.UpdateCheckWorker, tray_mod.HookCheckWorker):
         monkeypatch.setattr(worker, "fetch", lambda self: None)
     fake = _FakeKeepAwake()
     monkeypatch.setattr(tray_mod, "KeepAwake", lambda: fake)
@@ -823,7 +826,7 @@ def test_update_check_worker_emits_only_when_a_newer_release_exists(qapp, monkey
     from tintaview.install import update as update_mod
 
     monkeypatch.setattr(update_mod, "latest_release", lambda **kw: {"tag_name": "v9.9.9"})
-    worker = tray_mod.UpdateCheckWorker()
+    worker = workers_mod.UpdateCheckWorker()
     seen = []
     worker.update_available.connect(lambda tag, current: seen.append((tag, current)))
 
@@ -838,7 +841,7 @@ def test_update_check_worker_silent_when_already_current_or_unreachable(qapp, mo
     from tintaview import __version__
     from tintaview.install import update as update_mod
 
-    worker = tray_mod.UpdateCheckWorker()
+    worker = workers_mod.UpdateCheckWorker()
     seen = []
     worker.update_available.connect(lambda tag, current: seen.append((tag, current)))
 
@@ -856,7 +859,7 @@ def test_tray_runs_update_check_on_start_only_when_enabled(qapp, monkeypatch, tm
     monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
     monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: None)
     calls = []
-    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: calls.append(1))
+    monkeypatch.setattr(workers_mod.UpdateCheckWorker, "fetch", lambda self: calls.append(1))
 
     cfg = Config()
     cfg.update.check = False
@@ -883,7 +886,7 @@ def test_tray_shows_a_balloon_when_an_update_is_found(tray, monkeypatch):
         lambda self, title, message, *a, **k: calls.append((title, message)),
     )
 
-    app_instance._on_update_available("9.9.9", "1.0.0")
+    app_instance._updates.on_update_available("9.9.9", "1.0.0")
 
     assert len(calls) == 1
     title, message = calls[0]
@@ -1705,7 +1708,7 @@ def test_manual_update_check_never_runs_on_the_calling_thread(qapp, monkeypatch)
     fake = _RecordingUpdateModule({"tag_name": "v9.9.9", "body": "Notes"})
     _install_fake_update_module(monkeypatch, fake)
 
-    worker = tray_mod.ManualUpdateWorker()
+    worker = workers_mod.ManualUpdateWorker()
     seen: list[tuple] = []
     worker.check_ready.connect(lambda *a: seen.append(a))
 
@@ -1718,7 +1721,7 @@ def test_manual_update_check_never_runs_on_the_calling_thread(qapp, monkeypatch)
         "latest_release() ran on the thread that asked for the check"
     )
     qapp.processEvents()  # the signal is queued across the thread boundary
-    assert seen and seen[0][0] == tray_mod.ManualUpdateWorker.OUTCOME_AVAILABLE
+    assert seen and seen[0][0] == workers_mod.ManualUpdateWorker.OUTCOME_AVAILABLE
     assert seen[0][1] == "9.9.9"
 
 
@@ -1726,7 +1729,7 @@ def test_manual_update_install_never_runs_on_the_calling_thread(qapp, monkeypatc
     fake = _RecordingUpdateModule({"tag_name": "v9.9.9"})
     _install_fake_update_module(monkeypatch, fake)
 
-    worker = tray_mod.ManualUpdateWorker()
+    worker = workers_mod.ManualUpdateWorker()
     codes: list[int] = []
     worker.install_done.connect(codes.append)
 
@@ -1763,8 +1766,8 @@ def test_a_user_asked_update_check_never_balloons(tray, monkeypatch):
         staticmethod(lambda *a, **k: (dialogs.append(a), QtWidgets.QMessageBox.No)[1]),
     )
 
-    app_instance._check_updates()
-    _drain(app_instance._manual_update_worker)
+    app_instance._updates.check()
+    _drain(app_instance._updates.manual_worker)
     QtWidgets.QApplication.instance().processEvents()
 
     assert balloons == []
@@ -1786,9 +1789,9 @@ def test_unattended_and_long_running_update_news_does_balloon(tray, monkeypatch)
             staticmethod(lambda *a, **k: boxes.append(a)),
         )
 
-    app_instance._on_update_available("9.9.9", "1.0.0")  # startup check, unattended
-    app_instance._on_update_installed(0)  # an install that ended minutes later
-    app_instance._on_update_installed(1)  # ...and one that failed just as late
+    app_instance._updates.on_update_available("9.9.9", "1.0.0")  # startup check, unattended
+    app_instance._updates.on_update_installed(0)  # an install that ended minutes later
+    app_instance._updates.on_update_installed(1)  # ...and one that failed just as late
 
     assert len(balloons) == 3
     assert all(title == "TintaView" for title, _ in balloons)
@@ -1815,8 +1818,8 @@ def test_check_updates_menu_item_touches_no_network_on_the_gui_thread(tray, monk
     )
 
     gui_thread = threading.current_thread()
-    app_instance._check_updates()
-    _drain(app_instance._manual_update_worker)
+    app_instance._updates.check()
+    _drain(app_instance._updates.manual_worker)
     QtWidgets.QApplication.instance().processEvents()
 
     assert fake.check_threads
@@ -2067,7 +2070,7 @@ def test_hook_check_worker_stays_silent_when_the_distro_is_unreachable(qapp, mon
 def test_hook_check_runs_once_at_startup_and_never_on_a_timer(qapp, monkeypatch, tmp_path):
     monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
     monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
-    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(workers_mod.UpdateCheckWorker, "fetch", lambda self: None)
     calls: list[int] = []
     monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: calls.append(1))
 
@@ -2818,7 +2821,7 @@ def test_the_escalation_command_is_handed_the_state_in_its_environment(tray, mon
     app_instance._cfg.escalation.command = "  notify-send 'agent waiting'  "
     calls: list[tuple] = []
     monkeypatch.setattr(
-        tray_mod.subprocess, "Popen",
+        subprocess, "Popen",
         lambda command, **kwargs: calls.append((command, kwargs)),
     )
 
@@ -2846,7 +2849,7 @@ def test_every_command_variable_is_set_even_with_nothing_to_say(tray, monkeypatc
     app_instance._cfg.escalation.command = "notify-send hi"
     calls: list[tuple] = []
     monkeypatch.setattr(
-        tray_mod.subprocess, "Popen",
+        subprocess, "Popen",
         lambda command, **kwargs: calls.append((command, kwargs)),
     )
 
@@ -2863,7 +2866,7 @@ def test_an_empty_escalation_command_spawns_nothing(tray, monkeypatch):
     app_instance, _server = tray
     app_instance._cfg.escalation.command = "   "
     calls: list[tuple] = []
-    monkeypatch.setattr(tray_mod.subprocess, "Popen", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: calls.append(a))
 
     app_instance._run_escalation_command(["Claude Code"])
 
@@ -2875,7 +2878,7 @@ def test_a_broken_escalation_command_never_reaches_the_user(tray, monkeypatch):
     app_instance, _server = tray
     app_instance._cfg.escalation.command = "does-not-exist"
     monkeypatch.setattr(
-        tray_mod.subprocess, "Popen",
+        subprocess, "Popen",
         lambda *a, **k: (_ for _ in ()).throw(OSError("no such file")),
     )
     boxes: list = []
@@ -2937,7 +2940,7 @@ def test_usage_alerts_respect_the_configured_threshold_and_switch(tray, monkeypa
 
 def _capture_popen(monkeypatch) -> list[tuple]:
     calls: list[tuple] = []
-    monkeypatch.setattr(tray_mod.subprocess, "Popen",
+    monkeypatch.setattr(subprocess, "Popen",
                         lambda command, **kwargs: calls.append((command, kwargs)))
     monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage", lambda self, *a, **k: None)
     return calls
@@ -2974,7 +2977,7 @@ def test_an_agents_notification_balloons_and_runs_the_notify_command(tray, monke
     app_instance, server = tray
     app_instance._cfg.notify.command = "  ntfy publish phone  "
     calls: list[tuple] = []
-    monkeypatch.setattr(tray_mod.subprocess, "Popen",
+    monkeypatch.setattr(subprocess, "Popen",
                         lambda command, **kwargs: calls.append((command, kwargs)))
     balloons: list[tuple] = []
     monkeypatch.setattr(QtWidgets.QSystemTrayIcon, "showMessage",
@@ -2992,7 +2995,7 @@ def test_an_agents_notification_balloons_and_runs_the_notify_command(tray, monke
     env = kwargs["env"]
     assert env["TINTAVIEW_STATUS"] == "notify"
     assert env["TINTAVIEW_AGENTS"] == "Codex CLI"
-    assert env["TINTAVIEW_MESSAGE"] == tray_mod._cmd_safe('Build "green": 3 tests fixed')
+    assert env["TINTAVIEW_MESSAGE"] == usercmd.cmd_safe('Build "green": 3 tests fixed')
     assert env["TINTAVIEW_CWD"] == "/work/app"
     for name in ("TINTAVIEW_QUESTION", "TINTAVIEW_DETAIL", "TINTAVIEW_TOOL"):
         assert env[name] == "", name
@@ -3142,7 +3145,7 @@ def test_only_real_limit_rows_can_raise_a_usage_alert(tray, monkeypatch):
 def test_agent_text_cannot_break_out_of_a_quoted_cmd_argument(value):
     """`cmd` expands `%TINTAVIEW_DETAIL%` before parsing the line, so a `"` in the
     agent's command would end the user's quoted argument and run what follows."""
-    safe = tray_mod._cmd_safe(value, windows=True)
+    safe = usercmd.cmd_safe(value, windows=True)
 
     assert '"' not in safe
     assert safe.replace("'", '"') == value, "nothing but the quotes may change"
@@ -3151,7 +3154,7 @@ def test_agent_text_cannot_break_out_of_a_quoted_cmd_argument(value):
 def test_posix_shells_get_the_agents_text_untouched():
     value = 'grep "a" x.txt & echo hi'
 
-    assert tray_mod._cmd_safe(value, windows=False) == value
+    assert usercmd.cmd_safe(value, windows=False) == value
 
 
 # --------------------------------------------------------------------------- every OS
@@ -3162,10 +3165,10 @@ def test_the_setup_wizard_gets_a_terminal_window_on_every_platform(monkeypatch, 
     """The tray has no terminal of its own (Start Menu, app menu, Launchpad, login), so
     `Popen` of the text-mode wizard there was invisible on Linux/macOS: it read EOF, took
     every default and finished by restarting — i.e. closing — the tray."""
-    monkeypatch.setattr(tray_mod.shutil, "which",
+    monkeypatch.setattr(shutil, "which",
                         lambda name: f"/usr/bin/{name}" if name == "gnome-terminal" else None)
     command = ["/venv/bin/python", "-m", "tintaview", "setup"]
-    argv = tray_mod._terminal_argv(command, platform=platform)
+    argv = console_setup.terminal_argv(command, platform=platform)
     assert argv is not None
     if platform == "win32":
         assert argv == command  # CREATE_NEW_CONSOLE at the call site
@@ -3179,10 +3182,10 @@ def test_the_setup_wizard_gets_a_terminal_window_on_every_platform(monkeypatch, 
 
 
 def test_no_terminal_emulator_means_a_hint_with_the_full_command(monkeypatch):
-    monkeypatch.setattr(tray_mod.shutil, "which", lambda name: None)
-    assert tray_mod._terminal_argv(["python", "-m", "tintaview", "setup"],
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert console_setup.terminal_argv(["python", "-m", "tintaview", "setup"],
                                    platform="linux") is None
-    assert tray_mod._setup_hint(["/venv/bin/python", "-m", "tintaview"]) == (
+    assert console_setup.setup_hint(["/venv/bin/python", "-m", "tintaview"]) == (
         "/venv/bin/python -m tintaview setup"
     )
 
@@ -3195,10 +3198,10 @@ def test_the_wizard_is_never_run_inside_the_tray_process(monkeypatch, qapp):
     monkeypatch.setattr(wizard_mod, "run_wizard",
                         lambda *a, **k: pytest.fail("ran the wizard in-process"))
     launched: list[list[str]] = []
-    monkeypatch.setattr(tray_mod, "_terminal_argv", lambda command, platform=None: command)
-    monkeypatch.setattr(tray_mod.subprocess, "Popen",
+    monkeypatch.setattr(console_setup, "terminal_argv", lambda command, platform=None: command)
+    monkeypatch.setattr(subprocess, "Popen",
                         lambda argv, **kw: launched.append(argv))
-    tray_mod.run_console_setup()
+    console_setup.run_console_setup()
     assert launched and launched[0][-1] == "setup"
 
 
@@ -3222,20 +3225,20 @@ class _Probe:
 @pytest.fixture
 def gnome(monkeypatch):
     monkeypatch.setattr(tray_mod.sys, "platform", "linux")
-    monkeypatch.setattr(tray_mod, "_gnome_legacy_tray_enabled", lambda: True)
+    monkeypatch.setattr(tray_backend, "gnome_legacy_tray_enabled", lambda: True)
     probe = _Probe()
-    monkeypatch.setattr(tray_mod.subprocess, "run", probe)
+    monkeypatch.setattr(subprocess, "run", probe)
     return probe
 
 
 def test_gnome_gets_an_x11_tray_icon_so_left_click_reaches_the_app(gnome):
     """GNOME's AppIndicator opens a D-Bus icon's menu on left click; an X11 icon gets the
     click itself — the same left-click-opens-the-panel as Windows."""
-    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is True
+    assert tray_backend.use_legacy_tray(dict(_GNOME_ENV)) is True
     argv, kwargs = gnome.calls[0]
     # The probe runs Qt on X11 with no session bus, in a child (Qt aborts on a bad plugin).
     assert kwargs["env"]["QT_QPA_PLATFORM"] == "xcb"
-    assert kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"] == tray_mod._NO_SESSION_BUS
+    assert kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"] == tray_backend.NO_SESSION_BUS
 
 
 @pytest.mark.parametrize("env", [
@@ -3244,24 +3247,24 @@ def test_gnome_gets_an_x11_tray_icon_so_left_click_reaches_the_app(gnome):
     {**_GNOME_ENV, "QT_QPA_PLATFORM": "wayland"},               # someone chose a platform
 ])
 def test_everything_else_keeps_the_tray_it_had(gnome, env):
-    assert tray_mod._use_legacy_tray(env) is False
+    assert tray_backend.use_legacy_tray(env) is False
     assert gnome.calls == []
 
 
 def test_a_failed_probe_keeps_the_d_bus_icon(gnome):
     """No libxcb-*, or no panel taking X11 icons: never a tray with no icon at all."""
     gnome.stdout = "0"
-    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is False
+    assert tray_backend.use_legacy_tray(dict(_GNOME_ENV)) is False
 
 
 def test_legacy_tray_switched_off_in_the_extension_keeps_the_d_bus_icon(gnome, monkeypatch):
-    monkeypatch.setattr(tray_mod, "_gnome_legacy_tray_enabled", lambda: False)
-    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is False
+    monkeypatch.setattr(tray_backend, "gnome_legacy_tray_enabled", lambda: False)
+    assert tray_backend.use_legacy_tray(dict(_GNOME_ENV)) is False
 
 
 def test_not_linux_never_switches(gnome, monkeypatch):
     monkeypatch.setattr(tray_mod.sys, "platform", "win32")
-    assert tray_mod._use_legacy_tray(dict(_GNOME_ENV)) is False
+    assert tray_backend.use_legacy_tray(dict(_GNOME_ENV)) is False
 
 
 def test_run_tray_gives_children_the_real_environment_back(monkeypatch):
@@ -3281,7 +3284,7 @@ def test_run_tray_gives_children_the_real_environment_back(monkeypatch):
         def exec(self):
             return 0
 
-    monkeypatch.setattr(tray_mod, "_use_legacy_tray", lambda: True)
+    monkeypatch.setattr(tray_backend, "use_legacy_tray", lambda: True)
     # On a Windows runner this would register the app identity for real.
     monkeypatch.setattr(tray_mod, "_register_windows_identity", lambda: None)
     monkeypatch.setattr(tray_mod.QtWidgets, "QApplication", _App)
@@ -3292,7 +3295,7 @@ def test_run_tray_gives_children_the_real_environment_back(monkeypatch):
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
 
     assert tray_mod.run_tray(Config(), object()) == 0
-    assert seen == {"platform": "xcb", "bus": tray_mod._NO_SESSION_BUS}
+    assert seen == {"platform": "xcb", "bus": tray_backend.NO_SESSION_BUS}
     assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
     assert "QT_QPA_PLATFORM" not in os.environ
 
@@ -3305,7 +3308,7 @@ def mac_tray(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(tray_mod.sys, "platform", "darwin")
     monkeypatch.setenv("TINTAVIEW_HOME", str(tmp_path))
     monkeypatch.setattr(tray_mod.StatsWorker, "fetch", lambda self: None)
-    monkeypatch.setattr(tray_mod.UpdateCheckWorker, "fetch", lambda self: None)
+    monkeypatch.setattr(workers_mod.UpdateCheckWorker, "fetch", lambda self: None)
     monkeypatch.setattr(tray_mod.HookCheckWorker, "fetch", lambda self: None)
     app_instance = TrayApp(Config(), _FakeServer(), qapp)
     yield app_instance
@@ -3384,3 +3387,54 @@ def test_an_icon_with_no_known_position_keeps_the_cursor(tray, monkeypatch):
     monkeypatch.setattr(tray_mod.QtGui.QCursor, "pos",
                         staticmethod(lambda: QtCore.QPoint(123, 456)))
     assert app_instance._flyout_anchor() == QtCore.QPoint(123, 456)
+
+
+# --- the live config is shared across threads: changed by replacement, never in place ---
+
+
+def _containers(obj, path="cfg"):
+    """Every list and dict reachable through `obj`'s dataclass fields, with its path —
+    walked from the dataclasses themselves, so a container added later is covered."""
+    import dataclasses
+
+    if isinstance(obj, (list, dict)):
+        yield path, obj
+        values = obj.values() if isinstance(obj, dict) else obj
+        for index, value in enumerate(values):
+            yield from _containers(value, f"{path}[{index}]")
+    elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        for field in dataclasses.fields(obj):
+            yield from _containers(getattr(obj, field.name), f"{path}.{field.name}")
+
+
+def test_apply_settings_replaces_shared_containers_and_never_edits_them(tray_with_controller):
+    """HTTP worker threads, the stats thread and the flyout read the live `Config` while
+    the GUI thread applies a settings change. Every reader is safe as long as a container
+    it already holds never changes under it — so `_apply_settings` must assign a new list
+    or dict, never append to, remove from or insert into the one that is there."""
+    import copy
+
+    app_instance, _server = tray_with_controller
+    live = app_instance._cfg
+    before = [(path, obj, copy.deepcopy(obj)) for path, obj in _containers(live)]
+    assert {path for path, _obj, _copy in before} >= {
+        "cfg.enabled_agents", "cfg.agents", "cfg.ui.clocks.clocks"}
+
+    new_cfg = _accepted_copy(
+        app_instance,
+        **{
+            "enabled_agents": ["codex", "cursor"],
+            "ui.clocks.enabled": True,
+            "ui.clocks.clocks": _clock_list(["Europe/Warsaw", "Asia/Kolkata"], False),
+        },
+    )
+    new_cfg.agent("cursor").confirm_detection = "stall"
+    app_instance._apply_settings(new_cfg)
+    _join_lighting(app_instance)
+
+    for path, obj, snapshot in before:
+        assert obj == snapshot, f"{path} was edited in place by _apply_settings"
+    # ...and the change did land, through new objects.
+    assert live.enabled_agents == ["codex", "cursor"]
+    assert live.agent_config("cursor").confirm_detection == "stall"
+    assert len(live.ui.clocks.clocks) == 2

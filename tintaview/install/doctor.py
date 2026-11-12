@@ -228,6 +228,17 @@ def _check_config(reporter: _Reporter) -> Config:
         )
     else:
         reporter.ok("CONFIG", f"enabled agents: {', '.join(cfg.enabled_agents)} ({path})")
+
+    from ..core.server import is_loopback_host
+
+    if not is_loopback_host(cfg.server.host):
+        reporter.warn(
+            "CONFIG",
+            f"server.host is {cfg.server.host!r}, not a loopback address — any machine "
+            "that can reach this one can drive the lights, send notifications (which run "
+            "your notify command) and stop TintaView",
+            f"set `host = \"127.0.0.1\"` under [server] in {path} unless you meant that",
+        )
     return cfg
 
 

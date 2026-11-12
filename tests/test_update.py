@@ -258,7 +258,7 @@ def test_run_update_never_raises_on_missing_assets(monkeypatch):
 
 
 def _windows_release_assets() -> list[dict[str, Any]]:
-    base = "https://example.invalid/download"
+    base = f"{U.RELEASE_DOWNLOAD_PREFIX}v9.9.9"
     return [
         {"name": "install.ps1", "browser_download_url": f"{base}/install.ps1"},
         {"name": "TintaView-9.9.9-win64.zip", "browser_download_url": f"{base}/zip"},
@@ -373,7 +373,7 @@ def test_run_update_dispatches_to_the_windows_path(monkeypatch):
 
 
 def _posix_release_assets() -> list[dict[str, Any]]:
-    base = "https://example.invalid/download"
+    base = f"{U.RELEASE_DOWNLOAD_PREFIX}v9.9.9"
     return [
         {"name": "install.sh", "browser_download_url": f"{base}/install.sh"},
         {"name": "SHA256SUMS.txt", "browser_download_url": f"{base}/SHA256SUMS.txt"},
@@ -474,3 +474,42 @@ def test_windows_update_keeps_the_download_until_the_detached_script_has_run(
     script = Path(launched[0][launched[0].index("-File") + 1])
     assert script.exists()
     shutil.rmtree(script.parent, ignore_errors=True)
+
+
+# --- release assets are only ever fetched from this repository's release downloads ---
+
+
+def test_an_asset_named_from_another_host_is_not_downloaded(monkeypatch, capsys):
+    """The asset list is a JSON reply; a URL in it that is not under this repo's own
+    release downloads must never be fetched, let alone run."""
+    assets = [
+        {"name": "install.sh", "browser_download_url": "https://evil.invalid/install.sh"},
+        {"name": "SHA256SUMS.txt",
+         "browser_download_url": f"{U.RELEASE_DOWNLOAD_PREFIX}v9.9.9/SHA256SUMS.txt"},
+    ]
+    monkeypatch.setattr(U, "_download", lambda *a, **k: pytest.fail("downloaded anyway"))
+
+    assert U._fetch_install_script(assets, "install.sh") is None
+    assert U._asset_url(assets, "SHA256SUMS.txt").endswith("/SHA256SUMS.txt")
+    # A look-alike prefix on another host, and a different repository, are refused too.
+    for url in (f"https://evil.invalid/{U.RELEASE_DOWNLOAD_PREFIX}x",
+                "https://github.com/someone/else/releases/download/v1/install.sh"):
+        assert U._asset_url([{"name": "a", "browser_download_url": url}], "a") is None
+
+
+def test_a_download_past_the_size_cap_is_refused(tmp_path, monkeypatch):
+    class _Endless:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            return b"x" * n
+
+    monkeypatch.setattr(U, "MAX_ASSET_BYTES", 10)
+    monkeypatch.setattr(U.urllib.request, "urlopen", lambda req, timeout=None: _Endless())
+
+    with pytest.raises(OSError):
+        U._download("https://example.invalid/x", tmp_path / "x")

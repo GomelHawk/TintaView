@@ -64,7 +64,7 @@ Chroma, GameSense and OpenRGB stay in the tray process.
 Open PowerShell and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1 | iex
+irm https://github.com/GomelHawk/TintaView/releases/latest/download/install.ps1 | iex
 ```
 
 That's it — no admin rights (it installs per-user under `%LOCALAPPDATA%\TintaView`), no
@@ -78,7 +78,7 @@ To pass options, run it as a script block instead (piping into `iex` can't forwa
 arguments):
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1))) -NoAutostart
+& ([scriptblock]::Create((irm https://github.com/GomelHawk/TintaView/releases/latest/download/install.ps1))) -NoAutostart
 ```
 
 - `-Prefix DIR` — install location (default `%LOCALAPPDATA%\TintaView`).
@@ -132,7 +132,7 @@ to open a WSL terminal yourself.
 ### Linux / macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.sh | sh
+curl -fsSL https://github.com/GomelHawk/TintaView/releases/latest/download/install.sh | sh
 ```
 
 Or, from a local checkout:
@@ -498,7 +498,7 @@ written by `tintaview setup` and safe to hand-edit afterwards.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `server.host` | `127.0.0.1` | Where the status broker listens. |
+| `server.host` | `127.0.0.1` | Where the status broker listens. Leave it on a loopback address: the broker has no authentication, so on any other address every machine that can reach yours can change the lights, send notifications (which run your notify command) and stop TintaView. `tintaview doctor` warns about it. |
 | `server.port` | `8777` | Port for the status broker (hooks and the tray both talk to this). |
 | `server.watchdog_timeout` | `600` | Seconds of silence from a session before it is dropped and its lighting released (crash safety, for an agent that died without sending its end-of-session hook). Counted per session, so one busy agent never keeps another agent's dead session alive. |
 | `engine.mode` | `auto` | `auto` \| `chroma` \| `ghub` \| `steelseries` \| `openrgb` \| `none`. `auto` probes `engine.order` and uses the first that responds. |
@@ -615,7 +615,7 @@ broken.
 - **Windows** — re-run the install one-liner with `-Uninstall`:
 
   ```powershell
-  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1))) -Uninstall
+  & ([scriptblock]::Create((irm https://github.com/GomelHawk/TintaView/releases/latest/download/install.ps1))) -Uninstall
   ```
 
   It removes the virtual environment, the Start Menu shortcut and the autostart entry;

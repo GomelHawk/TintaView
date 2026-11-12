@@ -21,6 +21,18 @@ before 0.5.0 are described only there.
   country.
 - **A waiting question is no longer lost** when an agent sends several events in quick
   succession, so the lights reliably turn red when an agent needs you.
+- **A web page can no longer control TintaView.** A page open in your browser could stop
+  TintaView or send a notification through it (which runs your notify command). TintaView now
+  refuses every request that comes from a browser. Nothing to change — hooks and the
+  `notify_user` tool work as before.
+- **Your settings are readable only by you** on Linux and macOS: `config.toml`, the logs and
+  the usage cache. A notify or reminder command often holds a token.
+- **`install.sh --uninstall` removes only TintaView's own files** under `--prefix`, never the
+  whole folder.
+- **Installing and updating now use the exact versions of TintaView's dependencies that the
+  release was tested with**, each checked against a checksum, starting with this release. If
+  they don't support your Python yet, the installer says so and installs the newest ones as
+  before.
 
 On Ubuntu, to get the left click: run the install command once more in a terminal and accept
 the X11 libraries it offers.

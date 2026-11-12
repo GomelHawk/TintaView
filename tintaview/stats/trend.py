@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
 
 from tintaview.core.config import config_dir
+from tintaview.core.fsutil import PRIVATE_FILE, atomic_write
 
 from .model import UsageResult, UsageRow
 
@@ -104,9 +104,7 @@ class TrendStore:
     def _save(self) -> None:
         # Called with `self._lock` already held.
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(self._series), encoding="utf-8")
-        os.replace(tmp, self._path)
+        atomic_write(self._path, json.dumps(self._series), mode=PRIVATE_FILE)
 
     # --- recording -------------------------------------------------------------
 

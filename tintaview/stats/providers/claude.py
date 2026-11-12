@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.core.net import MAX_JSON_BYTES, read_capped, token_request
 from tintaview.i18n import t
 
 from .. import format as fmt
@@ -195,17 +196,13 @@ def _fetch_usage(home: Path, timeout: float) -> dict[str, Any]:
         # Not fatal — the server often still honors a just-expired token, and a 401
         # is handled by the caller either way.
         log.info("claude access token appears expired; may still be honored")
-    req = urllib.request.Request(
-        USAGE_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "anthropic-beta": OAUTH_BETA,
-        },
+    req = token_request(
+        USAGE_URL, f"Bearer {token}",
+        headers={"Content-Type": "application/json", "anthropic-beta": OAUTH_BETA},
         method="GET",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(read_capped(resp, MAX_JSON_BYTES).decode("utf-8"))
 
 
 def _money(m: dict[str, Any] | None) -> tuple[float, str] | None:

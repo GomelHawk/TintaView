@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import faulthandler
 import logging
+import os
 import sys
 import threading
 import traceback
@@ -24,18 +25,26 @@ def setup(name: str = "tintaview", level: int = logging.INFO) -> logging.Logger:
     """Configure rotating file logging plus crash hooks. Idempotent."""
     global _configured
     from .config import config_dir
+    from .fsutil import PRIVATE_FILE, ensure_private_dir
 
     logger = logging.getLogger("tintaview")
     if _configured:
         return logger
 
+    # Owner-only, the directory and the log: a log names the user's projects and
+    # whatever an exception happened to quote.
+    ensure_private_dir(config_dir())
     log_dir = config_dir() / "logs"
     try:
-        log_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)  # raises where the line above only tried
         path = log_dir / f"{name}.log"
         handler: logging.Handler = RotatingFileHandler(
             path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
         )
+        if sys.platform != "win32":
+            with contextlib.suppress(OSError):
+                os.chmod(path, PRIVATE_FILE)
     except OSError:
         handler = logging.StreamHandler(sys.stderr)
         path = None

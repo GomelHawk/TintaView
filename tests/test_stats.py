@@ -67,7 +67,7 @@ class _FakeResponse:
     def __exit__(self, *exc: object) -> bool:
         return False
 
-    def read(self) -> bytes:
+    def read(self, _limit: int = -1) -> bytes:
         return self._payload
 
 

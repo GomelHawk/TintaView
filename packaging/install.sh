@@ -21,7 +21,7 @@
 # Written in POSIX sh (no bashisms, no `local`) plus a portable `curl`/`wget` fallback so
 # it also works piped straight from a release, with no local checkout on disk:
 #
-#   curl -fsSL https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.sh | sh
+#   curl -fsSL https://github.com/GomelHawk/TintaView/releases/latest/download/install.sh | sh
 #
 # When piped this way, $0 is just "sh" and there is no script file to resolve a path
 # from — every code path below accounts for that instead of assuming a checkout exists.
@@ -51,7 +51,8 @@ Usage: install.sh [--prefix DIR] [--no-autostart] [--no-wizard] [--headless] [--
   --no-autostart    Do not register a login autostart entry
   --no-wizard       Do not launch the setup wizard afterwards (env: TINTAVIEW_NO_WIZARD)
   --headless        Skip the PySide6 UI extra; register a headless autostart entry
-  --uninstall       Remove the autostart entry and --prefix (config/hooks untouched)
+  --uninstall       Remove the autostart entry and the install under --prefix
+                    (config/hooks untouched)
 EOF
 }
 
@@ -143,8 +144,19 @@ if [ "$UNINSTALL" -eq 1 ]; then
         rm -rf "$HOME/Applications/TintaView.app"
     fi
 
-    info "Removing $PREFIX"
-    rm -rf "$PREFIX"
+    # Only what this script put there, never "$PREFIX" itself: --prefix is whatever was
+    # typed, and a recursive delete of it took "$HOME" with it for `--prefix "$HOME"`.
+    # The virtual environment is this script's own (its pyvenv.cfg is the proof that it
+    # is one); the icon is the only other file written here. The directory goes only if
+    # that left it empty.
+    if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
+        info "Removing the virtual environment at $VENV_DIR"
+        rm -rf "$VENV_DIR"
+    else
+        warn "No virtual environment found at $VENV_DIR — nothing to remove there."
+    fi
+    rm -f "$PREFIX/tintaview.png"
+    rmdir "$PREFIX" 2>/dev/null || true
 
     cat <<EOF
 
@@ -307,9 +319,26 @@ The download has been deleted — an unverified build is never installed."
 
 RELEASES_URL="https://github.com/$GITHUB_REPO/releases"
 
+# The release's dependency lock: every package TintaView needs, pinned to the version the
+# release was built and tested with, each with the SHA-256 of its files (build.yml writes
+# it; it is listed in SHA256SUMS.txt like the wheel). With it pip installs exactly those
+# files, so a dependency release published *after* this TintaView release — the usual way
+# a compromised package arrives — is never downloaded. Empty means "no lock": an older
+# release without one, or a checkout that never built one, installs as it always did.
+if [ "$HEADLESS" -eq 1 ]; then
+    LOCK_NAME="requirements-headless-lock.txt"
+else
+    LOCK_NAME="requirements-lock.txt"
+fi
+LOCK_FILE=""
+
 if [ -n "$REPO_ROOT" ]; then
     info "Installing from local checkout at $REPO_ROOT"
     PKG_SPEC="$REPO_ROOT"
+    # Where build.yml writes it; present only after a local release build (and in CI).
+    if [ -f "$REPO_ROOT/dist/release/$LOCK_NAME" ]; then
+        LOCK_FILE="$REPO_ROOT/dist/release/$LOCK_NAME"
+    fi
 elif [ -n "${TINTAVIEW_SOURCE_URL:-}" ]; then
     # Explicit developer/CI override: install exactly what the caller pointed at, with no
     # checksum to verify it against. Loud on purpose — nobody should reach this by
@@ -368,6 +397,13 @@ Refusing to install an unverified build. Check $RELEASES_URL and try again short
 
     verify_checksum "$WORKDIR" "$WHEEL_NAME" "$SUMS_NAME"
     PKG_SPEC="$WORKDIR/$WHEEL_NAME"
+
+    # Optional to *find* (releases before it existed have none), never optional to
+    # verify: a lock that was downloaded but is not in SHA256SUMS.txt stops the install.
+    if fetch "$BASE_URL/$LOCK_NAME" "$WORKDIR/$LOCK_NAME" 2>/dev/null; then
+        verify_checksum "$WORKDIR" "$LOCK_NAME" "$SUMS_NAME"
+        LOCK_FILE="$WORKDIR/$LOCK_NAME"
+    fi
 fi
 
 # --------------------------------------------------------------------------- venv
@@ -402,7 +438,33 @@ else
 fi
 
 info "Installing $APP_NAME ($EXTRA_SPEC) — this may take a minute the first time"
-"$VENV_PY" -m pip install --quiet --upgrade "$EXTRA_SPEC"
+LOCKED=0
+if [ -n "$LOCK_FILE" ]; then
+    # pip's own log, not captured output: it is where the reason for a failure is read
+    # from, the same way on every platform (install.ps1 does exactly this).
+    PIP_LOG=$(mktemp)
+    if "$VENV_PY" -m pip install --quiet --require-hashes --only-binary :all: \
+        --log "$PIP_LOG" -r "$LOCK_FILE"; then
+        LOCKED=1
+    elif grep -q "DO NOT MATCH THE HASHES" "$PIP_LOG" 2>/dev/null; then
+        # A file that is not the one the release was built with. Never installed, and
+        # never worked around by falling back to "whatever the index serves".
+        rm -f "$PIP_LOG"
+        die "A downloaded dependency does not match the checksum in this release's $LOCK_NAME.
+Nothing was installed from it. This can be a corrupted download or a tampered package —
+try again on another network, and report it at $RELEASES_URL if it repeats."
+    else
+        # Anything else is the lock not fitting this machine — a Python newer than the
+        # pinned versions support, a platform-specific dependency the lock does not
+        # list. Install as before the lock existed, and say so.
+        warn "Could not install the exact dependency versions this release was built with
+(they may not support $PY_VERSION on this system); installing the newest compatible ones instead."
+    fi
+    rm -f "$PIP_LOG"
+fi
+if [ "$LOCKED" -eq 0 ]; then
+    "$VENV_PY" -m pip install --quiet --upgrade "$EXTRA_SPEC"
+fi
 
 # ...and then plant TintaView's own code unconditionally, the same repair pass install.ps1
 # runs. `--upgrade` compares version numbers and does nothing when they match, so without

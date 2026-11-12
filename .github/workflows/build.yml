@@ -26,8 +26,11 @@ on:
     tags: ["v*"]
   workflow_dispatch: {}
 
+# Read-only for everything that runs code from the repository or from PyPI (the tests,
+# the build). Only the `publish` job below — which runs nothing but the two release
+# actions on files already built — may write to the Release.
 permissions:
-  contents: write # needed to attach files to the Release on a tag push
+  contents: read
 
 # Unlike ci.yml, `cancel-in-progress: false`: this job publishes release artifacts, and a
 # half-finished upload cancelled by a second tag push leaves a Release with some of its
@@ -116,6 +119,11 @@ jobs:
           cp dist/*.whl dist/*.tar.gz dist/release/
           cp packaging/install.ps1 dist/release/
           cp packaging/install.sh dist/release/
+          # The dependency locks both installers hand to `pip install --require-hashes`:
+          # every dependency pinned to the version this release was tested with, with the
+          # SHA-256 of its files. Written before the checksums so SHA256SUMS.txt covers them.
+          python -m pip install --quiet pip-tools
+          python scripts/build_lock.py build dist/release
           ( cd dist/release && sha256sum * > SHA256SUMS.txt )
           cat dist/release/SHA256SUMS.txt
 
@@ -140,8 +148,42 @@ jobs:
           # Actions storage allowance for files nobody opens after the day they build.
           retention-days: 3
 
-      - name: Attach to GitHub Release
+      # Everything the Release gets, handed to the `publish` job: it has the write
+      # permission and this job does not. One day is plenty — it is read minutes later.
+      - name: Hand the release files to the publish job
         if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-files
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # attach files to the Release
+      id-token: write # sign the provenance attestation below
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-files
+          path: dist/release
+
+      # The checksums file is published beside the files it covers, so on its own it only
+      # catches a corrupted download. This records, signed by GitHub and outside the
+      # Release, that these exact files were built by this workflow from this commit:
+      #   gh attestation verify <file> --repo <owner>/<repo>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/release/*
+
+      - name: Attach to GitHub Release
         # Pinned to a commit SHA, not a tag: a tag is mutable, so `@v3` is an
         # unreviewed third-party action with `contents: write` on this repo, running
         # whatever that tag points at on the day. Dependabot (.github/dependabot.yml)

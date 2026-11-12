@@ -24,13 +24,12 @@ import datetime as _dt
 import difflib
 import json
 import logging
-import os
-import shutil
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..agents.base import HOOK_SENTINEL, AgentAdapter
+from ..core.fsutil import atomic_write, file_mode
 
 log = logging.getLogger(__name__)
 
@@ -331,11 +330,9 @@ def _backup(path: Path) -> Path | None:
         return None
     stamp = _dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     dest = path.with_name(path.name + BACKUP_SUFFIX + stamp)
-    dest.write_bytes(path.read_bytes())
-    # The original's permissions, not the umask's: `~/.claude.json` is 0600, and a
-    # world-readable copy of it next to it would undo that.
-    with contextlib.suppress(OSError):
-        shutil.copymode(path, dest)
+    # Created with the original's permissions, not given them afterwards:
+    # `~/.claude.json` is 0600, and a copy of it must never be readable in between.
+    atomic_write(dest, path.read_bytes(), mode=file_mode(path))
     _prune_backups(path)
     return dest
 
@@ -357,11 +354,7 @@ def apply(plan: HookPlan) -> Path | None:
         return None
     plan.path.parent.mkdir(parents=True, exist_ok=True)
     backup = _backup(plan.path)
-    tmp = plan.path.with_name(plan.path.name + ".tintaview-tmp")
-    tmp.write_text(plan.after, encoding="utf-8")
-    if backup is not None:  # the file existed: keep its mode across the rename
-        with contextlib.suppress(OSError):
-            shutil.copymode(backup, tmp)
-    os.replace(tmp, plan.path)
+    # An existing file keeps its mode, and the temp file is created with it.
+    atomic_write(plan.path, plan.after)
     log.info("hooks %s: %s (backup: %s)", plan.action, plan.path, backup)
     return backup

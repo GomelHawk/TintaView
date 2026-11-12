@@ -16,12 +16,12 @@ file behind. A corrupt or missing file is treated as "no cache yet", never raise
 from __future__ import annotations
 
 import json
-import os
 import threading
 from collections.abc import Iterable
 from pathlib import Path
 
 from tintaview.core.config import config_dir
+from tintaview.core.fsutil import PRIVATE_FILE, atomic_write
 
 from .model import UsageResult
 
@@ -95,9 +95,4 @@ class UsageCache:
         # Called with `self._lock` already held.
         payload = {key: value.to_dict() for key, value in self._data.items()}
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        # Unique per writer even though the lock already serialises same-process
-        # callers — cheap insurance against a second process (e.g. a stale daemon)
-        # touching the same file.
-        tmp = self._path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)
+        atomic_write(self._path, json.dumps(payload, indent=2), mode=PRIVATE_FILE)

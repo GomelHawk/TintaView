@@ -43,6 +43,7 @@ from typing import Any
 from urllib.parse import quote
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.core.net import MAX_JSON_BYTES, read_capped, token_request
 from tintaview.i18n import t
 
 from .. import format as fmt
@@ -147,18 +148,13 @@ def _decrypt_token(value: str, db_path: Path) -> str:
 
 
 def _post_usage(token: str, timeout: float) -> dict[str, Any]:
-    req = urllib.request.Request(
-        USAGE_URL,
-        data=b"{}",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Connect-Protocol-Version": "1",
-        },
+    req = token_request(
+        USAGE_URL, f"Bearer {token}", data=b"{}",
+        headers={"Content-Type": "application/json", "Connect-Protocol-Version": "1"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(read_capped(resp, MAX_JSON_BYTES).decode("utf-8"))
 
 
 def _shape(data: Any) -> Any:

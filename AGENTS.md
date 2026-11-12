@@ -120,6 +120,9 @@ tintaview/
   cli.py  __main__.py
   core/      config.py  state.py  server.py  events.py  stalldetect.py  controller.py  log.py
              request.py  proc.py  keepawake.py
+             fsutil.py                                   # the one atomic write, owner-only modes
+             net.py                                      # token requests that don't follow redirects
+             usercmd.py                                  # the user's three shell commands, Qt-free
              netinfo.py                                  # public IP + country/city, panel-open only
              mcp.py                                      # the notify_user MCP server
   engines/   base.py  chroma.py  ghub.py  ghub_env.py  steelseries.py  openrgb.py  null.py  factory.py
@@ -132,6 +135,9 @@ tintaview/
   i18n/      __init__.py  locales/{en,es,it,de,pl,ru,be,uk}.json
   ui/        tray.py  workers.py  dialogs.py  flyout.py  badges.py  wizard.py  icons.py  settings_dialog.py
              notify_log.py  sound.py
+             update_flow.py                              # update check, prompt and balloons
+             console_setup.py                            # opens the wizard in a terminal window
+             tray_backend.py                             # GNOME: X11 vs D-Bus icon, decided pre-Qt
   install/   detect.py  hooks.py  hookscript.py  codex_flag.py  autostart.py  wsl.py
              components.py  doctor.py  update.py  restart.py
              mcp.py                                      # registers core/mcp.py per agent
@@ -238,6 +244,27 @@ tool-start, tool-end`.
 | `GET` | `/show` | A second launch asks the running instance to surface its usage panel |
 | `GET` | `/quit` | Graceful shutdown: `install/restart.py` and the tray's own Quit ask the running instance to stop, so the engine is closed and the devices handed back. Answers `quitting: false` when nothing registered `on_quit` |
 
+**The broker refuses browsers, and that is its only access control.** There is no
+authentication — a hook is a one-line `curl`, and its URL is baked into every agent's config —
+so a web page open in the user's browser could make it send `GET /quit`, post a `notify_user`
+message (which runs `notify.command` with the page's text) or raise a confirm.
+`server.foreign_request_reason` runs before any route and answers 403 for the three marks a
+browser leaves and no real client does: an `Origin` header (every cross-site POST and `fetch`),
+`Sec-Fetch-Site` other than `none`/`same-origin` (the requests with no `Origin`: an `<img>`, a
+link, a redirect), and a `Host` that is a DNS name other than `localhost` or `server.host` (DNS
+rebinding, which would otherwise let a page *read* `/state`). Any IP-literal `Host` is accepted —
+rebinding needs a name, and a hook reaches a `0.0.0.0` bind by whichever address it has — as is a
+request with no `Host` at all. `POST /v1/notify` additionally requires
+`Content-Type: application/json`, which a page cannot send cross-site without a preflight.
+Never add a route above that check, and never answer `Access-Control-Allow-*`.
+`server.host` off loopback is logged at startup and is a `doctor` WARN: the same routes are then
+open to the network.
+
+Both ingress paths read `agent`, `sid`, `tool` and `aid` through `server._ingress_ids`: made
+printable, one line and bounded (not rejected — a hand-written hook may name its session
+anything). `StateStore` keeps at most `MAX_SESSIONS`, dropping the longest-silent one, and a
+connection that sends nothing is closed after `REQUEST_TIMEOUT_S`.
+
 Two invariants in the ingress path:
 
 - **Acknowledge before any lighting I/O — but after the store update.** A slow Chroma or
@@ -303,6 +330,19 @@ the last one alone (`StateStore.set(tool=None)` means "unchanged", `tool=""` mea
 does **not** use it: Shell_NotifyIcon's `szTip` is a fixed `WCHAR[128]`, so the tooltip is
 the aggregate session count and nothing else — no per-agent lines, no engine note. A
 lighting-engine problem is announced by a tray balloon instead.
+
+**The live `Config` is shared across threads, so it is changed by replacement only.** The tray,
+`StatusServer`, `LightController`, `StatsService` and the flyout all hold the same object; HTTP
+worker threads read `enabled_agents` and `agents` on every hook. `TrayApp._apply_settings`
+therefore assigns whole new values (`cfg.enabled_agents = list(…)`, `cfg.agents = …`) and never
+appends to, inserts into or removes from a container in place, and `config.dumps()` reads
+through `agent_config()` so that saving does not insert agent tables into the config it is
+serialising (it used to, on the GUI thread, on every save). Hot paths use `agent_config()`, never
+`agent()`. An immutable-snapshot design was considered and not built: with those two rules
+there is no writer left that a reader can observe half-done. Both rules are held by tests:
+`test_apply_settings_replaces_shared_containers_and_never_edits_them` walks every list and dict
+in the live config, and `test_only_code_that_owns_its_config_uses_the_inserting_lookup` walks the
+package for `.agent(`.
 
 **Config.** One file for daemon, tray, wizard and `doctor`: `~/.tintaview/config.toml`, or
 `%LOCALAPPDATA%\TintaView\config.toml` on Windows. Every key is documented in the README's
@@ -513,7 +553,7 @@ keep this from becoming the next hot-path regression, or a hole:
   the query `sid`, then `default`, instead. Never a *different* valid id.
 - **`detail` is one line.** `cmd` truncates `%VAR%` at a newline, silently. Lines join on
   ` ⏎ `; capped at `MAX_DETAIL_CHARS` (3500) so it fits a Telegram message beside the sentence.
-- **On Windows every agent-derived variable has `"` turned into `'`** (`tray._cmd_safe`). The
+- **On Windows every agent-derived variable has `"` turned into `'`** (`core.usercmd.cmd_safe`). The
   escalation command runs through `cmd`, which pastes `%VAR%` into the line *before* parsing it,
   so a `"` in the agent's command closes the user's quoted argument and what follows runs —
   measured through the tray's own `Popen(shell=True)`: `grep "a" x.txt" & echo INJECTED & "`
@@ -886,15 +926,16 @@ its metrics as an argument), and must stay under `REASON_MAX_CHARS` in the catal
   `~/.junie`); `StatsService` wires `session_roots(cfg)`.
 - **GitHub Copilot CLI** — a hook-driven agent too (`agents/copilot.py`, see
   [Agents and the hook layer](#agents-and-the-hook-layer)); this provider only covers usage.
-  Deliberately no live quota percentage: GitHub's real "X% used, resets in Nd" figure comes from an
-  internal `copilot_internal/user` endpoint that needs a token out of the OS credential store
-  (Windows Credential Manager here, target `<uuid>.github-copilot-app`) via a two-step OAuth
-  exchange (`copilot_internal/v2/token` first) — reverse-engineerable in principle, but not
-  attempted without a captured real response to verify field names against, the same bar Cursor's
-  and JetBrains's providers were held to. Instead reads `<home>/session-store.db`'s
-  `assistant_usage_events` table (confirmed against a live database) and sums input/output tokens
-  per model over the last 7 days — informational totals only (`show_pct=False`), same shape as
-  Codex's API-key fallback.
+  The live "X% used, resets in Nd" figure is read **on Windows only**: the Copilot CLI's OAuth
+  token from Windows Credential Manager (target `<uuid>.github-copilot-app`, found with
+  `CredEnumerateW`, read with one exact-name `CredReadW`), sent as `Authorization: token …` to
+  GitHub's internal `copilot_internal/user` — confirmed against a real response; no
+  `copilot_internal/v2/token` exchange is needed to read quota. The token is read fresh per
+  poll and never logged, cached or persisted. Anything short of a full, parseable answer —
+  another OS, not signed in, a changed payload — falls back, without an error, to
+  `<home>/session-store.db`'s `assistant_usage_events` table (confirmed against a live
+  database): input/output tokens per model over the last 7 days, informational totals only
+  (`show_pct=False`), same shape as Codex's API-key fallback.
 
 In a **WSL split** install the Claude/Codex JSONL files sit behind a UNC path, where every
 `stat` and read is a round trip. Both transcript providers therefore go through
@@ -904,6 +945,25 @@ untouched for a week cannot hold a line from it — and `FileMemo` caches each f
 records on `(mtime_ns, size)`, so an unchanged file costs one `stat` per poll. Measured
 locally: a cold scan 0.65 s → 0.13 s, a warm poll 4 ms. Don't reintroduce a `glob("**")` in
 a provider.
+
+### Tokens on the wire, files on disk
+
+- **A request that carries a credential is built with `core.net.token_request`**, which
+  attaches it as an *unredirected* header. `urllib` re-sends ordinary headers to wherever a 3xx
+  points, another host included; Claude's, Cursor's and Copilot's tokens all went through plain
+  `headers=`. `tests/test_hardening.py` checks every provider's request, and bodies are read
+  through `read_capped`.
+- **Every file TintaView rewrites goes through `core.fsutil.atomic_write`** — a complete temp
+  file created *with its final mode*, then a rename. `config.toml`, the usage cache and the
+  trend file are 0600 and the config directory 0700 (a notify command is where the README's
+  example puts a bot token); a hook merge and its backup keep the agent file's own mode
+  (`~/.claude.json` is 0600) without a moment of being readable; `tv-hook` and `hook.env` are
+  replaced whole, because an agent may run the script mid-install. Don't `write_text` then
+  `chmod`.
+- **A user command is never logged**, only its length (`core.usercmd.spawn`).
+- **The updater downloads only from `update.RELEASE_DOWNLOAD_PREFIX`** (this repository's
+  release downloads): asset URLs come out of a JSON reply, so they are checked, not trusted,
+  and a download is capped at `MAX_ASSET_BYTES`.
 
 ## Interface language (i18n)
 
@@ -998,6 +1058,9 @@ frozen bundle or an `.exe` installer without a code-signing certificate to go wi
 
 Two traps both installers encode (the first is Windows-only):
 
+- **`install.sh --uninstall` removes only what it created**: the venv (and only when its
+  `pyvenv.cfg` is there), the icon, and the prefix directory if that left it empty — never
+  `rm -rf "$PREFIX"`, which for `--prefix "$HOME"` was the home directory.
 - On Windows `config_dir()` **is** the install prefix (`%LOCALAPPDATA%\TintaView`) — `config.toml`,
   `hook.env`, `bin\tv-hook.cmd` and `logs\` are siblings of the venv. So the prefix is never
   deleted recursively; only `<prefix>\venv`, which the installer owns outright, ever is.
@@ -1023,6 +1086,37 @@ Two traps both installers encode (the first is Windows-only):
 - **The Linux menu icon is a named theme icon** (`~/.local/share/icons/hicolor/256x256/apps/
   tintaview.png`, `Icon=tintaview`). With a file path in `Icon=`, GNOME Shell kept showing its
   cached picture after the path changed — measured on the maintainer's Ubuntu VM.
+
+**Dependencies are installed from the release's lock, when it has one.** `build.yml` runs
+`scripts/build_lock.py build`, which writes `requirements-lock.txt` ([ui] + [openrgb]) and
+`requirements-headless-lock.txt` ([openrgb]) with `pip-compile --generate-hashes`: every
+dependency pinned, with the SHA-256 of every file published for that version, so one file made
+on Linux installs on all three systems. Both are in `SHA256SUMS.txt`. Each installer downloads
+its lock, verifies it like the wheel, and runs `pip install --require-hashes --only-binary :all:
+-r <lock>` in place of the unpinned `--upgrade "<wheel>[extras]"`; the wheel itself then goes in
+with the existing `--force-reinstall --no-deps`. What this buys is that a dependency release
+published *after* a TintaView release — how a compromised package usually arrives — is never
+fetched. Three outcomes, and the difference between the last two is deliberate:
+
+- **No lock** (a release from before it, `-WheelPath` with none beside the wheel, a checkout
+  with no `dist/release/`): install unpinned, exactly as before.
+- **A checksum mismatch** — pip's log (`--log`, read instead of captured output; redirecting a
+  native command's stderr throws under PowerShell's `Stop`) contains `DO NOT MATCH THE HASHES`:
+  the install stops. Never retried unpinned.
+- **Any other failure** — a Python newer than the pinned versions support, a platform-only
+  dependency the Linux-made lock does not list: a warning, then the unpinned install. Failing
+  closed here would break installs for a reason that is not an attack, on the project's most
+  fragile path. The cost is stated honestly: someone who can make the pinned version
+  *unavailable* gets the unpinned behaviour back, which is what every install had before.
+
+The `smoke-install*` jobs build the lock and run `build_lock.py verify` against the installed
+venv on ubuntu, macOS and Windows. It checks pip's `REQUESTED` marker, not only versions: on the
+day a lock is made the unpinned fallback installs the same versions, and only a package named
+in the lock file itself carries that marker.
+
+The README's install commands fetch `releases/latest/download/install.{sh,ps1}`, not the `main`
+branch: the script piped into a shell is the one published and checksummed with the wheel it
+installs, so an installer fix reaches new users with the next release, not the next push.
 
 Both installers download the release **wheel** and verify its SHA-256 against the release's
 `SHA256SUMS.txt` before installing, failing closed on a missing or mismatched digest, and are
@@ -1117,6 +1211,12 @@ smoke test that the wheel installs and `python -m tintaview` works, then it atta
 GitHub Release. Building on Linux also keeps `install.sh` from being CRLF-mangled on the way into
 the release — see `.gitattributes`. Third-party actions are pinned to a commit SHA (with the tag in
 a comment) and `.github/dependabot.yml` proposes the bumps; `ci.yml` runs with `contents: read`.
+`build.yml` is two jobs: `build` (tests, wheel, checksums) is read-only, because it runs code
+from the repository and from PyPI; `publish` takes the finished files as an artifact, is the
+only job with `contents: write`, records a build-provenance attestation for them
+(`gh attestation verify <file> --repo GomelHawk/TintaView`) and attaches them to the Release.
+The attestation is the only check that does not come from the Release itself —
+`SHA256SUMS.txt` sits beside the files it covers.
 
 **Asked for a release, or for release notes?** Write a detailed description of it, derived from
 **every commit on `main` after the most recent tag** — not from memory, not from what this session
@@ -1209,7 +1309,7 @@ can't be worked out from the diff, say so in the notes rather than guessing at i
 | Codex hook feature flag and Windows availability | Will keep drifting; detect the version, fall back to `notify` (idle-only), state the limitation in the wizard |
 | Cursor usage RPC | Unofficial; will break without warning. Degrade, never block |
 | JetBrains `CREDIT_SCALE` | Reverse-engineered from one live widget reading, not documented. Only affects display formatting, never severity |
-| Copilot CLI live quota | Not implemented — would need OS-credential-store access plus an undocumented two-step OAuth exchange with unverified field names. Local token totals only |
+| Copilot CLI live quota | Windows only, and unofficial: the OAuth token from Credential Manager, sent to GitHub's internal `copilot_internal/user`. Any failure falls back to local token totals, silently. macOS/Linux token storage was never captured, so those get the totals only |
 | Cursor confirm heuristic | Tune `stall_seconds` against real sessions; ship conservative; allow disabling |
 | G HUB legacy LED SDK + start order | Undocumented/unofficial by Logitech's own admission; `RestoreLighting` does not hand mice back — `close()` must `LogiLedShutdown` and the next `open()` re-inits. If G HUB restarts under us the session is orphaned — surface a status_note and restart TintaView. **`pythonw.exe` silent no-op:** SetLighting returns true but does not paint — tray stays on `pythonw`, paint goes through a `python.exe` sidecar only for this engine |
 | OpenRGB SDK version drift | Pin to v5 behaviour, feature-detect, fail soft |

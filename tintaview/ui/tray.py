@@ -25,34 +25,30 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import shlex
-import shutil
-import subprocess
 import sys
 import threading
 import time
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from tintaview.core import usercmd
 from tintaview.core.config import Config
 from tintaview.core.events import STATUS_NONE
 from tintaview.core.keepawake import KeepAwake
 from tintaview.i18n import set_language, t
 from tintaview.stats import format as fmt
-from tintaview.ui import icons, sound
+from tintaview.ui import console_setup, icons, sound, tray_backend
 from tintaview.ui.dialogs import DoctorReportDialog, show_about
 from tintaview.ui.flyout import Flyout
 from tintaview.ui.notify_log import NotifyEntry, NotifyLog
+from tintaview.ui.update_flow import UpdateFlow
 from tintaview.ui.workers import (
     DoctorWorker,
     HookCheckWorker,
-    ManualUpdateWorker,
     StateWorker,
     StatsWorker,
-    UpdateCheckWorker,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - types only
@@ -79,23 +75,6 @@ def _dim(rgb: tuple[int, int, int], factor: float = 0.3) -> tuple[int, int, int]
 
 
 
-def _cmd_safe(value: str, windows: bool | None = None) -> str:
-    """An agent-derived value made safe to expand inside ``"…%VAR%…"`` under ``cmd.exe``.
-
-    The escalation command runs through the shell, and on Windows that is ``cmd``, which
-    substitutes ``%VAR%`` into the command line **before** parsing it. With the agent's
-    own command now in `TINTAVIEW_DETAIL`, a ``"`` in it closes the user's quoted argument
-    and whatever follows (``& del …``) runs — measured through this exact `Popen` path:
-    ``grep "a" x.txt" & echo INJECTED & "`` executed the ``echo``. With every ``"``
-    turned into ``'``, the same value stayed one literal argument, ``& | < > ^ %``
-    included. POSIX shells never re-parse an expanded ``"$VAR"``, so the value is left
-    exactly as the agent wrote it there.
-    """
-    if windows is None:
-        windows = sys.platform == "win32"
-    return value.replace('"', "'") if windows else value
-
-
 def _agent_label(key: str) -> str:
     """Human name for an agent key, for the escalation balloon.
 
@@ -109,116 +88,6 @@ def _agent_label(key: str) -> str:
         return display_name(key)
     except Exception:
         return key.replace("_", " ").title() or key
-
-
-def _console_command() -> list[str] | None:
-    """Argv prefix that runs TintaView under a *console* interpreter, or None.
-
-    `sys.executable` is `pythonw.exe` for the tray, and pythonw can never host a text
-    prompt no matter what console it is given — so the sibling `python.exe` is what has
-    to be launched. Returns None when no console interpreter can be located, leaving the
-    caller to tell the user to run the command themselves.
-    """
-    exe = Path(sys.executable)
-    if sys.platform == "win32" and exe.name.lower() == "pythonw.exe":
-        console = exe.with_name("python.exe")
-        if not console.exists():
-            return None
-        exe = console
-    if not exe.exists():
-        return None
-    return [str(exe), "-m", "tintaview"]
-
-
-#: Terminal emulators tried on Linux, in order, each with the argv prefix that makes it run
-#: a command: the desktop defaults first (Ubuntu 25.10+ ships Ptyxis, earlier GNOME
-#: Terminal; KDE Konsole; XFCE; GNOME Console), then the Debian alternative, then xterm.
-_LINUX_TERMINALS: tuple[tuple[str, ...], ...] = (
-    ("ptyxis", "--"),
-    ("gnome-terminal", "--"),
-    ("konsole", "-e"),
-    ("xfce4-terminal", "-x"),
-    ("kgx", "--"),
-    ("x-terminal-emulator", "-e"),
-    ("xterm", "-e"),
-)
-
-#: Keeps the wizard's window open after it exits, so its last lines can be read.
-_HOLD_SCRIPT = '"$@"; printf "\\nPress Enter to close this window. "; read _'
-
-
-def _terminal_argv(command: list[str], platform: str | None = None) -> list[str] | None:
-    """Argv that runs `command` in a *new terminal window*, or None if none can be found.
-
-    Every platform gets one: Windows a new console (via `CREATE_NEW_CONSOLE` at the call
-    site, so `command` as is), macOS Terminal.app, Linux the first terminal emulator on
-    PATH. The tray is started from a menu or at login with no terminal of its own, so a
-    plain `Popen` of a text-mode program there is invisible and dies on its first prompt.
-    """
-    platform = platform or sys.platform
-    if platform == "win32":
-        return command
-    if platform == "darwin":
-        line = " ".join(shlex.quote(part) for part in command)
-        return [
-            "osascript",
-            "-e", f'tell application "Terminal" to do script {_applescript_str(line)}',
-            "-e", 'tell application "Terminal" to activate',
-        ]
-    held = ["sh", "-c", _HOLD_SCRIPT, "sh", *command]
-    for name, *flag in _LINUX_TERMINALS:
-        exe = shutil.which(name)
-        if exe:
-            return [exe, *flag, *held]
-    return None
-
-
-def _applescript_str(text: str) -> str:
-    """`text` as an AppleScript string literal."""
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def run_console_setup() -> None:
-    """Open the full setup wizard in a terminal window of its own — on every platform.
-
-    The wizard is a deliberately text-mode `print`/`input` flow (see
-    `tintaview.ui.wizard`), and the tray runs windowed: started from the Start Menu, the
-    applications menu, Launchpad or at login, it has no terminal at all. It is never run
-    in-process, even from a tray that does have one: it would block the GUI thread for as
-    long as the user took to answer, and its last step restarts the running tray — this
-    very process. Called by `TrayApp._open_settings` once the settings dialog has closed
-    asking for it (see `SettingsDialog.launch_wizard`).
-    """
-    try:
-        command = _console_command()
-        argv = _terminal_argv([*command, "setup"]) if command is not None else None
-        if argv is None:
-            QtWidgets.QMessageBox.information(
-                None, "TintaView",
-                t("tray.wizard.terminal_hint", command=_setup_hint(command)),
-            )
-            return
-
-        kwargs: dict[str, object] = {}
-        if sys.platform == "win32":
-            # Without this the child inherits "no console" from pythonw.exe and dies
-            # on its first prompt.
-            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-        else:
-            kwargs["start_new_session"] = True
-            kwargs["stdin"] = subprocess.DEVNULL
-        subprocess.Popen(argv, **kwargs)  # type: ignore[arg-type]
-    except Exception:
-        # A failure to open the wizard must never kill the tray.
-        log.exception("could not open the setup wizard")
-        QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.wizard.open_failed"))
-
-
-def _setup_hint(command: list[str] | None) -> str:
-    """The exact command to type when no terminal could be opened for the user."""
-    if not command:
-        return "tintaview setup"
-    return " ".join(shlex.quote(part) for part in [*command, "setup"])
 
 
 class TrayApp(QtCore.QObject):
@@ -299,13 +168,6 @@ class TrayApp(QtCore.QObject):
         self._stats_worker = StatsWorker(cfg)
         self._stats_worker.results_ready.connect(self._apply_results)
 
-        self._update_worker = UpdateCheckWorker()
-        self._update_worker.update_available.connect(self._on_update_available)
-
-        self._manual_update_worker = ManualUpdateWorker()
-        self._manual_update_worker.check_ready.connect(self._on_manual_check)
-        self._manual_update_worker.install_done.connect(self._on_update_installed)
-
         self._doctor_worker = DoctorWorker()
         self._hook_worker = HookCheckWorker(cfg)
         self._hook_worker.missing_ready.connect(self._on_hooks_missing)
@@ -346,6 +208,8 @@ class TrayApp(QtCore.QObject):
         )
 
         self.tray = QtWidgets.QSystemTrayIcon(self._badged(icons.brand_icon(ICON_SIZE)))
+        #: The update check, prompt and balloons — see `ui/update_flow.py`.
+        self._updates = UpdateFlow(self.tray, self)
         self.tray.setToolTip(t("tray.tooltip.connecting"))
         self.tray.activated.connect(self._on_activated)
         # Held as an attribute: `QSystemTrayIcon.setContextMenu` doesn't take ownership,
@@ -380,7 +244,7 @@ class TrayApp(QtCore.QObject):
         # hooks" menu item was removed at the maintainer's request.
         self._hook_worker.fetch()
         if cfg.update.check:
-            self._update_worker.fetch()
+            self._updates.check_at_startup()
 
     # --- menu -------------------------------------------------------------
 
@@ -423,7 +287,7 @@ class TrayApp(QtCore.QObject):
 
         menu.addSeparator()
         menu.addAction(t("tray.menu.settings"), self._open_settings)
-        menu.addAction(t("tray.menu.check_updates"), self._check_updates)
+        menu.addAction(t("tray.menu.check_updates"), self._updates.check)
         menu.addAction(t("tray.menu.open_logs"), self._open_logs)
         menu.addAction(t("tray.menu.diagnostics"), self._run_diagnostics)
         menu.addSeparator()
@@ -521,16 +385,8 @@ class TrayApp(QtCore.QObject):
             return
         # The same variables as the other two commands, so one script serves all three
         # and tells them apart by `TINTAVIEW_STATUS` (``notify`` here). The message and
-        # the directory come from the agent — see `_cmd_safe`.
-        self._spawn_user_command(command, {
-            "TINTAVIEW_STATUS": "notify",
-            "TINTAVIEW_AGENTS": label,
-            "TINTAVIEW_MESSAGE": _cmd_safe(message),
-            "TINTAVIEW_CWD": _cmd_safe(cwd),
-            "TINTAVIEW_QUESTION": "",
-            "TINTAVIEW_DETAIL": "",
-            "TINTAVIEW_TOOL": "",
-        })
+        # the directory come from the agent — see `usercmd.cmd_safe`.
+        usercmd.spawn(command, usercmd.notify_variables(label, message, cwd))
 
     def _set_sound(self, on: bool) -> None:
         self._cfg.ui.chime_on_confirm = on
@@ -585,7 +441,7 @@ class TrayApp(QtCore.QObject):
     def _open_settings(self) -> None:
         """Open the native settings dialog, in-process.
 
-        Unlike the console wizard (see `run_console_setup` below), this needs no
+        Unlike the console wizard (see `ui/console_setup.py`), this needs no
         subprocess: the tray already owns a running Qt event loop, so a `QDialog` is
         just another window. Only the knobs `SettingsDialog` actually covers are
         reachable here — hooks/autostart/engine-specific setup stay behind its "Open
@@ -604,7 +460,7 @@ class TrayApp(QtCore.QObject):
             if accepted:
                 self._apply_settings(dialog.result_cfg)
             if dialog.launch_wizard:
-                run_console_setup()
+                console_setup.run_console_setup()
         except Exception:
             log.exception("could not open the settings dialog")
             QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.settings.open_failed"))
@@ -787,99 +643,6 @@ class TrayApp(QtCore.QObject):
 
     def _show_about(self) -> None:
         show_about()
-
-    def _on_update_available(self, tag: str, current: str) -> None:
-        """Startup check found a newer release — surface it as a tray balloon rather
-        than a modal dialog: this fires unattended on every launch, so it must never
-        interrupt whatever the user is doing. "Check for updates" in the menu (below)
-        is where the actual install prompt lives."""
-        # Not translated, and deliberately just the app's name: every update balloon
-        # shares this title, so anything more specific ends up wrong on three of the
-        # four (it used to read "TintaView update available" above "Checking for
-        # updates…"). The dialogs in this file are titled the same way.
-        self.tray.showMessage(
-            "TintaView",
-            t("tray.update.balloon_body", latest=tag, current=current),
-            QtWidgets.QSystemTrayIcon.Information,
-            8000,
-        )
-
-    def _check_updates(self) -> None:
-        """Check for a newer release and offer to install it — nothing here blocks.
-
-        Both halves used to run inline on the GUI thread, contradicting this docstring's
-        own promise: `latest_release()` is a 10 s-timeout HTTPS call, and on Linux/macOS
-        `run_update()` runs `sh install.sh` synchronously, which rebuilds the private venv
-        and takes minutes. The tray, the flyout and the broker's Qt callbacks were all
-        dead for the duration, with only a frozen icon to show for it. The work moved to
-        `ManualUpdateWorker`; everything below reports through dialogs and balloons, since
-        a windowed build has no console for `run_update`'s own progress output.
-        """
-        # No balloon here, by the rule in this module's docstring: the user just asked
-        # for this and `_on_manual_check` answers in a dialog, so a "Checking for
-        # updates…" toast is a second notification saying less than the first — and on
-        # Windows toasts are queued, so it arrived *after* the answer it was meant to
-        # precede.
-        self._manual_update_worker.check()  # False = a check or install is already running
-
-    def _on_manual_check(self, outcome: str, tag: str, notes: str) -> None:
-        """The manual check came back — on the GUI thread, via a queued signal."""
-        from tintaview import __version__
-
-        worker = ManualUpdateWorker
-        if outcome == worker.OUTCOME_UNSUPPORTED:
-            QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.unsupported"))
-            return
-        if outcome == worker.OUTCOME_FAILED:
-            QtWidgets.QMessageBox.information(None, "TintaView", t("tray.update.check_failed"))
-            return
-        if outcome == worker.OUTCOME_CURRENT:
-            QtWidgets.QMessageBox.information(
-                None, "TintaView", t("tray.update.up_to_date", version=__version__)
-            )
-            return
-
-        notes_block = f"\n\n{notes}" if notes else ""
-        answer = QtWidgets.QMessageBox.question(
-            None, "TintaView",
-            t("tray.update.confirm", latest=tag, current=__version__, notes=notes_block),
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-        )
-        if answer != QtWidgets.QMessageBox.Yes:
-            return
-
-        # The installer replaces files this process is running from, so hand off and let
-        # run_update's own platform logic (verify SHA-256, run silently, detach on
-        # Windows) take over — on a worker thread, with a balloon rather than a modal
-        # dialog, because on Linux/macOS it does not return for minutes.
-        if not self._manual_update_worker.install():
-            return
-        self.tray.showMessage(
-            "TintaView",
-            t("tray.update.installing"),
-            QtWidgets.QSystemTrayIcon.Information,
-            15000,
-        )
-
-    def _on_update_installed(self, code: int) -> None:
-        """The install finished — on the GUI thread, however long it took.
-
-        Success is worth saying out loud rather than staying silent like the startup
-        check does: this process is still running the *old* code out of a venv the
-        installer has just replaced, so "it worked" is only half the message.
-
-        Both outcomes balloon. The install takes minutes on Linux/macOS and the user is
-        long gone by the time it lands, so the failure is no more "an answer they are
-        waiting for" than the success is — a modal warning stealing focus that late is
-        the interruption the docstring's rule exists to prevent. The wording carries the
-        next step (`tintaview update` in a terminal) either way.
-        """
-        self.tray.showMessage(
-            "TintaView",
-            t("tray.update.installed") if code == 0 else t("tray.update.failed"),
-            QtWidgets.QSystemTrayIcon.Information if code == 0 else QtWidgets.QSystemTrayIcon.Warning,
-            15000,
-        )
 
     def _on_hooks_missing(self, agents: list) -> None:
         """The startup hook check found agents with no working hooks: say so once, and
@@ -1164,40 +927,7 @@ class TrayApp(QtCore.QObject):
         command = self._cfg.escalation.command.strip()
         if not command:
             return
-        # Everything but the first two comes, in the end, from what an agent wrote — see
-        # `_cmd_safe`.
-        asking = asking or {}
-        self._spawn_user_command(command, {
-            "TINTAVIEW_STATUS": "confirm",
-            "TINTAVIEW_AGENTS": ", ".join(waiting),
-            "TINTAVIEW_QUESTION": _cmd_safe(question),
-            "TINTAVIEW_MESSAGE": _cmd_safe(message),
-            "TINTAVIEW_DETAIL": _cmd_safe(str(asking.get("detail") or "")),
-            "TINTAVIEW_TOOL": _cmd_safe(str(asking.get("request_tool") or "")),
-            "TINTAVIEW_CWD": _cmd_safe(str(asking.get("cwd") or "")),
-        })
-
-    @staticmethod
-    def _spawn_user_command(command: str, variables: dict[str, str]) -> None:
-        """Start one of the user's own commands, detached, with ``variables`` added to
-        the environment, and never wait for it or report on it."""
-        env = dict(os.environ)
-        env.update(variables)
-        try:
-            kwargs: dict[str, Any] = {}
-            if sys.platform == "win32":
-                # No console flash: the tray runs windowed, and `shell=True` here means
-                # cmd.exe, which would otherwise pop a window for a `curl` one-liner.
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-            else:
-                # Its own process group, so a command that outlives the tray isn't killed
-                # by the Ctrl+C that stops a dev run.
-                kwargs["start_new_session"] = True
-            subprocess.Popen(command, shell=True, env=env, **kwargs)  # noqa: S602 - the user's own command, by design
-        except Exception:
-            # A broken command is the user's to fix, and telling them about it in a
-            # modal at 2am is worse than the log line they can find when they look.
-            log.exception("user command failed to start: %r", command)
+        usercmd.spawn(command, usercmd.confirm_variables(waiting, question, message, asking))
 
     def _chime(self) -> None:
         ui = self._cfg.ui
@@ -1268,17 +998,7 @@ class TrayApp(QtCore.QObject):
         command = self._cfg.stats.alert_command.strip()
         if not command:
             return
-        self._spawn_user_command(command, {
-            "TINTAVIEW_STATUS": "limit",
-            "TINTAVIEW_AGENTS": agent,
-            "TINTAVIEW_MESSAGE": _cmd_safe(message),
-            "TINTAVIEW_LIMIT": _cmd_safe(label),
-            "TINTAVIEW_PCT": str(pct),
-            "TINTAVIEW_QUESTION": "",
-            "TINTAVIEW_DETAIL": "",
-            "TINTAVIEW_TOOL": "",
-            "TINTAVIEW_CWD": "",
-        })
+        usercmd.spawn(command, usercmd.limit_variables(agent, label, pct, message))
 
     def _reorder_results(self) -> None:
         """Re-key `_usage_results` into `cfg.enabled_agents` order.
@@ -1383,84 +1103,16 @@ def _register_windows_identity() -> None:
         log.debug("could not register the Windows app identity", exc_info=True)
 
 
-#: A session-bus address that cannot connect. Handed to Qt — and only to Qt, only until the
-#: tray icon exists — so that it cannot see GNOME's StatusNotifierWatcher (see below).
-_NO_SESSION_BUS = "unix:path=/nonexistent/tintaview-legacy-tray"
-
-#: Run in a child process: can Qt start on X11 here, and does a panel accept an X11
-#: (XEmbed) tray icon once D-Bus is out of the way? A child, because Qt *aborts the
-#: process* when its xcb plugin cannot load (a missing libxcb-* library).
-_LEGACY_TRAY_PROBE = (
-    "import sys\n"
-    "from PySide6 import QtWidgets\n"
-    "app = QtWidgets.QApplication(['tintaview-probe'])\n"
-    "sys.stdout.write('1' if QtWidgets.QSystemTrayIcon.isSystemTrayAvailable() else '0')\n"
-)
-
-
-def _gnome_legacy_tray_enabled() -> bool:
-    """Does GNOME's AppIndicator extension host X11 tray icons? (Its default: yes.)"""
-    try:
-        out = subprocess.run(
-            ["gsettings", "get", "org.gnome.shell.extensions.appindicator",
-             "legacy-tray-enabled"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return out.returncode == 0 and out.stdout.strip() == "true"
-
-
-def _use_legacy_tray(environ: dict[str, str] | None = None) -> bool:
-    """Should this tray use an X11 (XEmbed) icon instead of a D-Bus one?
-
-    Only on GNOME, where it is the one way a left click reaches the app. GNOME shows tray
-    icons through the AppIndicator extension, which opens a D-Bus icon's *menu* on a left
-    click and hands the app nothing but a double click (`indicatorStatusIcon.js`,
-    `vfunc_button_press_event`, unchanged v58-v66). Its X11 tray icons are given the raw
-    click instead (`IndicatorStatusTrayIcon`, `this._icon.click(event)`), so Qt's
-    QSystemTrayIcon behaves exactly as on Windows: left click → `Trigger` → the usage
-    panel, right click → the context menu. Qt itself picks D-Bus whenever the watcher is
-    on the bus, on Wayland always (`QGenericUnixTheme::shouldUseDBusTray`), with no switch
-    — hence X11 plus a session bus Qt cannot reach. Every other desktop (KDE, XFCE, …)
-    already sends a left click to the app and is left alone. Anything in doubt — another
-    desktop, a QT_QPA_PLATFORM someone chose, the extension's legacy tray off, Qt unable
-    to start on X11 — answers False, and the tray starts exactly as before.
-    """
-    env = os.environ if environ is None else environ
-    if not sys.platform.startswith("linux"):
-        return False
-    if env.get("QT_QPA_PLATFORM") or not env.get("DISPLAY"):
-        return False
-    if "GNOME" not in env.get("XDG_CURRENT_DESKTOP", "").upper():
-        return False
-    if not _gnome_legacy_tray_enabled():
-        return False
-    probe_env = {**env, "QT_QPA_PLATFORM": "xcb", "DBUS_SESSION_BUS_ADDRESS": _NO_SESSION_BUS}
-    try:
-        out = subprocess.run(
-            [sys.executable, "-c", _LEGACY_TRAY_PROBE],
-            env=probe_env, capture_output=True, text=True, timeout=20, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    ok = out.returncode == 0 and out.stdout.strip() == "1"
-    if not ok:
-        log.info("GNOME: X11 tray icon unavailable, using the D-Bus one (%s)",
-                 (out.stderr or "").strip()[-300:])
-    return ok
-
-
 def run_tray(cfg: Config, server: Any) -> int:
     """Build the QApplication, the tray icon and the flyout, and run the event
     loop. Signature matches what `cli.py`'s `_cmd_run` calls: `run_tray(cfg, server)`
     with an already-started `StatusServer`.
     """
-    legacy = _use_legacy_tray()
+    legacy = tray_backend.use_legacy_tray()
     saved = {key: os.environ.get(key) for key in ("DBUS_SESSION_BUS_ADDRESS", "QT_QPA_PLATFORM")}
     if legacy:
         os.environ["QT_QPA_PLATFORM"] = "xcb"
-        os.environ["DBUS_SESSION_BUS_ADDRESS"] = _NO_SESSION_BUS
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = tray_backend.NO_SESSION_BUS
     try:
         app = QtWidgets.QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)  # closing the flyout must not quit the tray

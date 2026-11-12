@@ -2,12 +2,12 @@
 #
 # Usage (the supported way -- no download prompt, no SmartScreen, no Smart App Control):
 #
-#     irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1 | iex
+#     irm https://github.com/GomelHawk/TintaView/releases/latest/download/install.ps1 | iex
 #
 # To pass options through that one-liner, invoke it as a script block instead of piping
 # into `iex` (which cannot forward arguments):
 #
-#     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/GomelHawk/TintaView/main/packaging/install.ps1))) -NoAutostart
+#     & ([scriptblock]::Create((irm https://github.com/GomelHawk/TintaView/releases/latest/download/install.ps1))) -NoAutostart
 #
 # ...or set the TINTAVIEW_* environment variables documented under `param` below, which
 # every option also reads, precisely so the plain piped form stays usable.
@@ -498,11 +498,22 @@ function Invoke-Install {
 
     try {
         # ------------------------------------------------------------- acquire the wheel
+        # The release's dependency lock: every package TintaView needs, pinned to the
+        # version the release was built and tested with, each with the SHA-256 of its
+        # files (build.yml writes it; SHA256SUMS.txt lists it like the wheel). With it pip
+        # installs exactly those files, so a dependency release published *after* this
+        # TintaView release -- the usual way a compromised package arrives -- is never
+        # downloaded. $null means "no lock": an older release without one, or a local
+        # wheel with none beside it, installs as it always did. install.sh does the same.
+        $lockName = 'requirements-lock.txt'
+        $lockFile = $null
         if ($WheelPath) {
             if (-not (Test-Path -LiteralPath $WheelPath)) { Die "-WheelPath does not exist: $WheelPath" }
             $wheel = (Resolve-Path -LiteralPath $WheelPath).Path
             Write-Info "Installing from the local wheel at $wheel (no checksum to verify against)"
             if (-not $Version) { $Version = 'local' }
+            $lockBeside = Join-Path (Split-Path -Parent $wheel) $lockName
+            if (Test-Path -LiteralPath $lockBeside) { $lockFile = $lockBeside }
         } else {
             Initialize-Tls
             if (-not $Version) { $Version = Get-LatestVersion }
@@ -521,6 +532,18 @@ function Invoke-Install {
             Save-File -Uri "$baseUrl/$wheelName" -OutFile $wheel
             Save-File -Uri "$baseUrl/$sumsName"  -OutFile $sumsLocal
             Assert-Checksum -FilePath $wheel -ChecksumsPath $sumsLocal -FileName $wheelName
+
+            # Optional to *find* (releases before it existed have none), never optional
+            # to verify: a lock that was downloaded but is not in SHA256SUMS.txt stops
+            # the install.
+            $lockLocal = Join-Path $workDir $lockName
+            try {
+                Invoke-WebRequest -Uri "$baseUrl/$lockName" -OutFile $lockLocal -Headers @{ 'User-Agent' = $UserAgent } -UseBasicParsing
+                $lockFile = $lockLocal
+            } catch {
+                $lockFile = $null
+            }
+            if ($lockFile) { Assert-Checksum -FilePath $lockFile -ChecksumsPath $sumsLocal -FileName $lockName }
         }
 
         # ------------------------------------------------------------- venv
@@ -567,8 +590,30 @@ function Invoke-Install {
         # "the SDK server isn't answering", sending people to restart software that was
         # never the problem. openrgb-python is small and pure Python, so there is no
         # reason to make it opt-in.
-        & $VenvPython -m pip install --quiet --upgrade "${wheel}[ui,openrgb]"
-        if ($LASTEXITCODE -ne 0) { Die "pip failed to install $AppName (exit $LASTEXITCODE). Re-run without -Silent to see the full output." }
+        $locked = $false
+        if ($lockFile) {
+            # pip's own log, not captured output: it is where the reason for a failure is
+            # read from, the same way install.sh does, and redirecting a native
+            # command's stderr under $ErrorActionPreference = 'Stop' throws.
+            $pipLog = Join-Path $workDir 'pip-lock.log'
+            & $VenvPython -m pip install --quiet --require-hashes --only-binary ':all:' --log $pipLog -r $lockFile
+            if ($LASTEXITCODE -eq 0) {
+                $locked = $true
+            } elseif ((Test-Path -LiteralPath $pipLog) -and (Select-String -LiteralPath $pipLog -Pattern 'DO NOT MATCH THE HASHES' -SimpleMatch -Quiet)) {
+                # A file that is not the one the release was built with. Never installed,
+                # and never worked around by falling back to whatever the index serves.
+                Die "A downloaded dependency does not match the checksum in this release's $lockName. Nothing was installed from it. This can be a corrupted download or a tampered package -- try again on another network, and report it at https://github.com/$GitHubRepo/releases if it repeats."
+            } else {
+                # Anything else is the lock not fitting this machine -- a Python newer
+                # than the pinned versions support, a platform-specific dependency the
+                # lock does not list. Install as before the lock existed, and say so.
+                Write-Warn "Could not install the exact dependency versions this release was built with (they may not support Python $($python.Version) on this system); installing the newest compatible ones instead."
+            }
+        }
+        if (-not $locked) {
+            & $VenvPython -m pip install --quiet --upgrade "${wheel}[ui,openrgb]"
+            if ($LASTEXITCODE -ne 0) { Die "pip failed to install $AppName (exit $LASTEXITCODE). Re-run without -Silent to see the full output." }
+        }
 
         # ...and then plant the wheel's own code unconditionally. `--upgrade` compares
         # version numbers and does nothing when they match, so without this a re-run does

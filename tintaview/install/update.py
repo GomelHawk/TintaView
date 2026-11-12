@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..core.net import copy_capped
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,15 @@ USER_AGENT = "TintaView-self-updater"
 _CHECKSUM_ASSET_NAMES = ("SHA256SUMS", "SHA256SUMS.txt", "checksums.txt", "sha256sums.txt")
 
 _DOWNLOAD_TIMEOUT = 60.0
+
+#: The only place a release asset is ever downloaded from. The asset list comes out of a
+#: JSON reply and each entry names its own URL, so that URL is checked rather than trusted:
+#: an install script is about to be run from it.
+RELEASE_DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
+
+#: Ceiling for one downloaded asset. The install scripts are tens of kilobytes and the
+#: checksums file a few hundred bytes; nothing this module fetches is a wheel.
+MAX_ASSET_BYTES = 5 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------- version compare
@@ -180,15 +190,22 @@ def latest_release(timeout: float = 10.0) -> dict[str, Any] | None:
 
 
 def _asset_url(assets: list[dict[str, Any]], name: str) -> str | None:
+    """`name`'s download URL, or None when the release has no such asset — or names a
+    URL for it that is not under this repository's own release downloads."""
     for asset in assets:
-        if asset.get("name") == name:
+        if isinstance(asset, dict) and asset.get("name") == name:
             url = asset.get("browser_download_url")
-            return str(url) if url else None
+            if not isinstance(url, str) or not url:
+                return None
+            if not url.startswith(RELEASE_DOWNLOAD_PREFIX):
+                log.warning("ignoring release asset %s: unexpected download URL", name)
+                return None
+            return url
     return None
 
 
 def _find_checksums_asset(assets: list[dict[str, Any]]) -> str | None:
-    names = {asset.get("name") for asset in assets}
+    names = {asset.get("name") for asset in assets if isinstance(asset, dict)}
     for candidate in _CHECKSUM_ASSET_NAMES:
         if candidate in names:
             return candidate
@@ -199,7 +216,7 @@ def _download(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT) -> None:
     """Raises OSError (which covers urllib.error.URLError/HTTPError) on any failure."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
-        shutil.copyfileobj(resp, out)
+        copy_capped(resp, out, MAX_ASSET_BYTES)
 
 
 def _sha256_of(path: Path) -> str:

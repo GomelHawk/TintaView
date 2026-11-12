@@ -14,6 +14,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 from ..core import config as config_mod
+from ..core.fsutil import atomic_write, file_mode
 from .detect import PLATFORM_WINDOWS, PLATFORM_WSL, Environment
 
 log = logging.getLogger(__name__)
@@ -46,15 +47,13 @@ def install_hook_script(cfg: config_mod.Config, env: Environment) -> Path:
     src = _HOOKS_DIR / hook_name
     dest = config_mod.config_dir() / "bin" / hook_name
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    if sys.platform != "win32":
-        dest.chmod(dest.stat().st_mode | 0o111)
+    _write_local_script(dest, src.read_text(encoding="utf-8"))
 
     curl = "curl.exe" if env.platform in (PLATFORM_WINDOWS, PLATFORM_WSL) else "curl"
     url = f"http://{cfg.server.host}:{cfg.server.port}"
     env_path = config_mod.hook_env_path()
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text(f"TINTAVIEW_URL={url}\nTINTAVIEW_CURL={curl}\n", encoding="utf-8")
+    atomic_write(env_path, f"TINTAVIEW_URL={url}\nTINTAVIEW_CURL={curl}\n")
     return dest
 
 
@@ -142,6 +141,7 @@ def refresh_if_outdated(cfg: config_mod.Config, env: Environment | None = None) 
 
 
 def _write_local_script(dest: Path, script: str) -> None:
-    dest.write_text(script, encoding="utf-8")
-    if sys.platform != "win32":
-        dest.chmod(dest.stat().st_mode | 0o111)
+    """Replace the hook script in one rename: an agent fires it on every tool call, and
+    one that ran a half-written copy would run a truncated script."""
+    mode = None if sys.platform == "win32" else (file_mode(dest) or 0o644) | 0o111
+    atomic_write(dest, script, mode=mode)

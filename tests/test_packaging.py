@@ -306,3 +306,84 @@ def test_install_sh_starts_the_mac_tray_in_the_desktop_session(sh: str):
     """The LaunchAgent autostart writes, kickstarted in gui/<uid> -- the macOS twin of
     `systemctl --user restart`, so an install over SSH still shows the tray."""
     assert 'launchctl kickstart -k "gui/$(id -u)/com.tintaview.app"' in sh
+
+
+def test_uninstall_never_deletes_the_prefix_itself(sh: str):
+    """`--prefix` is whatever was typed: `rm -rf "$PREFIX"` took `$HOME` with it for
+    `--uninstall --prefix "$HOME"`. Only the installer's own venv — proven by its
+    pyvenv.cfg — is removed recursively; the directory goes only if that emptied it."""
+    code = "\n".join(line for line in sh.splitlines() if not line.lstrip().startswith("#"))
+    assert 'rm -rf "$PREFIX"' not in code
+    assert 'if [ -f "$VENV_DIR/pyvenv.cfg" ]; then' in code
+    assert 'rmdir "$PREFIX"' in code
+
+
+# --- the dependency lock: built by CI, verified and enforced by both installers ---
+
+
+def _load_build_lock():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_lock", REPO_ROOT / "scripts" / "build_lock.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_ci_ships_the_lock_files_the_installers_download(ps1: str, sh: str, build_yml: str):
+    """One list of lock names (`scripts/build_lock.py`), and each installer asks for the
+    ones it can need: Windows always installs the desktop set, `install.sh` either."""
+    locks = _load_build_lock().LOCKS
+    assert set(locks) == {"requirements-lock.txt", "requirements-headless-lock.txt"}
+    assert "'requirements-lock.txt'" in ps1
+    for name in locks:
+        assert f'"{name}"' in sh
+    # Built before the checksums are computed, so SHA256SUMS.txt covers them.
+    assert build_yml.index("scripts/build_lock.py build dist/release") < build_yml.index(
+        "sha256sum * > SHA256SUMS.txt")
+
+
+def test_both_installers_install_from_the_lock_the_same_way(ps1: str, sh: str):
+    for script in (ps1, sh):
+        code = "\n".join(line for line in script.splitlines()
+                         if not line.lstrip().startswith("#"))
+        # Exact files only: pinned versions, checked hashes, no source builds.
+        assert "--require-hashes" in code and "--only-binary" in code
+        # A checksum mismatch stops the install; it is never retried unpinned.
+        assert "DO NOT MATCH THE HASHES" in code
+        # The reason is read from pip's own log, not from captured output.
+        assert "--log" in code
+    # A downloaded lock is verified against the release's checksums like the wheel.
+    assert 'verify_checksum "$WORKDIR" "$LOCK_NAME" "$SUMS_NAME"' in sh
+    assert "Assert-Checksum -FilePath $lockFile -ChecksumsPath $sumsLocal -FileName $lockName" in ps1
+
+
+def test_the_smoke_jobs_prove_the_locked_path_ran_on_every_os():
+    """Versions alone cannot tell a locked install from the unpinned fallback on the day
+    the lock is made, so each smoke job runs `build_lock.py verify`."""
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert ci.count("build_lock.py build") == 2  # ubuntu+macOS job, windows job
+    assert "build_lock.py verify dist/release/requirements-headless-lock.txt" in ci
+    assert "build_lock.py verify dist/release/requirements-lock.txt" in ci
+    assert "build_lock.py verify dist\\requirements-lock.txt" in ci
+
+
+def test_lock_pins_are_read_from_a_pip_compile_file(tmp_path):
+    lock = tmp_path / "requirements-lock.txt"
+    lock.write_text(
+        "#\n# comment\n#\n"
+        "openrgb-python==0.3.8 \\\n    --hash=sha256:aa \\\n    --hash=sha256:bb\n"
+        "    # via tintaview (pyproject.toml)\n"
+        "tomlkit==0.15.2 \\\n    --hash=sha256:cc\n", encoding="utf-8")
+    assert _load_build_lock().pinned(lock) == [("openrgb-python", "0.3.8"),
+                                               ("tomlkit", "0.15.2")]
+
+
+def test_the_install_command_fetches_the_released_installer():
+    """Not the `main` branch: the script a user pipes into a shell is the one published
+    with — and checksummed beside — the wheel it installs."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "raw.githubusercontent.com" not in readme
+    assert "releases/latest/download/install.sh | sh" in readme
+    assert "releases/latest/download/install.ps1 | iex" in readme

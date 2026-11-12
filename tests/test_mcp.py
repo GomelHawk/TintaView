@@ -44,7 +44,8 @@ def daemon():
 
 def _post_notify(server: StatusServer, body: bytes, agent: str = "claude") -> tuple[int, dict]:
     request = urllib.request.Request(f"{server.url}/v1/notify?agent={agent}", data=body,
-                                     method="POST")
+                                     method="POST",
+                                     headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=2) as resp:
             return resp.status, json.loads(resp.read())

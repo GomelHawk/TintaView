@@ -60,6 +60,12 @@ class _Session:
     seen: float = field(default_factory=time.monotonic)
 
 
+#: Most sessions kept at once. Far above anything real (a session per agent window), so
+#: it only ever bites a caller inventing session ids — which would otherwise grow the
+#: store, and every `/state` reply, until the watchdog caught up.
+MAX_SESSIONS = 1000
+
+
 class StateStore:
     """Thread-safe map of ``(agent, sid) -> _Session``.
 
@@ -84,6 +90,7 @@ class StateStore:
     def start(self, agent: str, sid: str) -> str | None:
         with self._lock:
             before = self.effective()
+            self._make_room_locked((agent, sid))
             self._sessions[(agent, sid)] = _Session(status=STATUS_IDLE)
             self._touch()
             return self._changed_locked(before)
@@ -133,6 +140,7 @@ class StateStore:
                 return None
             if session is None:
                 session = _Session(status=status)
+                self._make_room_locked((agent, sid))
                 self._sessions[(agent, sid)] = session
             if status == STATUS_CONFIRM:
                 session.confirm_actor = actor
@@ -155,6 +163,13 @@ class StateStore:
             session.seen = time.monotonic()
             self._touch()
             return self._changed_locked(before)
+
+    def _make_room_locked(self, key: tuple[str, str]) -> None:
+        """Drop the longest-silent session when a new one would exceed `MAX_SESSIONS`."""
+        if key in self._sessions or len(self._sessions) < MAX_SESSIONS:
+            return
+        oldest = min(self._sessions, key=lambda k: self._sessions[k].seen)
+        del self._sessions[oldest]
 
     def end(self, agent: str, sid: str) -> str | None:
         with self._lock:

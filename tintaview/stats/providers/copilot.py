@@ -1,14 +1,8 @@
-"""GitHub Copilot CLI usage provider — local only, no network, no hooks (except the
-one verified, read-only call to GitHub's own quota endpoint described below).
+"""GitHub Copilot CLI usage provider — local files, plus one read-only call to GitHub's
+own quota endpoint (Windows only, described below).
 
-Copilot CLI (`@github/copilot`) is a real agentic CLI like Claude Code/Codex/Cursor,
-but it has no hook-based lighting integration here: its hook system exists (a rich
-`preToolUse`/`postToolUse`/`sessionStart`/... event vocabulary), but it is dispatched
-over an internal "SDK callback transport" aimed at programs embedding
-`@github/copilot-sdk`, not a documented external shell-command hook the way Claude's
-`settings.json`, Codex's `hooks.json` or Cursor's `hooks.json` are. So — like
-JetBrains AI Assistant — this is stats-only, and there is no adapter for it in
-`agents/`.
+This module only covers *usage*. Copilot CLI's lighting integration is the hook adapter
+in `agents/copilot.py`; nothing here installs or reads a hook.
 
 GitHub's real "X% of your plan used, resets in Nd" figure — what the account's own
 Copilot usage page shows — comes from an internal, undocumented endpoint
@@ -86,6 +80,7 @@ from typing import Any
 from urllib.parse import quote
 
 from tintaview.core.config import AgentConfig, expand
+from tintaview.core.net import MAX_JSON_BYTES, read_capped, token_request
 from tintaview.i18n import t
 
 from .. import format as fmt
@@ -222,16 +217,12 @@ def _read_copilot_token() -> str:
 
 
 def _fetch_user(token: str, timeout: float) -> dict[str, Any]:
-    req = urllib.request.Request(
-        USER_URL,
-        headers={
-            "Authorization": f"token {token}",
-            "User-Agent": "GithubCopilot/1.0",
-            "Accept": "application/json",
-        },
+    req = token_request(
+        USER_URL, f"token {token}",
+        headers={"User-Agent": "GithubCopilot/1.0", "Accept": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https host
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(read_capped(resp, MAX_JSON_BYTES).decode("utf-8"))
 
 
 def _shape(data: Any) -> Any:

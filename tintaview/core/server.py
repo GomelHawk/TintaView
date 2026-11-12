@@ -4,9 +4,10 @@ The handler, watchdog and blink loop all hang off one `(agent, sid)` state model
 non-obvious constraints commented below are deliberate — each one is there because of a
 real failure mode, not as defensive habit; don't "simplify" them away.
 
-Routes (all GET, loopback only — see AGENTS.md, "Core contracts"):
+Routes (loopback only — see AGENTS.md, "Core contracts"; GET unless marked):
 
     /v1/event/{event}?agent=&sid=&tool=   hook ingress
+    POST /v1/event/{event}?agent=         hook ingress with the agent's payload as the body
     POST /v1/notify?agent=                a message an agent asked to send the user
                                           (the MCP server's `notify_user`, `core/mcp.py`)
     /{session-start,session-end,working,idle,confirm}?sid=
@@ -83,9 +84,100 @@ HTTP_POLL_INTERVAL_S = 0.1
 APPLIER_JOIN_TIMEOUT_S = 2.0
 
 
+#: Seconds a connection may sit silent before its worker thread gives up on it. Every
+#: real client is a local `curl -m 1` or `urllib` call that sends its request at once; a
+#: connection that opens and says nothing used to hold a thread for as long as it liked.
+REQUEST_TIMEOUT_S = 5.0
+
+#: Longest agent key, session id and tool name taken from a GET query — the lengths the
+#: POST path already enforces (`core/request.py`).
+MAX_ID_CHARS = 128
+MAX_TOOL_CHARS = 100
+
+_LOCAL_HOSTNAMES = frozenset({"localhost"})
+
+
+def _host_name(header: str) -> str:
+    """The host part of a `Host` header, lower-cased, without port or IPv6 brackets."""
+    host = header.strip().lower()
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def _is_ip_literal(host: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def foreign_request_reason(headers, configured_host: str) -> str:
+    """Why a request must be refused as coming from a web page, or "" when it may run.
+
+    Nothing that legitimately talks to this server is a browser: hooks are `curl`, the
+    MCP server, `doctor` and the tray are `urllib`. A web page, though, can make any
+    visitor's browser send `GET /quit`, post a `notify_user` message (which runs the
+    user's notify command) or raise a confirm, without ever reading a reply. Browsers
+    mark such requests, and those marks are what is refused:
+
+    - an ``Origin`` header — sent on every cross-site POST and every `fetch`;
+    - ``Sec-Fetch-Site`` other than ``none``/``same-origin`` — sent on the requests that
+      carry no ``Origin`` (an `<img>`, a redirect, a link). ``none`` is someone typing
+      the URL into the address bar, which stays allowed;
+    - a ``Host`` that is a DNS name other than ``localhost`` or the configured one. DNS
+      rebinding points an attacker's own name at 127.0.0.1 so the page becomes
+      "same-origin" and may read `/state`; it cannot be done with an IP literal, so any
+      IP address is accepted (a hook reaches a `0.0.0.0` bind by whichever one it has).
+    """
+    if headers.get("Origin") is not None:
+        return "request carries an Origin header"
+    fetch_site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if fetch_site and fetch_site not in ("none", "same-origin"):
+        return f"cross-site browser request (Sec-Fetch-Site: {fetch_site})"
+    host_header = headers.get("Host")
+    if host_header:
+        host = _host_name(host_header)
+        if not (host in _LOCAL_HOSTNAMES or host == configured_host.strip().lower()
+                or _is_ip_literal(host)):
+            return "unexpected Host header"
+    return ""
+
+
+def is_loopback_host(host: str) -> bool:
+    """True when `server.host` keeps the broker on this machine only."""
+    host = host.strip().lower()
+    if host in _LOCAL_HOSTNAMES:
+        return True
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _first(query: dict[str, list[str]], key: str, default: str) -> str:
     values = query.get(key)
     return values[0] if values else default
+
+
+def _ingress_ids(query: dict[str, list[str]]) -> tuple[str, str, str, str]:
+    """``(agent, sid, tool, actor)`` from a hook request's query — the one place both the
+    GET and the POST ingress read them, so neither can skip the cleaning.
+
+    A shim only ever sends `[A-Za-z0-9._-]` ids, but a hand-written `curl` hook may name
+    its session anything, so `agent`, `sid` and `tool` are made printable, one line and
+    bounded rather than rejected: the same id still lands in the same bucket, and a
+    newline can no longer forge a log line or a megabyte of query become a session key.
+    """
+    agent = clean(_first(query, "agent", ""), MAX_ID_CHARS) or DEFAULT_AGENT
+    sid = clean(_first(query, "sid", ""), MAX_ID_CHARS) or DEFAULT_SID
+    tool = clean(_first(query, "tool", ""), MAX_TOOL_CHARS)
+    return agent, sid, tool, clean_id(_first(query, "aid", ""))
 
 
 def _clean_question(raw: str) -> str:
@@ -123,6 +215,19 @@ class _Handler(BaseHTTPRequestHandler):
     """
 
     server_version = "TintaView/1"
+    #: `StreamRequestHandler` applies this to the connection's socket.
+    timeout = REQUEST_TIMEOUT_S
+
+    def _refuse_foreign(self) -> bool:
+        """Answer 403 and return True for a request a web page made — see
+        `foreign_request_reason`. Checked before any route, so nothing has run yet."""
+        status_server: StatusServer = self.server.status_server  # type: ignore[attr-defined]
+        reason = foreign_request_reason(self.headers, status_server.configured_host)
+        if not reason:
+            return False
+        log.warning("refused %s %s: %s", self.command, urlparse(self.path).path[:80], reason)
+        self._send_json({"error": "forbidden"}, status=403)
+        return True
 
     def _write_ack(self) -> None:
         """Acknowledge a hook request IMMEDIATELY — 200, Content-Length: 0, flushed —
@@ -145,7 +250,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 (http.server's naming convention)
         try:
-            self._route()
+            if not self._refuse_foreign():
+                self._route()
         except Exception:
             log.exception("unhandled error handling %s", self.path)
 
@@ -158,7 +264,8 @@ class _Handler(BaseHTTPRequestHandler):
         hook script never has to know which ones the daemon will read a body for.
         """
         try:
-            self._route_post()
+            if not self._refuse_foreign():
+                self._route_post()
         except Exception:
             log.exception("unhandled error handling POST %s", self.path)
 
@@ -197,13 +304,13 @@ class _Handler(BaseHTTPRequestHandler):
         # (Claude runs this hook just before it draws the permission dialog.)
         self._write_ack()
         request = parse_request(body)
-        agent = _first(query, "agent", DEFAULT_AGENT)
+        agent, query_sid, tool, query_actor = _ingress_ids(query)
         # The payload's own session id — no `sed` scrape on this path at all. A query
         # `sid` is honoured as a fallback for a caller that knows it and posts no JSON.
-        sid = request.sid or _first(query, "sid", DEFAULT_SID)
-        status_server.handle_event(event, agent, sid, _first(query, "tool", ""),
+        sid = request.sid or query_sid
+        status_server.handle_event(event, agent, sid, tool,
                                    request.question, request=request,
-                                   actor=request.actor or clean_id(_first(query, "aid", "")))
+                                   actor=request.actor or query_actor)
 
     def _route_notify(self, status_server: StatusServer, query: dict[str, list[str]]) -> None:
         """``{"message": …, "cwd": …}`` from the MCP server, answered with whether anything
@@ -214,6 +321,13 @@ class _Handler(BaseHTTPRequestHandler):
         ``notified: false`` (headless, or a malformed body) is what lets the agent tell
         the user the notification did not go out, instead of claiming it did.
         """
+        # The MCP server always says so. A browser can post any body cross-site, but only
+        # as text/plain or a form — a second check behind `_refuse_foreign`.
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self._send_json({"ok": False, "error": "Content-Type must be application/json"},
+                            status=415)
+            return
         try:
             payload = json.loads(self._read_body() or b"{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -270,11 +384,8 @@ class _Handler(BaseHTTPRequestHandler):
             if event not in EVENTS:
                 self._send_json({"error": f"unknown event {event!r}"}, status=404)
                 return
-            agent = _first(query, "agent", DEFAULT_AGENT)
-            sid = _first(query, "sid", DEFAULT_SID)
-            tool = _first(query, "tool", "")
+            agent, sid, tool, actor = _ingress_ids(query)
             question = _clean_question(_first(query, "question", ""))
-            actor = clean_id(_first(query, "aid", ""))
             # State first, then the ack. `handle_event` is in-memory only (the store's
             # lock, the stall detector, a hand-off to the applier thread — the lighting
             # I/O happens there, after this ack), so the ack still precedes every SDK
@@ -292,7 +403,7 @@ class _Handler(BaseHTTPRequestHandler):
             # A caller that hits `/idle`, `/working`, ... with a bare `sid` and no
             # `agent=` gets defaulted to "claude", so a hand-written hook script stays
             # a one-line curl without having to know about the multi-agent query API.
-            sid = _first(query, "sid", DEFAULT_SID)
+            sid = _ingress_ids(query)[1]
             # State first, then the ack — the same ordering guarantee as the v1 path.
             status_server.handle_event(legacy_event, DEFAULT_AGENT, sid, "")
             self._write_ack()
@@ -543,6 +654,13 @@ class StatusServer:
         self._watchdog_thread.start()
 
         log.info("TintaView status broker listening on %s", self.url)
+        if not is_loopback_host(self._cfg.server.host):
+            log.warning(
+                "server.host is %r, not a loopback address: every machine that can reach "
+                "this one can drive the lights, send notifications (which run your notify "
+                "command) and stop TintaView. Set it back to 127.0.0.1 unless you meant that.",
+                self._cfg.server.host,
+            )
         return True
 
     def stop(self) -> None:
@@ -568,6 +686,10 @@ class StatusServer:
             self._watchdog_thread = None
         self._applier.stop()
         self.controller.shutdown()
+
+    @property
+    def configured_host(self) -> str:
+        return self._cfg.server.host
 
     @property
     def url(self) -> str:
