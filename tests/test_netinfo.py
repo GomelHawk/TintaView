@@ -163,3 +163,22 @@ def test_connects_over_ipv4_when_the_host_has_it(monkeypatch):
     conn.connect()
     assert seen == {"family": netinfo.socket.AF_INET, "addr": ("192.0.2.7", 443),
                     "sni": "example.test"}
+
+
+def test_the_tls_handshake_offers_http_1_1_like_http_client_does(monkeypatch):
+    """`ssl.create_default_context()` offers no ALPN protocol; `http.client`'s own context
+    offers `http/1.1`. Measured: ipinfo.io answered the bare handshake with HTTP 406 on an
+    Ubuntu VM — country but never a city in the panel — and 200 with `http/1.1` offered."""
+    offered: list = []
+    real = netinfo.ssl.create_default_context
+
+    def recording_context(*args, **kwargs):
+        ctx = real(*args, **kwargs)
+        original = ctx.set_alpn_protocols
+        ctx.set_alpn_protocols = lambda protocols: (offered.append(list(protocols)),
+                                                    original(protocols))[1]
+        return ctx
+
+    monkeypatch.setattr(netinfo.ssl, "create_default_context", recording_context)
+    netinfo._IPv4FirstHTTPSConnection("ipinfo.io", timeout=1)
+    assert offered == [["http/1.1"]]

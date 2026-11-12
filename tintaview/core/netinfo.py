@@ -32,6 +32,12 @@ hosts are reached:
   so the reported address is IPv4: an IPv6 address is up to 39 characters, which the
   panel's right-hand column has no room for. An IPv6-only network falls back to the
   default connection and shows its IPv6 address.
+- **ALPN `http/1.1`, as `http.client` itself sends.** That connection needs its own TLS
+  context, and `ssl.create_default_context()` advertises no ALPN protocol, where the one
+  `http.client` builds offers `http/1.1`. Measured on an Ubuntu VM: ipinfo.io answered
+  that handshake with HTTP 406 and an empty body on every request, and with 200 and the
+  city once `http/1.1` was offered — so the panel showed the country (Cloudflare's
+  fallback) and never the city, while the same code on Windows had both.
 
 Stdlib only, never raises: the panel shows "unavailable" for every failure.
 """
@@ -115,6 +121,8 @@ class _IPv4FirstHTTPSConnection(http.client.HTTPSConnection):
 
     def __init__(self, host: str, timeout: float) -> None:
         self._tv_context = ssl.create_default_context()
+        # What http.client's own context offers; without it ipinfo.io answered 406.
+        self._tv_context.set_alpn_protocols(["http/1.1"])
         super().__init__(host, timeout=timeout, context=self._tv_context)
 
     def connect(self) -> None:
