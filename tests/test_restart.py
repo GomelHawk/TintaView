@@ -304,7 +304,11 @@ def test_a_pid_that_is_not_tintaview_is_never_signalled(monkeypatch):
     import subprocess
     import sys
 
-    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    # Something that is not Python at all: on Windows a process is recognised by its
+    # executable (`python.exe`), so a Python victim would rightly count as ours there.
+    command = (["cmd.exe", "/c", "ping -n 30 127.0.0.1 >nul"] if sys.platform == "win32"
+               else ["sleep", "30"])
+    victim = subprocess.Popen(command)
     try:
         import time
 

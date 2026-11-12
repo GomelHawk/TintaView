@@ -18,7 +18,6 @@ touch a real `~/.claude`, `~/.codex` or `~/.cursor`.
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -386,7 +385,9 @@ class _FakeCompleted:
 def wsl_mod(monkeypatch):
     from tintaview.install import wsl
 
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wsl.exe")
+    # The module's own lookup, not `shutil.which`: on a real Windows machine that lookup
+    # finds System32\\wsl.exe first and would never consult a patched `which`.
+    monkeypatch.setattr(wsl, "system_tool", lambda name: "/usr/bin/wsl.exe")
     return wsl
 
 
@@ -414,7 +415,7 @@ def test_run_in_builds_expected_wsl_command(monkeypatch, wsl_mod):
 
 
 def test_run_in_missing_wsl_exe_degrades_cleanly(monkeypatch, wsl_mod):
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(wsl_mod, "system_tool", lambda name: None)
     with pytest.raises(wsl_mod.WslError, match="wsl.exe"):
         wsl_mod.run_in("Ubuntu", ["echo", "hi"])
 

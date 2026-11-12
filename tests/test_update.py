@@ -282,7 +282,9 @@ def verified_script(monkeypatch, tmp_path):
 def test_windows_update_runs_install_ps1(monkeypatch, verified_script, capsys):
     launched: list[list[str]] = []
     monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
-    monkeypatch.setattr(U.shutil, "which", lambda name: r"C:\pwsh\powershell.exe")
+    # The module's own lookup, not `shutil.which`: on a real Windows machine the lookup
+    # finds System32 first, and this test would then see the runner's PowerShell.
+    monkeypatch.setattr(U, "system_tool", lambda name: r"C:\pwsh\powershell.exe")
     monkeypatch.setattr(U.sys, "prefix", "/not/an/installed/venv")
 
     rc = U._update_windows("9.9.9", _windows_release_assets())
@@ -305,7 +307,7 @@ def test_windows_update_runs_install_ps1(monkeypatch, verified_script, capsys):
 def test_windows_update_passes_its_own_install_prefix(monkeypatch, verified_script, tmp_path):
     launched: list[list[str]] = []
     monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
-    monkeypatch.setattr(U.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(U, "system_tool", lambda name: "powershell.exe")
 
     # install.ps1's layout: <prefix>/venv, so sys.prefix is the venv and the install
     # prefix is its parent.
@@ -326,7 +328,7 @@ def test_windows_update_from_a_checkout_passes_no_prefix(monkeypatch, verified_s
     """A dev run outside an installed venv must not claim its cwd is an install prefix."""
     launched: list[list[str]] = []
     monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
-    monkeypatch.setattr(U.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(U, "system_tool", lambda name: "powershell.exe")
     monkeypatch.setattr(U.sys, "prefix", str(tmp_path / "some-checkout" / ".venv"))
 
     assert U._update_windows("9.9.9", _windows_release_assets()) == 0
@@ -467,7 +469,7 @@ def test_windows_update_keeps_the_download_until_the_detached_script_has_run(
     """
     launched: list[list[str]] = []
     monkeypatch.setattr(U.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
-    monkeypatch.setattr(U.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(U, "system_tool", lambda name: "powershell.exe")
     monkeypatch.setattr(U.sys, "prefix", str(tmp_path / "checkout" / ".venv"))
 
     assert U._update_windows("9.9.9", _windows_release_assets()) == 0

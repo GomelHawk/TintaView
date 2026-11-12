@@ -7,13 +7,13 @@ drive a real `StatusServer` with real HTTP requests carrying the headers a brows
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import os
 import socket
 import stat
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -209,14 +209,18 @@ def test_a_silent_connection_does_not_hold_a_thread_forever(daemon, monkeypatch)
     assert server_mod._Handler.timeout == server_mod.REQUEST_TIMEOUT_S
     monkeypatch.setattr(server_mod._Handler, "timeout", 0.2)
     port = int(daemon.url.rsplit(":", 1)[1])
-    before = threading.active_count()
+    slots = daemon._httpd._slots
     with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
         sock.settimeout(3)
-        assert sock.recv(10) == b""  # the server gave up and closed it
-    deadline = time.monotonic() + 2
-    while threading.active_count() > before and time.monotonic() < deadline:
+        # The server gave up and closed it; a reset is it being dropped just the same.
+        with contextlib.suppress(ConnectionError):
+            assert sock.recv(10) == b""
+    # Its handler — and the thread running it — is finished: the slot is free again.
+    # (Not `threading.active_count()`: other tests' threads are still winding down.)
+    deadline = time.monotonic() + 3
+    while slots._value < server_mod.MAX_CONNECTIONS and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert threading.active_count() <= before
+    assert slots._value == server_mod.MAX_CONNECTIONS
 
 
 # --------------------------------------------------------------------------- non-loopback host

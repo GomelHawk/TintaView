@@ -110,6 +110,18 @@ had settled "where else does this field have to appear". It hadn't: the answer w
 `TrayApp._apply_settings`, a third site nobody had asked about. When a check comes back clean,
 ask what it did *not* cover.
 
+**A green suite on your own machine is not a green suite.** Before a change is handed over,
+run the tests the way CI does: a clean environment with only what `pip install -e ".[dev,ui]"`
+installs (a `python:3.x-slim` container does it), on each supported Python. A 61-file change
+was handed over as "1241 tests pass" and turned every test job red, because one new test did
+`import yaml` — installed on the developer's machine, not declared by the project — and
+several others faked a tool lookup in a way a real Windows machine sees through.
+`test_tests_import_nothing_the_project_does_not_declare` now catches the first kind. For the
+second: a test that fakes a lookup fakes *the project's own function* (`system_tool`), never
+`shutil.which`, and a test never asserts on `threading.active_count()` — other tests' threads
+are still winding down. What cannot be run locally (macOS, a Windows runner) is said to be
+unverified, in those words, until CI has run it.
+
 **Keep unrelated work out of one change.** Three unrequested features hid inside `c26b34b` —
 1464 lines across 24 files — for a week. At 200 lines they would have been obvious.
 

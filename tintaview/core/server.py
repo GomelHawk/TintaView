@@ -528,6 +528,12 @@ class _StatusHTTPServer(ThreadingHTTPServer):
         finally:
             self._slots.release()
 
+    def handle_error(self, request, client_address) -> None:
+        # The stdlib prints a traceback to stderr here. A client that went away
+        # mid-request — one we cut off at the deadline, or a hook's `curl -m 1` giving
+        # up — is not worth one, and under `pythonw.exe` there is no stderr to print to.
+        log.debug("request from %s ended with an error", client_address, exc_info=True)
+
 
 def _is_tintaview_listening(host: str, port: int, timeout: float = 1.5) -> bool:
     """Is the program holding `host:port` a TintaView daemon?

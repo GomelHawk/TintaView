@@ -216,28 +216,54 @@ def test_a_trickling_client_is_cut_off_at_the_deadline(daemon, monkeypatch):
         sock.settimeout(5)
         sock.sendall(b"G")
         started = time.monotonic()
-        assert sock.recv(10) == b""  # closed by the server
+        _assert_closed_by_peer(sock)  # cut off by the server, not by our 5 s timeout
         assert time.monotonic() - started < 3
 
 
-def test_connections_beyond_the_cap_are_closed_not_given_threads(daemon, monkeypatch):
-    held = [socket.create_connection(("127.0.0.1", _port(daemon)), timeout=5)
-            for _ in range(server_mod.MAX_CONNECTIONS)]
+def test_a_client_that_goes_away_prints_nothing(daemon, capfd):
+    """The tray has no console (`pythonw.exe` has no stderr at all), and the stdlib's
+    default is a traceback on stderr for every request that ends in an error."""
+    with socket.create_connection(("127.0.0.1", _port(daemon)), timeout=5) as sock:
+        sock.sendall(b"GET /state HTTP/1.0\r\nHost: 127.0.0.1\r\nBroken")
+    with socket.create_connection(("127.0.0.1", _port(daemon)), timeout=5) as sock:
+        sock.sendall(b"G")
+        sock.shutdown(socket.SHUT_RDWR)
+    time.sleep(0.5)
+    assert _request(daemon, "GET", "/healthz")[0] == 200
+    captured = capfd.readouterr()
+    assert "Traceback" not in captured.err and "Exception occurred" not in captured.err
+
+
+def test_connections_beyond_the_cap_are_closed_not_given_threads(daemon):
+    # A cap of 3 on this server, so the test opens a handful of sockets rather than a
+    # hundred — the listen backlog on a macOS or Windows runner is not ours to rely on.
+    assert server_mod.MAX_CONNECTIONS >= 16
+    cap = 3
+    daemon._httpd._slots = threading.BoundedSemaphore(cap)
+    held = []
     try:
-        for sock in held:
-            sock.sendall(b"G")
-        time.sleep(0.3)
-        before = threading.active_count()
-        extra = [socket.create_connection(("127.0.0.1", _port(daemon)), timeout=5)
-                 for _ in range(40)]
-        try:
-            for sock in extra:
-                sock.settimeout(3)
-                _assert_closed_by_peer(sock)
-            assert threading.active_count() <= before + 2
-        finally:
-            for sock in extra:
-                sock.close()
+        for _ in range(cap):
+            sock = socket.create_connection(("127.0.0.1", _port(daemon)), timeout=5)
+            sock.sendall(b"G")  # a request that never finishes: the slot stays taken
+            held.append(sock)
+        deadline = time.monotonic() + 3
+        while daemon._httpd._slots._value > 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert daemon._httpd._slots._value == 0, "the held connections never took their slots"
+        handled: list[object] = []
+        real = daemon._httpd.finish_request
+        daemon._httpd.finish_request = lambda request, address: (
+            handled.append(address), real(request, address))[1]
+        extras = []
+        for _ in range(4):
+            with socket.create_connection(("127.0.0.1", _port(daemon)), timeout=5) as extra:
+                extras.append(extra.getsockname())
+                extra.settimeout(3)
+                _assert_closed_by_peer(extra)
+        # Closed at the door: no handler — and so no thread — was ever started for them.
+        # (By address: a held connection's own handler may start a moment after its slot
+        # is counted, and it is not one of these.)
+        assert not set(handled) & set(extras)
     finally:
         for sock in held:
             sock.close()
@@ -664,19 +690,42 @@ def test_the_installers_only_fall_back_when_pip_says_the_lock_does_not_fit():
         assert "--upgrade pip" not in code, f"{name} upgrades pip from the index, unpinned"
 
 
-def test_the_release_is_built_where_no_test_tooling_ever_ran():
-    import yaml
+def _workflow_jobs(text: str) -> dict[str, str]:
+    """Each job's block of a workflow file, by name — read as text, so the test needs
+    nothing the project's own `dev` extra does not install (no YAML parser)."""
+    import re
 
-    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "build.yml").read_text())
-    jobs = workflow["jobs"]
-    assert jobs["build"]["needs"] == "test" and jobs["verify"]["needs"] == "build"
-    assert set(jobs["publish"]["needs"]) == {"build", "verify"}
-    build_script = "\n".join(step.get("run", "") for step in jobs["build"]["steps"])
-    installs = [line.strip() for line in build_script.splitlines()
-                if "pip install" in line and not line.lstrip().startswith("#")]
+    body = text.replace("\r\n", "\n").split("\njobs:\n", 1)[1]
+    starts = [(m.start(), m.group(1)) for m in re.finditer(r"(?m)^  ([a-z][a-z0-9_-]*):\n", body)]
+    jobs = {}
+    for index, (start, name) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(body)
+        jobs[name] = body[start:end]
+    return jobs
+
+
+def _code_lines(block: str) -> list[str]:
+    return [line.strip() for line in block.splitlines() if not line.lstrip().startswith("#")]
+
+
+def test_the_release_is_built_where_no_test_tooling_ever_ran():
+    text = (REPO_ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    jobs = _workflow_jobs(text)
+    assert list(jobs) == ["test", "build", "verify", "publish"]
+    assert "needs: test" in _code_lines(jobs["build"])
+    assert "needs: build" in _code_lines(jobs["verify"])
+    assert "needs: [build, verify]" in _code_lines(jobs["publish"])
+
+    build = _code_lines(jobs["build"])
+    installs = [line for line in build if "pip install" in line]
     assert installs == ["python -I -m pip install --require-hashes --only-binary :all: "
                         "-r packaging/build-requirements.txt"]
-    assert "pytest" not in build_script and "pip-audit" not in build_script
-    assert "--no-isolation" in build_script
-    assert workflow["permissions"] == {"contents": "read"}
-    assert all("permissions" not in jobs[name] for name in ("test", "build", "verify"))
+    assert not any("pytest" in line or "pip-audit" in line for line in build)
+    assert any("--no-isolation" in line for line in build)
+
+    # Read-only by default; only `publish` may write.
+    head = text.replace("\r\n", "\n").split("\njobs:\n", 1)[0]
+    assert "\npermissions:\n  contents: read\n" in head
+    for name in ("test", "build", "verify"):
+        assert not any(line.startswith("permissions:") for line in _code_lines(jobs[name])), name
+    assert "contents: write # attach files to the Release" in _code_lines(jobs["publish"])

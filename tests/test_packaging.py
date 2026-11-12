@@ -505,3 +505,38 @@ def test_vulnerable_or_stale_pins_cannot_go_unnoticed(build_yml: str):
     agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert "python scripts/build_lock.py outdated" in agents
     assert "A known vulnerability is never shipped" in agents
+
+
+def test_tests_import_nothing_the_project_does_not_declare():
+    """A test that imports a package the `dev` extra does not install passes on a
+    machine that happens to have it and fails on every clean one — which is how one
+    `import yaml` turned the whole CI matrix red. Walks every test and script file."""
+    import ast
+    import sys
+    import tomllib
+
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = [*project["dependencies"],
+                *(spec for extra in project["optional-dependencies"].values() for spec in extra)]
+    names = {spec.split(">=")[0].split("==")[0].strip().lower() for spec in declared}
+    # distribution name -> the module it is imported as
+    import_names = {"pyside6-essentials": "PySide6", "pyside6-addons": "PySide6",
+                    "pillow": "PIL", "openrgb-python": "openrgb"}
+    allowed = {import_names.get(name, name) for name in names} | {"tintaview"}
+
+    offenders = []
+    for folder in ("tests", "scripts"):
+        for path in sorted((REPO_ROOT / folder).glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    modules = [node.module]
+                else:
+                    continue
+                for module in modules:
+                    top = module.split(".")[0]
+                    if top not in sys.stdlib_module_names and top not in allowed:
+                        offenders.append(f"{path.name}: {module}")
+    assert not offenders, f"imports of undeclared packages: {offenders}"
