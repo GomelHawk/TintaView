@@ -696,7 +696,7 @@ def test_tray_tooltip_stays_a_short_aggregate_regardless_of_enabled_agent_count(
 
 def test_tray_sound_toggle_persists(tray, tmp_path):
     app_instance, _ = tray
-    actions = app_instance.tray.contextMenu().actions()
+    actions = app_instance._menu.actions()
     sound_action = next(a for a in actions if a.text() == "Sound on confirm")
     assert sound_action.isChecked() is False
 
@@ -779,7 +779,7 @@ def test_tray_keep_awake_toggle_acquires_releases_and_persists(tray, tmp_path):
     fake = _FakeKeepAwake()
     app_instance._keep_awake = fake
     action = next(
-        a for a in app_instance.tray.contextMenu().actions() if a.text() == "Keep awake"
+        a for a in app_instance._menu.actions() if a.text() == "Keep awake"
     )
     assert action.isChecked() is False
 
@@ -807,7 +807,7 @@ def test_tray_keep_awake_is_reapplied_at_startup(qapp, monkeypatch, tmp_path):
     try:
         assert fake.calls == [True]
         action = next(
-            a for a in app_instance.tray.contextMenu().actions() if a.text() == "Keep awake"
+            a for a in app_instance._menu.actions() if a.text() == "Keep awake"
         )
         assert action.isChecked() is True
     finally:
@@ -1304,7 +1304,7 @@ def test_apply_settings_switches_the_interface_language(tray_with_controller):
 
         assert app_instance._cfg.ui.language == "ru"
         assert i18n.current_language() == "ru"
-        texts = [a.text() for a in app_instance.tray.contextMenu().actions()]
+        texts = [a.text() for a in app_instance._menu.actions()]
         assert "Выход" in texts
         assert "Quit" not in texts
         assert app_instance.tray.toolTip() == "Нет активных сессий"
@@ -1332,7 +1332,7 @@ def test_notification_sound_menu_item_saves_and_resyncs(tray_with_controller, mo
     monkeypatch.setattr("tintaview.core.config.save", lambda cfg: saved.append(cfg.notify.sound))
     action = app_instance._notify_sound_action
     assert action.isChecked() is False
-    assert action in app_instance.tray.contextMenu().actions()
+    assert action in app_instance._menu.actions()
 
     action.setChecked(True)
     assert app_instance._cfg.notify.sound is True
@@ -2080,7 +2080,7 @@ def test_hook_check_runs_once_at_startup_and_never_on_a_timer(qapp, monkeypatch,
         app_instance.state_timer.timeout.emit()
         assert calls == [1]
         # And no menu item for it: the fix lives in Settings.
-        labels = [a.text() for a in app_instance.tray.contextMenu().actions()]
+        labels = [a.text() for a in app_instance._menu.actions()]
         assert not any("hook" in label.lower() for label in labels)
     finally:
         for timer in (app_instance.state_timer, app_instance.usage_timer,
@@ -3282,6 +3282,8 @@ def test_run_tray_gives_children_the_real_environment_back(monkeypatch):
             return 0
 
     monkeypatch.setattr(tray_mod, "_use_legacy_tray", lambda: True)
+    # On a Windows runner this would register the app identity for real.
+    monkeypatch.setattr(tray_mod, "_register_windows_identity", lambda: None)
     monkeypatch.setattr(tray_mod.QtWidgets, "QApplication", _App)
     monkeypatch.setattr(tray_mod.QtWidgets.QSystemTrayIcon, "isSystemTrayAvailable",
                         staticmethod(lambda: True))
@@ -3334,8 +3336,12 @@ def test_macos_right_click_pops_the_menu(mac_tray, monkeypatch):
     assert not mac_tray.flyout.isVisible()
 
 
-def test_other_platforms_keep_the_attached_menu(tray):
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_other_platforms_keep_the_attached_menu(tray, monkeypatch, platform):
+    """Pinned to each platform: the suite also runs on macOS, where none is attached."""
     app_instance, _ = tray
+    monkeypatch.setattr(tray_mod.sys, "platform", platform)
+    app_instance._attach_menu()
     assert app_instance.tray.contextMenu() is app_instance._menu
 
 
