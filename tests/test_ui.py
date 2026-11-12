@@ -3438,3 +3438,73 @@ def test_apply_settings_replaces_shared_containers_and_never_edits_them(tray_wit
     assert live.enabled_agents == ["codex", "cursor"]
     assert live.agent_config("cursor").confirm_detection == "stall"
     assert len(live.ui.clocks.clocks) == 2
+
+
+# --- update finished, and windows that do not block each other ---
+
+
+def test_the_first_start_of_a_new_version_says_it_was_updated(tray, tmp_path):
+    """The installer restarts the tray, so the process that showed "Installing…" is gone
+    when the update is done — and nothing said it had finished."""
+    from tintaview import __version__
+
+    app_instance, _server = tray
+    marker = tmp_path / "last-version"
+    assert marker.read_text().strip() == __version__  # written by the fixture's start
+    shown: list[str] = []
+    app_instance.tray.showMessage = lambda title, body, *a: shown.append(body)
+
+    app_instance._announce_new_version()  # same version again: silent
+    assert shown == []
+
+    marker.write_text("0.0.1\n")
+    app_instance._announce_new_version()
+    assert len(shown) == 1 and __version__ in shown[0]
+    assert marker.read_text().strip() == __version__
+
+    marker.unlink()  # a first install has nothing to announce
+    app_instance._announce_new_version()
+    assert len(shown) == 1 and marker.read_text().strip() == __version__
+
+
+def test_settings_is_a_window_that_does_not_block_the_rest_of_the_app(tray, monkeypatch):
+    """`exec()` made it application-modal: with Settings open, the usage panel, About
+    and the diagnostics report could not be opened."""
+    from tintaview.ui import settings_dialog
+
+    app_instance, _server = tray
+    monkeypatch.setattr(settings_dialog.SettingsDialog, "exec",
+                        lambda self: pytest.fail("opened Settings as a blocking dialog"))
+    applied: list[object] = []
+    monkeypatch.setattr(app_instance, "_apply_settings", applied.append)
+
+    app_instance._open_settings()
+    dialog = app_instance._settings_dialog
+    assert dialog is not None and not dialog.isModal()
+    assert dialog.windowModality() == QtCore.Qt.NonModal
+
+    app_instance._open_settings()  # a second click brings the same window forward
+    assert app_instance._settings_dialog is dialog
+
+    dialog.reject()  # Cancel: nothing applied, and it can be opened again
+    assert applied == [] and app_instance._settings_dialog is None
+
+    app_instance._open_settings()
+    second = app_instance._settings_dialog
+    assert second is not None and second is not dialog
+    second.done(QtWidgets.QDialog.Accepted)
+    assert len(applied) == 1 and app_instance._settings_dialog is None
+
+
+def test_about_is_a_window_that_does_not_block_the_rest_of_the_app(qapp, monkeypatch):
+    from tintaview.ui import dialogs
+
+    monkeypatch.setattr(QtWidgets.QDialog, "exec",
+                        lambda self: pytest.fail("opened About as a blocking dialog"))
+    dialogs.show_about()
+    first = dialogs._about_dialog
+    assert first is not None and not first.isModal()
+    dialogs.show_about()
+    assert dialogs._about_dialog is first  # one window, brought forward
+    first.accept()
+    assert dialogs._about_dialog is None

@@ -540,3 +540,17 @@ def test_tests_import_nothing_the_project_does_not_declare():
                     if top not in sys.stdlib_module_names and top not in allowed:
                         offenders.append(f"{path.name}: {module}")
     assert not offenders, f"imports of undeclared packages: {offenders}"
+
+
+def test_an_update_from_the_tray_restarts_the_service_in_one_queued_step(sh: str):
+    """The tray is the systemd service's own process and the installer is its child.
+    Quitting the tray and then asking systemd to start the service again made each wait
+    for the other until the 90-second stop timeout, with no tray icon in between."""
+    code = "\n".join(line for line in sh.splitlines() if not line.lstrip().startswith("#"))
+    assert "systemctl --user show -p MainPID --value tintaview.service" in code
+    assert '[ "$RUNNING_PID" = "$SERVICE_PID" ]' in code
+    assert "systemctl --user --no-block restart tintaview.service" in code
+    # The early stop is skipped in that case, and only in that case.
+    stop = code[code.index("RESTART_AS_SERVICE=0"):code.index("Skipping the setup wizard")]
+    assert stop.index("RESTART_AS_SERVICE=1") < stop.index("restart._stop(pid, cfg)")
+    assert 'elif [ -n "$RUNNING_PID" ]; then' in stop

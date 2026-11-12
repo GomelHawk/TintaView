@@ -31,10 +31,23 @@ def copyright_years(today: datetime.date | None = None) -> str:
     return f"{FIRST_COPYRIGHT_YEAR}-{year}"
 
 
+#: The open About window, kept so it is not garbage-collected while shown and so a
+#: second click brings it forward instead of opening another.
+_about_dialog: QtWidgets.QDialog | None = None
+
+
 def show_about() -> None:
-    """The About box: the mark, the version, the copyright line. Modal, and modal is
-    right here — it is a dead-end window the user opened on purpose."""
+    """The About box: the mark, the version, the copyright line. A plain window, not a
+    modal dialog: a modal one blocked the usage panel and every other window of the app
+    for as long as it stayed open."""
     from tintaview import __version__
+
+    global _about_dialog
+    if _about_dialog is not None:
+        _about_dialog.show()
+        _about_dialog.raise_()
+        _about_dialog.activateWindow()
+        return
 
     dialog = QtWidgets.QDialog(None)
     dialog.setWindowTitle(t("tray.about.title"))
@@ -65,7 +78,16 @@ def show_about() -> None:
     layout.addWidget(buttons)
     layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
 
-    dialog.exec()
+    def _closed(_result: int) -> None:
+        global _about_dialog
+        _about_dialog = None
+        dialog.deleteLater()
+
+    dialog.finished.connect(_closed)
+    _about_dialog = dialog
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
 
 
 class DoctorReportDialog(QtWidgets.QDialog):

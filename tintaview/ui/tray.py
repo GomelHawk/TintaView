@@ -187,6 +187,8 @@ class TrayApp(QtCore.QObject):
         self._hook_worker.missing_ready.connect(self._on_hooks_missing)
         self._doctor_worker.report_ready.connect(self._show_doctor_report)
         self._doctor_dialog: DoctorReportDialog | None = None
+        #: The open settings window, or None — it is a window now, not a blocking dialog.
+        self._settings_dialog: Any = None
 
         #: One engine rebuild at a time — see `_refresh_lighting`. The thread is kept so
         #: tests can join it; nothing in the app waits on it.
@@ -259,6 +261,36 @@ class TrayApp(QtCore.QObject):
         self._hook_worker.fetch()
         if cfg.update.check:
             self._updates.check_at_startup()
+        self._announce_new_version()
+
+    def _announce_new_version(self) -> None:
+        """Say so, once, when this is the first start of a different version.
+
+        An update ends with the installer restarting the tray, so the process that
+        showed "Installing the update…" is gone by the time it is done — and nothing
+        told the user it had finished. The version last run is kept in a one-line file
+        beside the config; no file means a first install, which needs no announcement.
+        Never fatal: a tray that cannot write the file still starts.
+        """
+        from tintaview import __version__
+        from tintaview.core.config import config_dir
+        from tintaview.core.fsutil import atomic_write
+
+        marker = config_dir() / "last-version"
+        try:
+            previous = marker.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            previous = ""
+        try:
+            if previous != __version__:
+                atomic_write(marker, __version__ + "\n")
+        except OSError:
+            log.debug("could not record the running version", exc_info=True)
+        if previous and previous != __version__:
+            self.tray.showMessage(
+                "TintaView", t("tray.update.done", version=__version__),
+                QtWidgets.QSystemTrayIcon.Information, 10000,
+            )
 
     # --- menu -------------------------------------------------------------
 
@@ -468,16 +500,42 @@ class TrayApp(QtCore.QObject):
         """
         from tintaview.ui.settings_dialog import SettingsDialog
 
+        if self._settings_dialog is not None:
+            # Already open: bring it forward instead of opening a second copy.
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
         try:
             dialog = SettingsDialog(self._cfg)
-            accepted = dialog.exec() == QtWidgets.QDialog.Accepted
-            if accepted:
+            # Shown, not `exec()`-ed: a modal dialog blocks every other window of the
+            # app, so with Settings open the usage panel, About and the diagnostics
+            # report could not be opened at all.
+            dialog.setModal(False)
+            dialog.finished.connect(lambda result, d=dialog: self._on_settings_closed(d, result))
+            self._settings_dialog = dialog
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception:
+            self._settings_dialog = None
+            log.exception("could not open the settings dialog")
+            QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.settings.open_failed"))
+
+    def _on_settings_closed(self, dialog: Any, result: int) -> None:
+        """The settings window was closed — apply what it holds, then hand off to the
+        wizard if it asked for one (in that order; see `_open_settings`)."""
+        self._settings_dialog = None
+        try:
+            if result == QtWidgets.QDialog.Accepted:
                 self._apply_settings(dialog.result_cfg)
             if dialog.launch_wizard:
                 console_setup.run_console_setup()
         except Exception:
-            log.exception("could not open the settings dialog")
+            log.exception("could not apply the settings")
             QtWidgets.QMessageBox.warning(None, "TintaView", t("tray.settings.open_failed"))
+        finally:
+            dialog.deleteLater()
 
     def _apply_settings(self, new_cfg: Config) -> None:
         """Push a saved `SettingsDialog` result into the live config and refresh

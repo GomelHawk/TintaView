@@ -51,6 +51,7 @@
   "tray.update.failed": "Обновление не завершилось. Запустите `tintaview update` в терминале, чтобы увидеть причину.",
   "tray.update.installing": "Установка обновления. TintaView закроется и вернётся сам. Это может занять несколько минут — всё работает, ничего делать не нужно.",
   "tray.update.installed": "Обновление установлено. Перезапустите TintaView, чтобы использовать новую версию.",
+  "tray.update.done": "TintaView обновлён до версии {version}.",
   "tray.diagnostics.title": "Диагностика TintaView",
   "tray.diagnostics.running": "Выполняется диагностика, это может занять несколько секунд…",
   "tray.diagnostics.failed": "Не удалось запустить диагностику. Выполните `tintaview doctor` в терминале.",

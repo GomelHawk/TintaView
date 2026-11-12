@@ -235,6 +235,13 @@ Related invariant, in `core/config.py`: `dumps()` writes an `[agents.X]` table f
 click with no diff, and that table holds values the user can't re-derive (a WSL-split
 UNC `home`, a hand-picked `state_db`/`quota_path`).
 
+**No window of the tray is application-modal.** Settings and About are shown with `show()`,
+never `exec()`: a modal dialog blocks every other window of the process, so with Settings open
+the usage panel, About and the diagnostics report could not be opened. Settings applies its
+result from its `finished` signal (`TrayApp._on_settings_closed`); a second click brings the
+open window forward. The small yes/no prompts (`QMessageBox.question`) stay modal — they are
+questions, answered in a second.
+
 ## Core contracts
 
 These are **on-disk / on-the-wire contracts**. They appear in URLs baked into every already
@@ -1174,6 +1181,23 @@ Two traps both installers encode (the first is Windows-only):
   `graphical-session.target` is active), `launchctl kickstart -k gui/<uid>/com.tintaview.app`
   on macOS. Windows' autostart is a Run key, not a service, so there is nothing to start
   from outside the session; it keeps the plain launch.
+- **An update started from the tray restarts the service in one queued step.** There the
+  tray is the systemd unit's own process and `install.sh` is its child — in the same control
+  group. Quitting the tray first and then running `systemctl restart` made each wait for the
+  other: systemd would not call the unit stopped while the script lived, and the script was
+  waiting for the restart. It ended at the 90-second stop timeout, with no tray icon and
+  nothing on screen (reproduced with a stand-in unit; the fix restarted it in 50 ms). So when
+  no wizard will run and the running tray's pid is the unit's `MainPID`, the early stop is
+  skipped — the icon stays up during the install — and the script ends with
+  `systemctl --user --no-block restart`. `--no-block` is load-bearing, and so is ignoring that
+  command's exit status: systemd ends the script as part of the restart. Every other case
+  (a terminal install, a tray started from the menu) keeps stop → wizard → start.
+  The updater also starts the installer in its own session (`start_new_session=True`).
+- **The first start of a different version says so** ("TintaView was updated to version …",
+  `TrayApp._announce_new_version`, from a one-line `last-version` file beside the config). The
+  process that showed "Installing the update…" is gone by the time the update is done, so
+  without this nothing ever told the user it had finished. No file means a first install:
+  silent.
 - **The Linux menu icon is a named theme icon** (`~/.local/share/icons/hicolor/256x256/apps/
   tintaview.png`, `Icon=tintaview`). With a file path in `Icon=`, GNOME Shell kept showing its
   cached picture after the path changed — measured on the maintainer's Ubuntu VM.

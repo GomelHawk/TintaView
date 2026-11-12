@@ -50,6 +50,7 @@
   "tray.update.failed": "La actualización no se completó. Ejecuta `tintaview update` en un terminal para ver por qué.",
   "tray.update.installing": "Instalando la actualización. TintaView se cerrará y volverá solo. Puede tardar varios minutos: está funcionando, no tienes que hacer nada.",
   "tray.update.installed": "La actualización está instalada. Reinicia TintaView para usar la nueva versión.",
+  "tray.update.done": "TintaView se ha actualizado a la versión {version}.",
   "tray.diagnostics.title": "Diagnóstico de TintaView",
   "tray.diagnostics.running": "Ejecutando el diagnóstico; puede tardar unos segundos…",
   "tray.diagnostics.failed": "No se pudo ejecutar el diagnóstico. Ejecuta `tintaview doctor` en una terminal.",

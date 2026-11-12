@@ -404,7 +404,10 @@ def _update_posix(version: str, assets: list[dict[str, Any]]) -> int:
         # No wizard on an update, as `-Silent` on Windows: the config already exists, and
         # an update started from the tray has no terminal to run it in.
         env = {**os.environ, "TINTAVIEW_NO_WIZARD": "1"}
-        result = subprocess.run(argv, check=False, env=env)
+        # Its own session: the installer restarts the tray that started it, and must not
+        # be taken down with the tray's process group when that happens (launchd ends a
+        # job's whole group; a terminal's Ctrl+C reaches it too).
+        result = subprocess.run(argv, check=False, env=env, start_new_session=True)
     except OSError as exc:
         print(f"Could not run the install script: {exc}")
         return 1

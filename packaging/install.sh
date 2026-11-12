@@ -749,8 +749,35 @@ fi
 # looked like it had changed nothing; stopped *after* the wizard, the wizard's own restart
 # brought the old tray back first and it was started twice. Graceful /quit, so the lights
 # are handed back.
+#
+# One exception, and it is the update started from the tray itself. There the running
+# tray is the systemd service's own process and this script is its child — part of the
+# same service. Telling it to quit here made systemd wait for *this script* before it
+# would call the service stopped, while this script went on to ask systemd to start the
+# service again: each waited for the other until systemd's stop timeout (90 s), with no
+# tray icon and nothing on screen (measured with a stand-in service). So when no wizard
+# will run and the running tray is the service's process, it is left running — icon and
+# all — and replaced in one `systemctl restart` at the very end.
+WIZARD_WILL_RUN=0
+if [ "$WIZARD" -eq 1 ] && ( : </dev/tty ) 2>/dev/null; then
+    WIZARD_WILL_RUN=1
+fi
+RESTART_AS_SERVICE=0
 if [ "$HEADLESS" -eq 0 ]; then
-    "$VENV_PY" -I -c "
+    RUNNING_PID=$("$VENV_PY" -I -c "
+from tintaview.core.config import load
+from tintaview.install import restart
+print(restart.running_pid(load()) or '')
+" 2>/dev/null || true)
+    SERVICE_PID=""
+    if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
+        SERVICE_PID=$(systemctl --user show -p MainPID --value tintaview.service 2>/dev/null || true)
+    fi
+    if [ "$WIZARD_WILL_RUN" -eq 0 ] && [ -n "$RUNNING_PID" ] \
+            && [ "$RUNNING_PID" = "$SERVICE_PID" ]; then
+        RESTART_AS_SERVICE=1
+    elif [ -n "$RUNNING_PID" ]; then
+        "$VENV_PY" -I -c "
 import sys
 from tintaview.core.config import load
 from tintaview.install import restart
@@ -758,7 +785,8 @@ cfg = load()
 pid = restart.running_pid(cfg)
 sys.exit(0 if pid is None or restart._stop(pid, cfg) else 1)
 " >/dev/null 2>&1 \
-        || warn "Could not stop the running $APP_NAME; quit it from its menu and start it again."
+            || warn "Could not stop the running $APP_NAME; quit it from its menu and start it again."
+    fi
 fi
 
 # --------------------------------------------------------------------------- wizard
@@ -770,7 +798,7 @@ fi
 # first install it did not -- "tintaview: command not found" right after installing.
 if [ "$WIZARD" -eq 0 ]; then
     info "Skipping the setup wizard (--no-wizard)"
-elif ( : </dev/tty ) 2>/dev/null; then
+elif [ "$WIZARD_WILL_RUN" -eq 1 ]; then
     info "Launching the setup wizard"
     "$LAUNCHER" setup </dev/tty \
         || warn "The setup wizard exited with an error. Re-run it any time with: $LAUNCHER setup"
@@ -787,7 +815,16 @@ fi
 # macOS (`launchctl kickstart` in the gui/<uid> domain), the same units autostart writes.
 MAC_AGENT_PLIST="$HOME/Library/LaunchAgents/com.tintaview.app.plist"
 if [ "$HEADLESS" -eq 0 ]; then
-    if [ "$(uname -s)" = "Linux" ] && [ -f "$SYSTEMD_UNIT_PATH" ] \
+    if [ "$RESTART_AS_SERVICE" -eq 1 ]; then
+        # Queued, not waited for: when this script is part of the service (see "stop"
+        # above), systemd stops the service by ending this script too, so waiting here
+        # would be waiting for ourselves. systemd finishes the restart on its own.
+        info "Restarting $APP_NAME"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        # No warning on failure: ending this script is part of the restart, so the
+        # command itself is usually terminated before it can report anything.
+        systemctl --user --no-block restart tintaview.service >/dev/null 2>&1 || true
+    elif [ "$(uname -s)" = "Linux" ] && [ -f "$SYSTEMD_UNIT_PATH" ] \
             && systemctl --user is-active --quiet graphical-session.target 2>/dev/null; then
         info "Starting $APP_NAME in your desktop session"
         systemctl --user daemon-reload >/dev/null 2>&1 || true
