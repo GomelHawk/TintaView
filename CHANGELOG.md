@@ -4,6 +4,27 @@ What changed for people using TintaView, newest first. Each version's section is
 text of its [GitHub Release](https://github.com/GomelHawk/TintaView/releases). Releases
 before 0.5.0 are described only there.
 
+## 1.1.0 — 2026-11-12
+
+- **Linux and macOS now install the way Windows does.** The installer works on a stock Ubuntu
+  (if a Python package is missing it names it, and repairs a failed earlier attempt), adds
+  TintaView to your applications menu (Linux) or `~/Applications` (macOS) with its icon, runs
+  the setup wizard, and starts TintaView. Running it again updates and restarts TintaView,
+  also when you install over SSH. New `--no-wizard` option to skip the wizard.
+- **A left click on the tray icon opens the usage panel on Ubuntu and macOS too**, right next
+  to the icon; a right click opens the menu, as on Windows. On Ubuntu this needs a few X11
+  libraries — the installer offers to install them (`apt`, `dnf` or `pacman`). Without them a
+  double click on the icon opens the panel.
+- **Settings… → Open Full Setup Wizard** now opens a terminal window on Linux and macOS, and
+  no longer closes TintaView.
+- **The network line shows the city on more systems.** On some machines it showed only the
+  country.
+- **A waiting question is no longer lost** when an agent sends several events in quick
+  succession, so the lights reliably turn red when an agent needs you.
+
+On Ubuntu, to get the left click: run the install command once more in a terminal and accept
+the X11 libraries it offers.
+
 ## 1.0.0 — 2026-11-03
 
 - **The usage panel's network line now shows your city too**, when it can be worked out: for
