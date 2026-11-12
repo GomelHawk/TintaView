@@ -1337,7 +1337,30 @@ class TrayApp(QtCore.QObject):
         # Positioning (and re-clamping on later resize) lives on Flyout itself now —
         # see `Flyout.show_near` — since it has to run again on every collapse/expand,
         # not just here at initial open.
-        self.flyout.show_near(QtGui.QCursor.pos())
+        self.flyout.show_near(self._flyout_anchor())
+
+    def _flyout_anchor(self) -> QtCore.QPoint:
+        """Where the panel opens: at the tray icon itself, on every OS, when Qt knows
+        where it is — the cursor only when it doesn't.
+
+        The cursor was the anchor everywhere, and on Windows it is exact. On GNOME it is
+        not: the tray runs on XWayland there (see `_use_legacy_tray`), the top bar is
+        GNOME Shell's own Wayland surface, and XWayland's pointer position only moves
+        while the pointer is over an X11 window — so `QCursor.pos()` was wherever the
+        pointer last crossed one, and the panel opened somewhere different every time.
+        Qt knows the icon's rectangle for a Windows notification icon, a macOS status
+        item and an X11 tray icon; only a D-Bus (StatusNotifierItem) icon reports an
+        empty one, and that keeps the cursor. The edge nearest the screen's middle is
+        the anchor, so the card opens above a bottom taskbar and below a top bar.
+        """
+        rect = self.tray.geometry()
+        if rect.isValid() and not rect.isEmpty():
+            screen = QtGui.QGuiApplication.screenAt(rect.center())
+            if screen is not None:
+                bottom_half = rect.center().y() > screen.geometry().center().y()
+                y = rect.top() if bottom_half else rect.bottom()
+                return QtCore.QPoint(rect.center().x(), y)
+        return QtGui.QCursor.pos()
 
 
 def _register_windows_identity() -> None:

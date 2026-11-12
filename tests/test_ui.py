@@ -3337,3 +3337,44 @@ def test_macos_right_click_pops_the_menu(mac_tray, monkeypatch):
 def test_other_platforms_keep_the_attached_menu(tray):
     app_instance, _ = tray
     assert app_instance.tray.contextMenu() is app_instance._menu
+
+
+# --------------------------------------------------------------------------- panel anchor
+
+
+def _screen_rect() -> QtCore.QRect:
+    return QtGui.QGuiApplication.primaryScreen().geometry()
+
+
+def test_the_panel_opens_at_a_bottom_taskbar_icon_not_the_cursor(tray, monkeypatch):
+    """The cursor is exact on Windows but stale on GNOME, where the tray runs on XWayland
+    and the top bar is a Wayland surface: the panel opened somewhere new every time."""
+    app_instance, _ = tray
+    screen = _screen_rect()
+    icon = QtCore.QRect(screen.right() - 40, screen.bottom() - 30, 24, 24)
+    monkeypatch.setattr(app_instance.tray, "geometry", lambda: icon)
+    monkeypatch.setattr(tray_mod.QtGui.QCursor, "pos", staticmethod(lambda: QtCore.QPoint(5, 5)))
+    assert app_instance._flyout_anchor() == QtCore.QPoint(icon.center().x(), icon.top())
+
+
+def test_the_panel_opens_below_a_top_bar_icon(tray, monkeypatch):
+    app_instance, _ = tray
+    screen = _screen_rect()
+    icon = QtCore.QRect(screen.right() - 60, screen.top() + 2, 24, 24)
+    monkeypatch.setattr(app_instance.tray, "geometry", lambda: icon)
+    anchor = app_instance._flyout_anchor()
+    assert anchor == QtCore.QPoint(icon.center().x(), icon.bottom())
+    app_instance.flyout.show_near(anchor)
+    try:
+        assert app_instance.flyout.pos().y() > icon.bottom()  # under the bar, not off-screen
+    finally:
+        app_instance.flyout.hide()
+
+
+def test_an_icon_with_no_known_position_keeps_the_cursor(tray, monkeypatch):
+    """A D-Bus (StatusNotifierItem) icon reports an empty rectangle."""
+    app_instance, _ = tray
+    monkeypatch.setattr(app_instance.tray, "geometry", lambda: QtCore.QRect())
+    monkeypatch.setattr(tray_mod.QtGui.QCursor, "pos",
+                        staticmethod(lambda: QtCore.QPoint(123, 456)))
+    assert app_instance._flyout_anchor() == QtCore.QPoint(123, 456)
